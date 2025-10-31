@@ -1,0 +1,82 @@
+# docker-compose.yml (Corrected Best Practice)
+services:
+
+  # Service 1: The TTS Engine (Generates Audio)
+  tts-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm
+    image: coqui-tts-rocm:dev
+    container_name: coqui-tts-service
+    devices:
+      - /dev/dxg:/dev/dxg
+    group_add:
+      - video
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      # Mount code
+      - ./:/workspace:rw
+      # Mount models
+      - ./models:/root/.local/share/tts
+      # Mount outputs (so both services can see it)
+      - ./outputs:/workspace/outputs
+      - ./pdf_input:/workspace/pdf_input:ro
+      - ./pdf_cache:/workspace/pdf_cache:rw
+    environment:
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - ROCR_VISIBLE_DEVICES=0
+      - HIP_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    # Command to run the actual Coqui TTS server on port 5002
+    entrypoint: ["python3"]
+    command: ["/workspace/TTS/server/server.py", "--model_name", "tts_models/en/ljspeech/tacotron2-DDC", "--port", "5002"]
+    ports:
+      - "5002:5002"
+    stdin_open: false
+    tty: false
+
+  # Service 2: The Audio Player (Serves Web UI & Files)
+  audio-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm
+    image: coqui-tts-rocm:dev
+    container_name: coqui-audio-server
+    # No GPU devices needed, this service only serves files
+    volumes:
+      # Mount outputs (so it can read what the TTS service creates)
+      - ./outputs:/workspace/outputs
+      # Mount the app code so it can find audio_server.py
+      - ./:/workspace:rw
+      - ./pdf_input:/workspace/pdf_input:ro
+      - ./pdf_cache:/workspace/pdf_cache:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Command to run the FastAPI server on port 8000
+    entrypoint: ["uvicorn"]
+    command: ["my_app.audio_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    stdin_open: false
+    tty: false
+
+  # Service 3: The PDF Processor (Parses PDFs, Manages Audio Jobs)
+  pdf-service:
+      build:
+        context: .
+        dockerfile: Dockerfile.pdf-service
+      container_name: coqui-pdf-service
+      volumes:
+        - ./outputs:/workspace/outputs
+        - ./pdf_input:/workspace/pdf_input:ro
+        - ./pdf_cache:/workspace/pdf_cache:rw
+      environment:
+        - PYTHONUNBUFFERED=1
+      entrypoint: ["uvicorn"]
+      command: ["my_app.pdf_processor.process:app", "--host", "0.0.0.0", "--port", "8001"]
+      ports:
+        - "8001:8001"
+      stdin_open: false
+      tty: false
+

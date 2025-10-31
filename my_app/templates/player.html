@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Garden TTS Player</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #ffeaa7 0%, #dfe6e9 100%);
+            padding: 20px;
+            margin: 0;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #74b9ff;
+            text-align: center;
+            margin-bottom: 30px;
+            font-weight: 300;
+        }
+
+        .player-section {
+            background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
+            padding: 20px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+        }
+
+        audio {
+            width: 100%;
+            margin: 20px 0;
+        }
+
+        .controls-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .control-group {
+            background: rgba(255, 255, 255, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+        }
+
+        label {
+            display: block;
+            color: #6c5ce7;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #ffd3e1;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #74b9ff;
+            cursor: pointer;
+        }
+
+        .button-row {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        button {
+            background: linear-gradient(135deg, #ffd3e1 0%, #ffb6c1 100%);
+            border: none;
+            padding: 10px 20px;
+            border-radius: 25px;
+            color: #6c5ce7;
+            cursor: pointer;
+            font-size: 14px;
+            transition: transform 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .file-list {
+            background: #f0f3ff;
+            padding: 20px;
+            border-radius: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .file-item {
+            background: white;
+            padding: 12px;
+            margin: 8px 0;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            transition: background 0.2s;
+        }
+
+        .file-item:hover {
+            background: #dfe6e9;
+        }
+
+        .file-item.active {
+            background: #a8e6cf;
+            color: #2d3436;
+        }
+
+        .value-display {
+            color: #00b894;
+            font-weight: bold;
+        }
+
+        .time-display {
+            text-align: center;
+            color: #6c5ce7;
+            font-size: 18px;
+            margin: 10px 0;
+        }
+
+        #now-playing {
+            text-align: center;
+            color: #74b9ff;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Garden TTS Audio Player</h1>
+
+        <div class="player-section">
+            <div id="now-playing">Now Playing: <span id="current-file">None</span></div>
+
+            <audio id="player" controls></audio>
+
+            <div class="time-display">
+                <span id="time-display">0:00 / 0:00</span>
+            </div>
+
+            <div class="controls-grid">
+                <div class="control-group">
+                    <label>Speed: <span class="value-display" id="speed-value">1.0x</span></label>
+                    <input type="range" id="speed" min="0.5" max="2.0" value="1.0" step="0.05">
+                </div>
+
+                <div class="control-group">
+                    <label>Volume: <span class="value-display" id="volume-value">100%</span></label>
+                    <input type="range" id="volume" min="0" max="100" value="100" step="5">
+                </div>
+
+                <div class="control-group">
+                    <label>Seek Position</label>
+                    <input type="range" id="seek" min="0" max="100" value="0" step="0.1">
+                </div>
+
+                <div class="control-group">
+                    <label>Loop: <span class="value-display" id="loop-status">Off</span></label>
+                    <button id="loop-button" style="width: 100%">Toggle Loop</button>
+                </div>
+            </div>
+
+            <div class="button-row">
+                <button id="skip-back-10">Back 10s</button>
+                <button id="skip-back-5">Back 5s</button>
+                <button id="play-pause-button">Play/Pause</button>
+                <button id="skip-forward-5">Forward 5s</button>
+                <button id="skip-forward-10">Forward 10s</button>
+            </div>
+
+            <div class="button-row" style="margin-top: 10px;">
+                <button id="reset-settings-button">Reset Settings</button>
+                <button id="download-button">Download File</button>
+                <button id="refresh-button">Refresh List</button>
+            </div>
+
+            <div class="control-group">
+                <label for="source-select">Audio Source:</label>
+                <select id="source-select">
+                    <option value="">Loading sources...</option>
+                </select>
+            </div>
+
+            <hr> <div id="files-container">
+                <h3>Available Files (<span id="current-source-label">...</span>)</h3>
+                <div id="files">
+                    </div>
+                <button id="refresh-button">Refresh List</button>
+            </div>
+        </div>
+
+        <div id="error-log" style="color: #d63031; margin-top: 10px;"></div>
+    </div>
+
+    <script src="/static/event-emitter.js"></script>
+    <script src="/static/audio-backend.js"></script>
+    <script src="/static/native-audio-backend.js"></script> <script src="/static/player.js"></script>
+
+    <!-- TEMPORARY: Add to player.html <head> for testing -->
+    <!-- Remove this entire block after Step 0B.4 verification -->
+    <script>
+    // Wait for DOM ready
+    document.addEventListener('DOMContentLoaded', async () => {
+      console.log('=== NativeAudioBackend Isolation Test ===');
+
+      // Create backend instance
+      const backend = new NativeAudioBackend();
+      console.log('✓ Backend instantiated');
+
+      // Subscribe to all events
+      backend.on('loading', () => {
+        console.log('✓ Event: LOADING');
+      });
+
+      backend.on('ready', (data) => {
+        console.log('✓ Event: READY', data);
+        console.log('  Duration:', data.duration, 'seconds');
+      });
+
+      backend.on('play', () => {
+        console.log('✓ Event: PLAY');
+      });
+
+      backend.on('pause', () => {
+        console.log('✓ Event: PAUSE');
+      });
+
+      backend.on('timeupdate', (data) => {
+        // Log every 2 seconds to avoid console spam
+        const time = data.currentTime;
+        if (Math.floor(time) % 2 === 0 && Math.floor(time * 10) % 10 === 0) {
+          console.log('  TIMEUPDATE:', time.toFixed(1), 'seconds');
+        }
+      });
+
+      backend.on('finish', () => {
+        console.log('✓ Event: FINISH');
+      });
+
+      backend.on('seeking', (data) => {
+        console.log('✓ Event: SEEKING to', data.currentTime.toFixed(1));
+      });
+
+      backend.on('error', (data) => {
+        console.error('✗ Event: ERROR', data.error.message);
+      });
+
+      // Initialize backend
+      try {
+        await backend.init(document.body, { audioElementId: 'player' });
+        console.log('✓ Backend initialized');
+      } catch (error) {
+        console.error('✗ Init failed:', error.message);
+        return;
+      }
+
+      // Load test audio
+      const testAudioUrl = '/api/audiobook/Anatomy_of_the_Somatosensory_System/play/chunk_0002_p1.wav';
+
+      try {
+        await backend.load(testAudioUrl);
+        console.log('✓ Load initiated');
+      } catch (error) {
+        console.error('✗ Load failed:', error.message);
+        return;
+      }
+
+      // Wait for ready event, then test controls
+      backend.on('ready', async () => {
+        console.log('\n--- Testing Controls ---');
+
+        // Test play
+        console.log('Testing play()...');
+        await backend.play();
+
+        // Test pause after 2 seconds
+        setTimeout(() => {
+          console.log('Testing pause()...');
+          backend.pause();
+        }, 2000);
+
+        // Test seek after 3 seconds
+        setTimeout(() => {
+          console.log('Testing setTime(5)...');
+          backend.setTime(5);
+        }, 3000);
+
+        // Test speed after 4 seconds
+        setTimeout(() => {
+          console.log('Testing setPlaybackRate(1.5)...');
+          backend.setPlaybackRate(1.5);
+        }, 4000);
+
+        // Test volume after 5 seconds
+        setTimeout(() => {
+          console.log('Testing setVolume(0.5)...');
+          backend.setVolume(0.5);
+        }, 5000);
+
+        // Verify state getters
+        setTimeout(() => {
+          console.log('\n--- State Getters ---');
+          console.log('getCurrentTime():', backend.getCurrentTime().toFixed(2));
+          console.log('getDuration():', backend.getDuration().toFixed(2));
+          console.log('isPlaying():', backend.isPlaying());
+        }, 6000);
+
+        console.log('\nTest sequence initiated. Watch console for results.');
+      });
+    });
+    </script>
+</body>
+</html>

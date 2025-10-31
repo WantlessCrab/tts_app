@@ -1,0 +1,90 @@
+# Dockerfile.rocm (Final v10 - Integrated Best Practices)
+FROM rocm/dev-ubuntu-22.04:6.4.2-complete
+
+# Use /workspace consistently
+WORKDIR /workspace
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    gcc g++ make \
+    git \
+    python3-pip python3-wheel python3-setuptools \
+    espeak-ng libsndfile1-dev ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify Python version (Good addition)
+RUN python3 --version && python3 -c "import sys; assert sys.version_info[:2] == (3, 10), 'Python 3.10 required for cp310 wheels'"
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip wheel setuptools
+
+# Download exact AMD wheels
+RUN wget https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.2/torch-2.6.0%2Brocm6.4.2.git76481f7c-cp310-cp310-linux_x86_64.whl && \
+    wget https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.2/torchvision-0.21.0%2Brocm6.4.2.git4040d51f-cp310-cp310-linux_x86_64.whl && \
+    wget https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.2/torchaudio-2.6.0%2Brocm6.4.2.gitd8831425-cp310-cp310-linux_x86_64.whl && \
+    wget https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4.2/pytorch_triton_rocm-3.2.0%2Brocm6.4.2.git7e948ebf-cp310-cp310-linux_x86_64.whl
+
+# Install downloaded wheels
+RUN python3 -m pip install torch-2.6.0+rocm6.4.2*.whl torchvision-0.21.0+rocm6.4.2*.whl torchaudio-2.6.0+rocm6.4.2*.whl pytorch_triton_rocm-3.2.0+rocm6.4.2*.whl
+
+# Critical WSL2 fix
+RUN rm $(python3 -m pip show torch | grep Location | awk '{print $2}')/torch/lib/libhsa-runtime64.so*
+
+# --- Careful Dependency Installation ---
+# Copy clean requirements (excludes torch, torchaudio, transformers, trainer, encodec)
+COPY requirements-rocm-clean.txt .
+
+# Install "safe" dependencies first (using simplified logic from v7)
+RUN python3 -m pip install -r requirements-rocm-clean.txt
+
+# Install transformers without letting it pull torch, then manually add its deps
+RUN python3 -m pip install transformers>=4.33.0 --no-deps && \
+    python3 -m pip install tokenizers huggingface-hub safetensors regex requests filelock typing-extensions
+
+# Install trainer and encodec without letting them pull torch
+RUN python3 -m pip install trainer>=0.0.36 --no-deps
+RUN python3 -m pip install encodec>=0.1.1 --no-deps
+# --- End Dependency Installation ---
+
+# Clear pip cache and remove downloaded wheels
+RUN rm -rf /root/.cache/pip && rm *.whl
+
+# CRITICAL: Full verification (Excellent addition)
+RUN python3 -c "import torch; assert '2.6.0+rocm6.4.2' in torch.__version__, f'ERROR: Wrong torch version installed: {torch.__version__}'; print(f'✓ PyTorch: {torch.__version__}')" && \
+    python3 -m pip list | grep -i nvidia && (echo "ERROR: NVIDIA packages found!" && exit 1) || echo "✓ No NVIDIA contamination"
+
+# Copy application code AFTER dependencies are fully installed
+COPY . /workspace/
+COPY my_app /workspace/my_app
+
+# Copy ALL requirements files needed by TTS setup process
+# Use clean version for requirements.txt, originals/placeholders for others
+COPY requirements-rocm-clean.txt requirements.txt
+COPY requirements.dev.txt .
+COPY requirements.ja.txt .
+COPY requirements.notebooks.txt .
+
+# Install TTS library itself (NO --no-deps)
+RUN python3 -m pip install -e .
+
+# Install FastAPI dependencies for audio server
+RUN python3 -m pip install fastapi uvicorn python-multipart aiofiles httpx
+
+
+# Set ROCm environment variables
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+    ROCR_VISIBLE_DEVICES=0 \
+    HIP_VISIBLE_DEVICES=0 \
+    PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512 \
+    HIP_LAUNCH_BLOCKING=0 \
+    MIOPEN_ENABLE_LOGGING=0 \
+    MIOPEN_ENABLE_LOGGING_CMD=0
+
+# Create directories (Consistent with WORKDIR)
+RUN mkdir -p /root/.local/share/tts /workspace/outputs
+
+EXPOSE 5002
+# Use standard TTS entrypoint
+ENTRYPOINT ["tts"]
+CMD ["--help"]

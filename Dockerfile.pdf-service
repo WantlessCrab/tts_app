@@ -1,0 +1,25 @@
+# Dockerfile.pdf-service - ZERO GPU CONTAMINATION
+FROM python:3.10-slim
+
+WORKDIR /workspace
+
+# Only system deps for PDF processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ONLY packages pdf-processor actually needs
+RUN pip install --no-cache-dir \
+    fastapi==0.104.1 \
+    uvicorn==0.24.0 \
+    httpx==0.25.1 \
+    PyMuPDF==1.23.8 \
+    aiofiles==23.2.1
+
+# Copy ONLY pdf processor code
+COPY my_app/pdf_processor /workspace/my_app/pdf_processor
+
+EXPOSE 8001
+
+CMD ["uvicorn", "my_app.pdf_processor.process:app", "--host", "0.0.0.0", "--port", "8001"]

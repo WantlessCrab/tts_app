@@ -1,0 +1,83 @@
+# ========================================
+# KEEP: CORE & LOW-RISK DEPENDENCIES
+# ========================================
+# Purpose: Essential for base TTS function, audio processing, config, and basic language support.
+# Risk: Low risk of conflicting with ROCm PyTorch.
+
+numpy>=1.22.0,<2.0
+cython>=0.29.30
+scipy>=1.11.2
+soundfile>=0.12.0
+librosa>=0.10.0
+scikit-learn>=1.3.0
+numba>=0.57.0;python_version>="3.9"
+inflect>=5.6.0
+tqdm>=4.64.1
+anyascii>=0.3.0
+pyyaml>=6.0
+fsspec>=2023.6.0
+aiohttp>=3.8.1
+packaging>=23.1
+mutagen==1.47.0
+pysbd>=0.3.4       # For Inference
+coqpit>=0.0.16     # Coqui Config
+einops>=0.6.0      # Model Dependency (safe fallback)
+unidecode>=1.3.2   # Model Dependency (XTTS)
+num2words          # Model Dependency (XTTS)
+jieba              # Chinese (Lightweight)
+pypinyin           # Chinese (Lightweight)
+hangul_romanize    # Korean (Lightweight)
+jamo               # Korean (Lightweight)
+regex              # Utility (Often needed)
+typing-extensions  # Utility (Compatibility)
+filelock           # Utility (Often needed by other libs)
+requests           # Utility (Often needed by other libs)
+flask>=2.0.1
+pandas>=1.4,<2.0
+matplotlib>=3.7.0
+bangla
+bnnumerizer
+bnunicodenormalizer
+gruut==2.2.3
+PyMuPDF
+
+# ========================================
+# KEEP (Problematic - Handle Separately in Dockerfile)
+# ========================================
+# Purpose: Required for specific models (Transformers/XTTS, Bark) or training, but strictly depend on PyTorch.
+# Risk: High risk of causing pip to install incompatible CUDA PyTorch if not handled carefully.
+# Action: Install these individually in Dockerfile, often using --no-deps initially.
+
+transformers>=4.33.0
+# encodec>=0.1.1 # Needed for Bark model (Keep commented for initial build)
+# trainer>=0.0.36 # Needed ONLY for training (Keep commented for initial build)
+
+# ========================================
+# REMOVE (Optional / Non-Essential / High-Risk / Language Specific)
+# ========================================
+# Purpose: Used for web server examples, notebooks, visualization, training plotting, heavy language tools,
+#          or specific languages/extras not immediately needed.
+# Risk: Ranges from low (optional) to high (spacy/thinc). Removing maximizes initial build success.
+
+
+# --- Notebooks / Visualization / Training Plotting ---
+# umap-learn>=0.5.1
+# pandas>=1.4,<2.0
+# matplotlib>=3.7.0
+# pynndescent # Pulled in by umap-learn
+
+# --- Heavy / High-Risk Language / Phonemizer Components ---
+# nltk # Moved from KEEP
+# gruut==2.2.3 # Moved from KEEP (Base phonemizer)
+# spacy>=3 # Moved from KEEP (Known risk)
+# thinc==8.1.12 # Moved from KEEP (Spacy dep, known risk)
+
+# --- Other Specific Languages (Can be added back if needed) ---
+# g2pkk>=0.1.1 # Korean G2P (Moved from KEEP)
+# bangla
+# bnnumerizer
+# bnunicodenormalizer
+
+# --- Language Extras ---
+# gruut[de,es,fr] # Removed extras
+# spacy[ja]>=3 # Removed extras
