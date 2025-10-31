@@ -1,0 +1,1541 @@
+{
+  "metadata": {
+    "title": "Anatomy of the Somatosensory System",
+    "author": "",
+    "source_filename": "somatosensory.pdf",
+    "total_pages": 4
+  },
+  "book_id": "Anatomy_of_the_Somatosensory_System",
+  "processing": {
+    "total_chunks": 85,
+    "total_sentences": 118,
+    "total_estimated_duration_seconds": 517.9999999999998
+  },
+  "chunks": [
+    {
+      "chunk_id": 0,
+      "text": "Anatomy of the Somatosensory System",
+      "page": 1,
+      "block_index": 1,
+      "sentences": [
+        {
+          "global_index": 0,
+          "sentence_in_block": 0,
+          "text": "Anatomy of the Somatosensory System"
+        }
+      ],
+      "start_time": 0.0,
+      "duration_seconds": 2.5,
+      "end_time": 2.5
+    },
+    {
+      "chunk_id": 1,
+      "text": "FROM WIKIBOOKS1",
+      "page": 1,
+      "block_index": 2,
+      "sentences": [
+        {
+          "global_index": 1,
+          "sentence_in_block": 0,
+          "text": "FROM WIKIBOOKS1"
+        }
+      ],
+      "start_time": 2.5,
+      "duration_seconds": 1.0714285714285714,
+      "end_time": 3.571428571428571
+    },
+    {
+      "chunk_id": 2,
+      "text": "Our somatosensory system consists of sensors in the skin and sensors in our muscles, tendons, and joints. The receptors in the skin, the so called cutaneous receptors, tell us about temperature (thermoreceptors), pressure and surface texture (mechano receptors), and pain (nociceptors). The receptors in muscles and joints provide information about muscle length, muscle tension, and joint angles.",
+      "page": 1,
+      "block_index": 3,
+      "sentences": [
+        {
+          "global_index": 2,
+          "sentence_in_block": 0,
+          "text": "Our somatosensory system consists of sensors in the skin and sensors in our muscles, tendons, and joints."
+        },
+        {
+          "global_index": 3,
+          "sentence_in_block": 1,
+          "text": "The receptors in the skin, the so called cutaneous receptors, tell us about temperature (thermoreceptors), pressure and surface texture (mechano receptors), and pain (nociceptors)."
+        },
+        {
+          "global_index": 4,
+          "sentence_in_block": 2,
+          "text": "The receptors in muscles and joints provide information about muscle length, muscle tension, and joint angles."
+        }
+      ],
+      "start_time": 3.571428571428571,
+      "duration_seconds": 28.357142857142858,
+      "end_time": 31.92857142857143
+    },
+    {
+      "chunk_id": 3,
+      "text": "This is a sample document to showcase page-based formatting. It contains a chapter from a Wikibook called Sensory Systems. None of the content has been changed in this article, but some content has been removed.",
+      "page": 1,
+      "block_index": 4,
+      "sentences": [
+        {
+          "global_index": 5,
+          "sentence_in_block": 0,
+          "text": "This is a sample document to showcase page-based formatting."
+        },
+        {
+          "global_index": 6,
+          "sentence_in_block": 1,
+          "text": "It contains a chapter from a Wikibook called Sensory Systems."
+        },
+        {
+          "global_index": 7,
+          "sentence_in_block": 2,
+          "text": "None of the content has been changed in this article, but some content has been removed."
+        }
+      ],
+      "start_time": 31.92857142857143,
+      "duration_seconds": 15.071428571428571,
+      "end_time": 47.0
+    },
+    {
+      "chunk_id": 4,
+      "text": "Cutaneous receptors",
+      "page": 1,
+      "block_index": 5,
+      "sentences": [
+        {
+          "global_index": 8,
+          "sentence_in_block": 0,
+          "text": "Cutaneous receptors"
+        }
+      ],
+      "start_time": 47.0,
+      "duration_seconds": 1.3571428571428572,
+      "end_time": 48.357142857142854
+    },
+    {
+      "chunk_id": 5,
+      "text": "Sensory information from Meissner corpuscles and rapidly adapting afferents leads to adjustment of grip force when objects are lifted. These afferents respond with a brief burst of action potentials when objects move a small distance during the early stages of lifting. In response to",
+      "page": 1,
+      "block_index": 6,
+      "sentences": [
+        {
+          "global_index": 9,
+          "sentence_in_block": 0,
+          "text": "Sensory information from Meissner corpuscles and rapidly adapting afferents leads to adjustment of grip force when objects are lifted."
+        },
+        {
+          "global_index": 10,
+          "sentence_in_block": 1,
+          "text": "These afferents respond with a brief burst of action potentials when objects move a small distance during the early stages of lifting."
+        },
+        {
+          "global_index": 11,
+          "sentence_in_block": 2,
+          "text": "In response to"
+        }
+      ],
+      "start_time": 48.357142857142854,
+      "duration_seconds": 20.285714285714285,
+      "end_time": 68.64285714285714
+    },
+    {
+      "chunk_id": 6,
+      "text": "Hairy skin Glabrous skin",
+      "page": 1,
+      "block_index": 7,
+      "sentences": [
+        {
+          "global_index": 12,
+          "sentence_in_block": 0,
+          "text": "Hairy skin Glabrous skin"
+        }
+      ],
+      "start_time": 68.64285714285714,
+      "duration_seconds": 1.7142857142857142,
+      "end_time": 70.35714285714285
+    },
+    {
+      "chunk_id": 7,
+      "text": "Figure 1: Receptors in the hu",
+      "page": 1,
+      "block_index": 8,
+      "sentences": [
+        {
+          "global_index": 13,
+          "sentence_in_block": 0,
+          "text": "Figure 1: Receptors in the hu"
+        }
+      ],
+      "start_time": 70.35714285714285,
+      "duration_seconds": 2.0714285714285716,
+      "end_time": 72.42857142857142
+    },
+    {
+      "chunk_id": 8,
+      "text": "Papillary Ridges",
+      "page": 1,
+      "block_index": 9,
+      "sentences": [
+        {
+          "global_index": 14,
+          "sentence_in_block": 0,
+          "text": "Papillary Ridges"
+        }
+      ],
+      "start_time": 72.42857142857142,
+      "duration_seconds": 1.1428571428571428,
+      "end_time": 73.57142857142856
+    },
+    {
+      "chunk_id": 9,
+      "text": "Epidermis",
+      "page": 1,
+      "block_index": 10,
+      "sentences": [
+        {
+          "global_index": 15,
+          "sentence_in_block": 0,
+          "text": "Epidermis"
+        }
+      ],
+      "start_time": 73.57142857142856,
+      "duration_seconds": 0.6428571428571429,
+      "end_time": 74.2142857142857
+    },
+    {
+      "chunk_id": 10,
+      "text": "Septa",
+      "page": 1,
+      "block_index": 11,
+      "sentences": [
+        {
+          "global_index": 16,
+          "sentence_in_block": 0,
+          "text": "Septa"
+        }
+      ],
+      "start_time": 74.2142857142857,
+      "duration_seconds": 0.35714285714285715,
+      "end_time": 74.57142857142856
+    },
+    {
+      "chunk_id": 11,
+      "text": "Free nerve",
+      "page": 1,
+      "block_index": 12,
+      "sentences": [
+        {
+          "global_index": 17,
+          "sentence_in_block": 0,
+          "text": "Free nerve"
+        }
+      ],
+      "start_time": 74.57142857142856,
+      "duration_seconds": 0.7142857142857143,
+      "end_time": 75.28571428571426
+    },
+    {
+      "chunk_id": 12,
+      "text": "ending",
+      "page": 1,
+      "block_index": 13,
+      "sentences": [
+        {
+          "global_index": 18,
+          "sentence_in_block": 0,
+          "text": "ending"
+        }
+      ],
+      "start_time": 75.28571428571426,
+      "duration_seconds": 0.42857142857142855,
+      "end_time": 75.7142857142857
+    },
+    {
+      "chunk_id": 13,
+      "text": "Merkel\u2019s receptor",
+      "page": 1,
+      "block_index": 14,
+      "sentences": [
+        {
+          "global_index": 19,
+          "sentence_in_block": 0,
+          "text": "Merkel\u2019s receptor"
+        }
+      ],
+      "start_time": 75.7142857142857,
+      "duration_seconds": 1.2142857142857142,
+      "end_time": 76.9285714285714
+    },
+    {
+      "chunk_id": 14,
+      "text": "Meissner\u2019s corpuscle Sebaceous",
+      "page": 1,
+      "block_index": 15,
+      "sentences": [
+        {
+          "global_index": 20,
+          "sentence_in_block": 0,
+          "text": "Meissner\u2019s corpuscle Sebaceous"
+        }
+      ],
+      "start_time": 76.9285714285714,
+      "duration_seconds": 2.142857142857143,
+      "end_time": 79.07142857142854
+    },
+    {
+      "chunk_id": 15,
+      "text": "gland",
+      "page": 1,
+      "block_index": 16,
+      "sentences": [
+        {
+          "global_index": 21,
+          "sentence_in_block": 0,
+          "text": "gland"
+        }
+      ],
+      "start_time": 79.07142857142854,
+      "duration_seconds": 0.35714285714285715,
+      "end_time": 79.4285714285714
+    },
+    {
+      "chunk_id": 16,
+      "text": "Dermis",
+      "page": 1,
+      "block_index": 17,
+      "sentences": [
+        {
+          "global_index": 22,
+          "sentence_in_block": 0,
+          "text": "Dermis"
+        }
+      ],
+      "start_time": 79.4285714285714,
+      "duration_seconds": 0.42857142857142855,
+      "end_time": 79.85714285714283
+    },
+    {
+      "chunk_id": 17,
+      "text": "man skin: Mechanoreceptors can be free receptors or encapsulated. Examples for free receptors are the hair receptors at the roots of hairs. Encapsulated receptors are the Pacinian corpuscles and the receptors in the glabrous (hairless) skin: Meissner corpuscles, Ruffini corpuscles and Merkel\u2019s disks.",
+      "page": 1,
+      "block_index": 18,
+      "sentences": [
+        {
+          "global_index": 23,
+          "sentence_in_block": 0,
+          "text": "man skin: Mechanoreceptors can be free receptors or encapsulated."
+        },
+        {
+          "global_index": 24,
+          "sentence_in_block": 1,
+          "text": "Examples for free receptors are the hair receptors at the roots of hairs."
+        },
+        {
+          "global_index": 25,
+          "sentence_in_block": 2,
+          "text": "Encapsulated receptors are the Pacinian corpuscles and the receptors in the glabrous (hairless) skin: Meissner corpuscles, Ruffini corpuscles and Merkel\u2019s disks."
+        }
+      ],
+      "start_time": 79.85714285714283,
+      "duration_seconds": 21.5,
+      "end_time": 101.35714285714283
+    },
+    {
+      "chunk_id": 18,
+      "text": "Ruffini\u2019s  corpuscle",
+      "page": 1,
+      "block_index": 19,
+      "sentences": [
+        {
+          "global_index": 26,
+          "sentence_in_block": 0,
+          "text": "Ruffini\u2019s  corpuscle"
+        }
+      ],
+      "start_time": 101.35714285714283,
+      "duration_seconds": 1.4285714285714286,
+      "end_time": 102.78571428571426
+    },
+    {
+      "chunk_id": 19,
+      "text": "Hair receptor",
+      "page": 1,
+      "block_index": 20,
+      "sentences": [
+        {
+          "global_index": 27,
+          "sentence_in_block": 0,
+          "text": "Hair receptor"
+        }
+      ],
+      "start_time": 102.78571428571426,
+      "duration_seconds": 0.9285714285714286,
+      "end_time": 103.7142857142857
+    },
+    {
+      "chunk_id": 20,
+      "text": "Pacinian corpuscle",
+      "page": 1,
+      "block_index": 21,
+      "sentences": [
+        {
+          "global_index": 28,
+          "sentence_in_block": 0,
+          "text": "Pacinian corpuscle"
+        }
+      ],
+      "start_time": 103.7142857142857,
+      "duration_seconds": 1.2857142857142858,
+      "end_time": 104.99999999999999
+    },
+    {
+      "chunk_id": 21,
+      "text": "1 The following description is based on lecture notes from Laszlo Zaborszky, from Rutgers University.",
+      "page": 1,
+      "block_index": 22,
+      "sentences": [
+        {
+          "global_index": 29,
+          "sentence_in_block": 0,
+          "text": "1 The following description is based on lecture notes from Laszlo Zaborszky, from Rutgers University."
+        }
+      ],
+      "start_time": 104.99999999999999,
+      "duration_seconds": 7.214285714285714,
+      "end_time": 112.2142857142857
+    },
+    {
+      "chunk_id": 22,
+      "text": "1",
+      "page": 1,
+      "block_index": 23,
+      "sentences": [
+        {
+          "global_index": 30,
+          "sentence_in_block": 0,
+          "text": "1"
+        }
+      ],
+      "start_time": 112.2142857142857,
+      "duration_seconds": 0.07142857142857142,
+      "end_time": 112.28571428571426
+    },
+    {
+      "chunk_id": 23,
+      "text": "From Wikibooks",
+      "page": 2,
+      "block_index": 1,
+      "sentences": [
+        {
+          "global_index": 31,
+          "sentence_in_block": 0,
+          "text": "From Wikibooks"
+        }
+      ],
+      "start_time": 112.28571428571426,
+      "duration_seconds": 1.0,
+      "end_time": 113.28571428571426
+    },
+    {
+      "chunk_id": 24,
+      "text": "Figure 2: Mammalian muscle",
+      "page": 2,
+      "block_index": 2,
+      "sentences": [
+        {
+          "global_index": 32,
+          "sentence_in_block": 0,
+          "text": "Figure 2: Mammalian muscle"
+        }
+      ],
+      "start_time": 113.28571428571426,
+      "duration_seconds": 1.8571428571428572,
+      "end_time": 115.14285714285712
+    },
+    {
+      "chunk_id": 25,
+      "text": "<image: ICCBased(RGB,sRGB IEC61966-2-1 black scaled), width: 400, height: 233, bpc: 8>",
+      "page": 2,
+      "block_index": 3,
+      "sentences": [
+        {
+          "global_index": 33,
+          "sentence_in_block": 0,
+          "text": "<image: ICCBased(RGB,sRGB IEC61966-2-1 black scaled), width: 400, height: 233, bpc: 8>"
+        }
+      ],
+      "start_time": 115.14285714285712,
+      "duration_seconds": 6.142857142857143,
+      "end_time": 121.28571428571426
+    },
+    {
+      "chunk_id": 26,
+      "text": "spindle showing typical position in a muscle (left), neuronal connections in spinal cord (middle) and expanded schematic (right). The spindle is a stretch receptor with its own motor supply consisting of several intrafusal muscle fibres.",
+      "page": 2,
+      "block_index": 4,
+      "sentences": [
+        {
+          "global_index": 34,
+          "sentence_in_block": 0,
+          "text": "spindle showing typical position in a muscle (left), neuronal connections in spinal cord (middle) and expanded schematic (right)."
+        },
+        {
+          "global_index": 35,
+          "sentence_in_block": 1,
+          "text": "The spindle is a stretch receptor with its own motor supply consisting of several intrafusal muscle fibres."
+        }
+      ],
+      "start_time": 121.28571428571426,
+      "duration_seconds": 16.928571428571427,
+      "end_time": 138.2142857142857
+    },
+    {
+      "chunk_id": 27,
+      "text": "The sensory endings of a primary (group Ia) afferent and a secondary (group II) afferent coil around the non-contractile central portions of the intrafusal fibres.",
+      "page": 2,
+      "block_index": 4,
+      "sentences": [
+        {
+          "global_index": 36,
+          "sentence_in_block": 0,
+          "text": "The sensory endings of a primary (group Ia) afferent and a secondary (group II) afferent coil around the non-contractile central portions of the intrafusal fibres."
+        }
+      ],
+      "start_time": 138.2142857142857,
+      "duration_seconds": 11.642857142857142,
+      "end_time": 149.85714285714283
+    },
+    {
+      "chunk_id": 28,
+      "text": "rapidly adapting afferent activity, muscle force increases reflexively until the gripped object no longer moves. Such a rapid response to a tactile stimulus is a clear indication of the role played by somatosensory neurons in motor activity.",
+      "page": 2,
+      "block_index": 5,
+      "sentences": [
+        {
+          "global_index": 37,
+          "sentence_in_block": 0,
+          "text": "rapidly adapting afferent activity, muscle force increases reflexively until the gripped object no longer moves."
+        },
+        {
+          "global_index": 38,
+          "sentence_in_block": 1,
+          "text": "Such a rapid response to a tactile stimulus is a clear indication of the role played by somatosensory neurons in motor activity."
+        }
+      ],
+      "start_time": 149.85714285714283,
+      "duration_seconds": 17.214285714285715,
+      "end_time": 167.07142857142856
+    },
+    {
+      "chunk_id": 29,
+      "text": "The slowly adapting Merkel\u2019s receptors are responsible",
+      "page": 2,
+      "block_index": 6,
+      "sentences": [
+        {
+          "global_index": 39,
+          "sentence_in_block": 0,
+          "text": "The slowly adapting Merkel\u2019s receptors are responsible"
+        }
+      ],
+      "start_time": 167.07142857142856,
+      "duration_seconds": 3.857142857142857,
+      "end_time": 170.92857142857142
+    },
+    {
+      "chunk_id": 30,
+      "text": "for form and texture perception. As would be expected for receptors mediating form perception, Merkel\u2019s receptors are present at high density in the digits and around the mouth (50/mm\u00b2 of skin surface), at lower density in other glabrous surfaces, and at very low density in hairy skin.",
+      "page": 2,
+      "block_index": 7,
+      "sentences": [
+        {
+          "global_index": 40,
+          "sentence_in_block": 0,
+          "text": "for form and texture perception."
+        },
+        {
+          "global_index": 41,
+          "sentence_in_block": 1,
+          "text": "As would be expected for receptors mediating form perception, Merkel\u2019s receptors are present at high density in the digits and around the mouth (50/mm\u00b2 of skin surface), at lower density in other glabrous surfaces, and at very low density in hairy skin."
+        }
+      ],
+      "start_time": 170.92857142857142,
+      "duration_seconds": 20.428571428571427,
+      "end_time": 191.35714285714283
+    },
+    {
+      "chunk_id": 31,
+      "text": "This innervations density shrinks progressively with the passage of time so that by the age of 50, the density in human digits is reduced to 10/mm\u00b2. Unlike rapidly adapting axons, slowly adapting fibers respond not only to the initial indentation of skin, but also to sustained indentation up to several seconds in duration.",
+      "page": 2,
+      "block_index": 7,
+      "sentences": [
+        {
+          "global_index": 42,
+          "sentence_in_block": 0,
+          "text": "This innervations density shrinks progressively with the passage of time so that by the age of 50, the density in human digits is reduced to 10/mm\u00b2."
+        },
+        {
+          "global_index": 43,
+          "sentence_in_block": 1,
+          "text": "Unlike rapidly adapting axons, slowly adapting fibers respond not only to the initial indentation of skin, but also to sustained indentation up to several seconds in duration."
+        }
+      ],
+      "start_time": 191.35714285714283,
+      "duration_seconds": 23.142857142857142,
+      "end_time": 214.49999999999997
+    },
+    {
+      "chunk_id": 32,
+      "text": "Activation of the rapidly adapting Pacinian corpuscles",
+      "page": 2,
+      "block_index": 8,
+      "sentences": [
+        {
+          "global_index": 44,
+          "sentence_in_block": 0,
+          "text": "Activation of the rapidly adapting Pacinian corpuscles"
+        }
+      ],
+      "start_time": 214.49999999999997,
+      "duration_seconds": 3.857142857142857,
+      "end_time": 218.35714285714283
+    },
+    {
+      "chunk_id": 33,
+      "text": "gives a feeling of vibration, while the slowly adapting Ruffini corpuscles respond to the lataral movement or stretching of skin.",
+      "page": 2,
+      "block_index": 9,
+      "sentences": [
+        {
+          "global_index": 45,
+          "sentence_in_block": 0,
+          "text": "gives a feeling of vibration, while the slowly adapting Ruffini corpuscles respond to the lataral movement or stretching of skin."
+        }
+      ],
+      "start_time": 218.35714285714283,
+      "duration_seconds": 9.214285714285714,
+      "end_time": 227.57142857142856
+    },
+    {
+      "chunk_id": 34,
+      "text": "Nociceptors",
+      "page": 2,
+      "block_index": 10,
+      "sentences": [
+        {
+          "global_index": 46,
+          "sentence_in_block": 0,
+          "text": "Nociceptors"
+        }
+      ],
+      "start_time": 227.57142857142856,
+      "duration_seconds": 0.7857142857142857,
+      "end_time": 228.35714285714283
+    },
+    {
+      "chunk_id": 35,
+      "text": "Nociceptors have free nerve endings. Functionally, skin nociceptors are either high-threshold mechanoreceptors or polymodal receptors. Polymodal receptors respond not",
+      "page": 2,
+      "block_index": 11,
+      "sentences": [
+        {
+          "global_index": 47,
+          "sentence_in_block": 0,
+          "text": "Nociceptors have free nerve endings."
+        },
+        {
+          "global_index": 48,
+          "sentence_in_block": 1,
+          "text": "Functionally, skin nociceptors are either high-threshold mechanoreceptors or polymodal receptors."
+        },
+        {
+          "global_index": 49,
+          "sentence_in_block": 2,
+          "text": "Polymodal receptors respond not"
+        }
+      ],
+      "start_time": 228.35714285714283,
+      "duration_seconds": 11.857142857142858,
+      "end_time": 240.2142857142857
+    },
+    {
+      "chunk_id": 36,
+      "text": "2",
+      "page": 2,
+      "block_index": 12,
+      "sentences": [
+        {
+          "global_index": 50,
+          "sentence_in_block": 0,
+          "text": "2"
+        }
+      ],
+      "start_time": 240.2142857142857,
+      "duration_seconds": 0.07142857142857142,
+      "end_time": 240.28571428571428
+    },
+    {
+      "chunk_id": 37,
+      "text": "Anatomy of the Somatosensory System",
+      "page": 3,
+      "block_index": 1,
+      "sentences": [
+        {
+          "global_index": 51,
+          "sentence_in_block": 0,
+          "text": "Anatomy of the Somatosensory System"
+        }
+      ],
+      "start_time": 240.28571428571428,
+      "duration_seconds": 2.5,
+      "end_time": 242.78571428571428
+    },
+    {
+      "chunk_id": 38,
+      "text": "Rapidly adapting Slowly adapting",
+      "page": 3,
+      "block_index": 2,
+      "sentences": [
+        {
+          "global_index": 52,
+          "sentence_in_block": 0,
+          "text": "Rapidly adapting Slowly adapting"
+        }
+      ],
+      "start_time": 242.78571428571428,
+      "duration_seconds": 2.2857142857142856,
+      "end_time": 245.07142857142856
+    },
+    {
+      "chunk_id": 39,
+      "text": "Surface receptor / small receptive field",
+      "page": 3,
+      "block_index": 3,
+      "sentences": [
+        {
+          "global_index": 53,
+          "sentence_in_block": 0,
+          "text": "Surface receptor / small receptive field"
+        }
+      ],
+      "start_time": 245.07142857142856,
+      "duration_seconds": 2.857142857142857,
+      "end_time": 247.92857142857142
+    },
+    {
+      "chunk_id": 40,
+      "text": "Hair receptor, Meissner\u2019s corpuscle: Detect an insect or a very fine vibration. Used for recognizing texture.",
+      "page": 3,
+      "block_index": 4,
+      "sentences": [
+        {
+          "global_index": 54,
+          "sentence_in_block": 0,
+          "text": "Hair receptor, Meissner\u2019s corpuscle: Detect an insect or a very fine vibration."
+        },
+        {
+          "global_index": 55,
+          "sentence_in_block": 1,
+          "text": "Used for recognizing texture."
+        }
+      ],
+      "start_time": 247.92857142857142,
+      "duration_seconds": 7.785714285714286,
+      "end_time": 255.7142857142857
+    },
+    {
+      "chunk_id": 41,
+      "text": "Merkel\u2019s receptor: Used for spatial details, e.g. a round surface edge or \u201can X\u201d in brail.",
+      "page": 3,
+      "block_index": 5,
+      "sentences": [
+        {
+          "global_index": 56,
+          "sentence_in_block": 0,
+          "text": "Merkel\u2019s receptor: Used for spatial details, e.g."
+        },
+        {
+          "global_index": 57,
+          "sentence_in_block": 1,
+          "text": "a round surface edge or \u201can X\u201d in brail."
+        }
+      ],
+      "start_time": 255.7142857142857,
+      "duration_seconds": 6.428571428571429,
+      "end_time": 262.1428571428571
+    },
+    {
+      "chunk_id": 42,
+      "text": "Pacinian corpuscle: \u201cA diffuse vibration\u201d e.g. tapping with a pencil.",
+      "page": 3,
+      "block_index": 6,
+      "sentences": [
+        {
+          "global_index": 58,
+          "sentence_in_block": 0,
+          "text": "Pacinian corpuscle: \u201cA diffuse vibration\u201d e.g."
+        },
+        {
+          "global_index": 59,
+          "sentence_in_block": 1,
+          "text": "tapping with a pencil."
+        }
+      ],
+      "start_time": 262.1428571428571,
+      "duration_seconds": 4.928571428571429,
+      "end_time": 267.07142857142856
+    },
+    {
+      "chunk_id": 43,
+      "text": "Deep receptor / large receptive field",
+      "page": 3,
+      "block_index": 7,
+      "sentences": [
+        {
+          "global_index": 60,
+          "sentence_in_block": 0,
+          "text": "Deep receptor / large receptive field"
+        }
+      ],
+      "start_time": 267.07142857142856,
+      "duration_seconds": 2.642857142857143,
+      "end_time": 269.7142857142857
+    },
+    {
+      "chunk_id": 44,
+      "text": "Ruffini\u2019s corpuscle: \u201cA skin stretch\u201d. Used for joint position in fingers.",
+      "page": 3,
+      "block_index": 8,
+      "sentences": [
+        {
+          "global_index": 61,
+          "sentence_in_block": 0,
+          "text": "Ruffini\u2019s corpuscle: \u201cA skin stretch\u201d."
+        },
+        {
+          "global_index": 62,
+          "sentence_in_block": 1,
+          "text": "Used for joint position in fingers."
+        }
+      ],
+      "start_time": 269.7142857142857,
+      "duration_seconds": 5.285714285714286,
+      "end_time": 275.0
+    },
+    {
+      "chunk_id": 45,
+      "text": "Table 1",
+      "page": 3,
+      "block_index": 9,
+      "sentences": [
+        {
+          "global_index": 63,
+          "sentence_in_block": 0,
+          "text": "Table 1"
+        }
+      ],
+      "start_time": 275.0,
+      "duration_seconds": 0.5,
+      "end_time": 275.5
+    },
+    {
+      "chunk_id": 46,
+      "text": "only to intense mechanical stimuli, but also to heat and to noxious chemicals. These receptors respond to minute punctures of the epithelium, with a response magnitude that depends on the degree of tissue deformation.",
+      "page": 3,
+      "block_index": 10,
+      "sentences": [
+        {
+          "global_index": 64,
+          "sentence_in_block": 0,
+          "text": "only to intense mechanical stimuli, but also to heat and to noxious chemicals."
+        },
+        {
+          "global_index": 65,
+          "sentence_in_block": 1,
+          "text": "These receptors respond to minute punctures of the epithelium, with a response magnitude that depends on the degree of tissue deformation."
+        }
+      ],
+      "start_time": 275.5,
+      "duration_seconds": 15.5,
+      "end_time": 291.0
+    },
+    {
+      "chunk_id": 47,
+      "text": "They also respond to temperatures in the range of 40\u201360\u00b0C, and change their response rates as a linear function of warming (in contrast with the saturating responses displayed by non-noxious thermoreceptors at high temperatures).",
+      "page": 3,
+      "block_index": 10,
+      "sentences": [
+        {
+          "global_index": 66,
+          "sentence_in_block": 0,
+          "text": "They also respond to temperatures in the range of 40\u201360\u00b0C, and change their response rates as a linear function of warming (in contrast with the saturating responses displayed by non-noxious thermoreceptors at high temperatures)."
+        }
+      ],
+      "start_time": 291.0,
+      "duration_seconds": 16.357142857142858,
+      "end_time": 307.35714285714283
+    },
+    {
+      "chunk_id": 48,
+      "text": "Pain signals can be separated into individual compo",
+      "page": 3,
+      "block_index": 11,
+      "sentences": [
+        {
+          "global_index": 67,
+          "sentence_in_block": 0,
+          "text": "Pain signals can be separated into individual compo"
+        }
+      ],
+      "start_time": 307.35714285714283,
+      "duration_seconds": 3.642857142857143,
+      "end_time": 311.0
+    },
+    {
+      "chunk_id": 49,
+      "text": "Notice how figure captions and sidenotes are shown in the outside margin (on the left or right, depending on whether the page is left or right). Also, figures are floated to the top/ bottom of the page. Wide content, like the table and Figure 3, intrude into the outside margins.",
+      "page": 3,
+      "block_index": 12,
+      "sentences": [
+        {
+          "global_index": 68,
+          "sentence_in_block": 0,
+          "text": "Notice how figure captions and sidenotes are shown in the outside margin (on the left or right, depending on whether the page is left or right)."
+        },
+        {
+          "global_index": 69,
+          "sentence_in_block": 1,
+          "text": "Also, figures are floated to the top/ bottom of the page."
+        },
+        {
+          "global_index": 70,
+          "sentence_in_block": 2,
+          "text": "Wide content, like the table and Figure 3, intrude into the outside margins."
+        }
+      ],
+      "start_time": 311.0,
+      "duration_seconds": 19.928571428571427,
+      "end_time": 330.92857142857144
+    },
+    {
+      "chunk_id": 50,
+      "text": "nents, corresponding to different types of nerve fibers used for transmitting these signals. The rapidly transmitted signal, which often has high spatial resolution, is called first pain or cutaneous pricking pain. It is well localized and easily tolerated. The much slower, highly affective component is called second pain or burning pain; it is poorly localized and poorly tolerated.",
+      "page": 3,
+      "block_index": 13,
+      "sentences": [
+        {
+          "global_index": 71,
+          "sentence_in_block": 0,
+          "text": "nents, corresponding to different types of nerve fibers used for transmitting these signals."
+        },
+        {
+          "global_index": 72,
+          "sentence_in_block": 1,
+          "text": "The rapidly transmitted signal, which often has high spatial resolution, is called first pain or cutaneous pricking pain."
+        },
+        {
+          "global_index": 73,
+          "sentence_in_block": 2,
+          "text": "It is well localized and easily tolerated."
+        },
+        {
+          "global_index": 74,
+          "sentence_in_block": 3,
+          "text": "The much slower, highly affective component is called second pain or burning pain; it is poorly localized and poorly tolerated."
+        }
+      ],
+      "start_time": 330.92857142857144,
+      "duration_seconds": 27.5,
+      "end_time": 358.42857142857144
+    },
+    {
+      "chunk_id": 51,
+      "text": "The third or deep pain, arising from viscera, musculature and joints, is also poorly localized, can be chronic and is often associated with referred pain.",
+      "page": 3,
+      "block_index": 13,
+      "sentences": [
+        {
+          "global_index": 75,
+          "sentence_in_block": 0,
+          "text": "The third or deep pain, arising from viscera, musculature and joints, is also poorly localized, can be chronic and is often associated with referred pain."
+        }
+      ],
+      "start_time": 358.42857142857144,
+      "duration_seconds": 11.0,
+      "end_time": 369.42857142857144
+    },
+    {
+      "chunk_id": 52,
+      "text": "Muscle Spindles",
+      "page": 3,
+      "block_index": 14,
+      "sentences": [
+        {
+          "global_index": 76,
+          "sentence_in_block": 0,
+          "text": "Muscle Spindles"
+        }
+      ],
+      "start_time": 369.42857142857144,
+      "duration_seconds": 1.0714285714285714,
+      "end_time": 370.5
+    },
+    {
+      "chunk_id": 53,
+      "text": "Scattered throughout virtually every striated muscle in the body are long, thin, stretch receptors called muscle spindles. They are quite simple in principle, consisting of a few small muscle fibers with a capsule surrounding the middle third of the fibers. These fibers are called intrafusal fibers, in contrast to the ordinary extrafusal fibers.",
+      "page": 3,
+      "block_index": 15,
+      "sentences": [
+        {
+          "global_index": 77,
+          "sentence_in_block": 0,
+          "text": "Scattered throughout virtually every striated muscle in the body are long, thin, stretch receptors called muscle spindles."
+        },
+        {
+          "global_index": 78,
+          "sentence_in_block": 1,
+          "text": "They are quite simple in principle, consisting of a few small muscle fibers with a capsule surrounding the middle third of the fibers."
+        },
+        {
+          "global_index": 79,
+          "sentence_in_block": 2,
+          "text": "These fibers are called intrafusal fibers, in contrast to the ordinary extrafusal fibers."
+        }
+      ],
+      "start_time": 370.5,
+      "duration_seconds": 24.785714285714285,
+      "end_time": 395.2857142857143
+    },
+    {
+      "chunk_id": 54,
+      "text": "The ends of the intrafusal fibers are attached to extrafusal fibers, so whenever the muscle is stretched, the intrafusal fibers are also stretched. The central region of each intrafusal fiber has",
+      "page": 3,
+      "block_index": 15,
+      "sentences": [
+        {
+          "global_index": 80,
+          "sentence_in_block": 0,
+          "text": "The ends of the intrafusal fibers are attached to extrafusal fibers, so whenever the muscle is stretched, the intrafusal fibers are also stretched."
+        },
+        {
+          "global_index": 81,
+          "sentence_in_block": 1,
+          "text": "The central region of each intrafusal fiber has"
+        }
+      ],
+      "start_time": 395.2857142857143,
+      "duration_seconds": 13.928571428571429,
+      "end_time": 409.2142857142857
+    },
+    {
+      "chunk_id": 55,
+      "text": "3",
+      "page": 3,
+      "block_index": 16,
+      "sentences": [
+        {
+          "global_index": 82,
+          "sentence_in_block": 0,
+          "text": "3"
+        }
+      ],
+      "start_time": 409.2142857142857,
+      "duration_seconds": 0.07142857142857142,
+      "end_time": 409.2857142857143
+    },
+    {
+      "chunk_id": 56,
+      "text": "From Wikibooks",
+      "page": 4,
+      "block_index": 1,
+      "sentences": [
+        {
+          "global_index": 83,
+          "sentence_in_block": 0,
+          "text": "From Wikibooks"
+        }
+      ],
+      "start_time": 409.2857142857143,
+      "duration_seconds": 1.0,
+      "end_time": 410.2857142857143
+    },
+    {
+      "chunk_id": 57,
+      "text": "Force (Golgi tendon organ)",
+      "page": 4,
+      "block_index": 2,
+      "sentences": [
+        {
+          "global_index": 84,
+          "sentence_in_block": 0,
+          "text": "Force (Golgi tendon organ)"
+        }
+      ],
+      "start_time": 410.2857142857143,
+      "duration_seconds": 1.8571428571428572,
+      "end_time": 412.1428571428571
+    },
+    {
+      "chunk_id": 58,
+      "text": "Force feedback",
+      "page": 4,
+      "block_index": 3,
+      "sentences": [
+        {
+          "global_index": 85,
+          "sentence_in_block": 0,
+          "text": "Force feedback"
+        }
+      ],
+      "start_time": 412.1428571428571,
+      "duration_seconds": 1.0,
+      "end_time": 413.1428571428571
+    },
+    {
+      "chunk_id": 59,
+      "text": "Force control signal",
+      "page": 4,
+      "block_index": 4,
+      "sentences": [
+        {
+          "global_index": 86,
+          "sentence_in_block": 0,
+          "text": "Force control signal"
+        }
+      ],
+      "start_time": 413.1428571428571,
+      "duration_seconds": 1.4285714285714286,
+      "end_time": 414.57142857142856
+    },
+    {
+      "chunk_id": 60,
+      "text": "Interneurons",
+      "page": 4,
+      "block_index": 5,
+      "sentences": [
+        {
+          "global_index": 87,
+          "sentence_in_block": 0,
+          "text": "Interneurons"
+        }
+      ],
+      "start_time": 414.57142857142856,
+      "duration_seconds": 0.8571428571428571,
+      "end_time": 415.4285714285714
+    },
+    {
+      "chunk_id": 61,
+      "text": "External forces",
+      "page": 4,
+      "block_index": 6,
+      "sentences": [
+        {
+          "global_index": 88,
+          "sentence_in_block": 0,
+          "text": "External forces"
+        }
+      ],
+      "start_time": 415.4285714285714,
+      "duration_seconds": 1.0714285714285714,
+      "end_time": 416.49999999999994
+    },
+    {
+      "chunk_id": 62,
+      "text": "Muscle length",
+      "page": 4,
+      "block_index": 7,
+      "sentences": [
+        {
+          "global_index": 89,
+          "sentence_in_block": 0,
+          "text": "Muscle length"
+        }
+      ],
+      "start_time": 416.49999999999994,
+      "duration_seconds": 0.9285714285714286,
+      "end_time": 417.4285714285714
+    },
+    {
+      "chunk_id": 63,
+      "text": "Driving signal",
+      "page": 4,
+      "block_index": 8,
+      "sentences": [
+        {
+          "global_index": 90,
+          "sentence_in_block": 0,
+          "text": "Driving signal"
+        }
+      ],
+      "start_time": 417.4285714285714,
+      "duration_seconds": 1.0,
+      "end_time": 418.4285714285714
+    },
+    {
+      "chunk_id": 64,
+      "text": "Muscle force",
+      "page": 4,
+      "block_index": 9,
+      "sentences": [
+        {
+          "global_index": 91,
+          "sentence_in_block": 0,
+          "text": "Muscle force"
+        }
+      ],
+      "start_time": 418.4285714285714,
+      "duration_seconds": 0.8571428571428571,
+      "end_time": 419.2857142857142
+    },
+    {
+      "chunk_id": 65,
+      "text": "Muscle",
+      "page": 4,
+      "block_index": 10,
+      "sentences": [
+        {
+          "global_index": 92,
+          "sentence_in_block": 0,
+          "text": "Muscle"
+        }
+      ],
+      "start_time": 419.2857142857142,
+      "duration_seconds": 0.42857142857142855,
+      "end_time": 419.71428571428567
+    },
+    {
+      "chunk_id": 66,
+      "text": "Load",
+      "page": 4,
+      "block_index": 11,
+      "sentences": [
+        {
+          "global_index": 93,
+          "sentence_in_block": 0,
+          "text": "Load"
+        }
+      ],
+      "start_time": 419.71428571428567,
+      "duration_seconds": 0.2857142857142857,
+      "end_time": 419.99999999999994
+    },
+    {
+      "chunk_id": 67,
+      "text": "Tendon organs",
+      "page": 4,
+      "block_index": 12,
+      "sentences": [
+        {
+          "global_index": 94,
+          "sentence_in_block": 0,
+          "text": "Tendon organs"
+        }
+      ],
+      "start_time": 419.99999999999994,
+      "duration_seconds": 0.9285714285714286,
+      "end_time": 420.9285714285714
+    },
+    {
+      "chunk_id": 68,
+      "text": "Length (secondary muscle-spindel afferents)",
+      "page": 4,
+      "block_index": 13,
+      "sentences": [
+        {
+          "global_index": 95,
+          "sentence_in_block": 0,
+          "text": "Length (secondary muscle-spindel afferents)"
+        }
+      ],
+      "start_time": 420.9285714285714,
+      "duration_seconds": 3.0714285714285716,
+      "end_time": 423.99999999999994
+    },
+    {
+      "chunk_id": 69,
+      "text": "Length error (primary muscle-spindel afferents)",
+      "page": 4,
+      "block_index": 14,
+      "sentences": [
+        {
+          "global_index": 96,
+          "sentence_in_block": 0,
+          "text": "Length error (primary muscle-spindel afferents)"
+        }
+      ],
+      "start_time": 423.99999999999994,
+      "duration_seconds": 3.357142857142857,
+      "end_time": 427.3571428571428
+    },
+    {
+      "chunk_id": 70,
+      "text": "Velocity (primary muscle-spindel afferents)",
+      "page": 4,
+      "block_index": 15,
+      "sentences": [
+        {
+          "global_index": 97,
+          "sentence_in_block": 0,
+          "text": "Velocity (primary muscle-spindel afferents)"
+        }
+      ],
+      "start_time": 427.3571428571428,
+      "duration_seconds": 3.0714285714285716,
+      "end_time": 430.42857142857133
+    },
+    {
+      "chunk_id": 71,
+      "text": "Length & velocity feedback",
+      "page": 4,
+      "block_index": 16,
+      "sentences": [
+        {
+          "global_index": 98,
+          "sentence_in_block": 0,
+          "text": "Length & velocity feedback"
+        }
+      ],
+      "start_time": 430.42857142857133,
+      "duration_seconds": 1.8571428571428572,
+      "end_time": 432.28571428571416
+    },
+    {
+      "chunk_id": 72,
+      "text": "Spindles",
+      "page": 4,
+      "block_index": 17,
+      "sentences": [
+        {
+          "global_index": 99,
+          "sentence_in_block": 0,
+          "text": "Spindles"
+        }
+      ],
+      "start_time": 432.28571428571416,
+      "duration_seconds": 0.5714285714285714,
+      "end_time": 432.8571428571427
+    },
+    {
+      "chunk_id": 73,
+      "text": "Length control signal",
+      "page": 4,
+      "block_index": 18,
+      "sentences": [
+        {
+          "global_index": 100,
+          "sentence_in_block": 0,
+          "text": "Length control signal"
+        }
+      ],
+      "start_time": 432.8571428571427,
+      "duration_seconds": 1.5,
+      "end_time": 434.3571428571427
+    },
+    {
+      "chunk_id": 74,
+      "text": "Gamma bias",
+      "page": 4,
+      "block_index": 19,
+      "sentences": [
+        {
+          "global_index": 101,
+          "sentence_in_block": 0,
+          "text": "Gamma bias"
+        }
+      ],
+      "start_time": 434.3571428571427,
+      "duration_seconds": 0.7142857142857143,
+      "end_time": 435.07142857142844
+    },
+    {
+      "chunk_id": 75,
+      "text": "Figure 3: Feedback loops for proprioceptive signals for the perception and control of limb movements. Arrows indicate excitatory connections; filled circles inhibitory connections.",
+      "page": 4,
+      "block_index": 20,
+      "sentences": [
+        {
+          "global_index": 102,
+          "sentence_in_block": 0,
+          "text": "Figure 3: Feedback loops for proprioceptive signals for the perception and control of limb movements."
+        },
+        {
+          "global_index": 103,
+          "sentence_in_block": 1,
+          "text": "Arrows indicate excitatory connections; filled circles inhibitory connections."
+        }
+      ],
+      "start_time": 435.07142857142844,
+      "duration_seconds": 12.857142857142858,
+      "end_time": 447.9285714285713
+    },
+    {
+      "chunk_id": 76,
+      "text": "few myofilaments and is non-contractile, but it does have one or more sensory endings applied to it. When the muscle is stretched, the central part of the intrafusal fiber is stretched and each sensory ending fires impulses.",
+      "page": 4,
+      "block_index": 21,
+      "sentences": [
+        {
+          "global_index": 104,
+          "sentence_in_block": 0,
+          "text": "few myofilaments and is non-contractile, but it does have one or more sensory endings applied to it."
+        },
+        {
+          "global_index": 105,
+          "sentence_in_block": 1,
+          "text": "When the muscle is stretched, the central part of the intrafusal fiber is stretched and each sensory ending fires impulses."
+        }
+      ],
+      "start_time": 447.9285714285713,
+      "duration_seconds": 16.0,
+      "end_time": 463.9285714285713
+    },
+    {
+      "chunk_id": 77,
+      "text": "Muscle spindles also receive a motor innervation. The",
+      "page": 4,
+      "block_index": 22,
+      "sentences": [
+        {
+          "global_index": 106,
+          "sentence_in_block": 0,
+          "text": "Muscle spindles also receive a motor innervation."
+        },
+        {
+          "global_index": 107,
+          "sentence_in_block": 1,
+          "text": "The"
+        }
+      ],
+      "start_time": 463.9285714285713,
+      "duration_seconds": 3.7857142857142856,
+      "end_time": 467.71428571428555
+    },
+    {
+      "chunk_id": 78,
+      "text": "For more examples of how to use",
+      "page": 4,
+      "block_index": 23,
+      "sentences": [
+        {
+          "global_index": 108,
+          "sentence_in_block": 0,
+          "text": "For more examples of how to use"
+        }
+      ],
+      "start_time": 467.71428571428555,
+      "duration_seconds": 2.2142857142857144,
+      "end_time": 469.9285714285713
+    },
+    {
+      "chunk_id": 79,
+      "text": "HTML and CSS for paper-based",
+      "page": 4,
+      "block_index": 24,
+      "sentences": [
+        {
+          "global_index": 109,
+          "sentence_in_block": 0,
+          "text": "HTML and CSS for paper-based"
+        }
+      ],
+      "start_time": 469.9285714285713,
+      "duration_seconds": 2.0,
+      "end_time": 471.9285714285713
+    },
+    {
+      "chunk_id": 80,
+      "text": "publishing, see css4.pub.",
+      "page": 4,
+      "block_index": 25,
+      "sentences": [
+        {
+          "global_index": 110,
+          "sentence_in_block": 0,
+          "text": "publishing, see css4.pub."
+        }
+      ],
+      "start_time": 471.9285714285713,
+      "duration_seconds": 1.7857142857142858,
+      "end_time": 473.71428571428555
+    },
+    {
+      "chunk_id": 81,
+      "text": "large motor neurons that supply extrafusal muscle fibers are called alpha motor neurons, while the smaller ones supplying the contractile portions of intrafusal fibers are called gamma neurons. Gamma motor neurons can regulate the sensitivity of the muscle spindle so that this sensitivity can be maintained at any given muscle length.",
+      "page": 4,
+      "block_index": 26,
+      "sentences": [
+        {
+          "global_index": 111,
+          "sentence_in_block": 0,
+          "text": "large motor neurons that supply extrafusal muscle fibers are called alpha motor neurons, while the smaller ones supplying the contractile portions of intrafusal fibers are called gamma neurons."
+        },
+        {
+          "global_index": 112,
+          "sentence_in_block": 1,
+          "text": "Gamma motor neurons can regulate the sensitivity of the muscle spindle so that this sensitivity can be maintained at any given muscle length."
+        }
+      ],
+      "start_time": 473.71428571428555,
+      "duration_seconds": 23.928571428571427,
+      "end_time": 497.642857142857
+    },
+    {
+      "chunk_id": 82,
+      "text": "Joint receptors",
+      "page": 4,
+      "block_index": 27,
+      "sentences": [
+        {
+          "global_index": 113,
+          "sentence_in_block": 0,
+          "text": "Joint receptors"
+        }
+      ],
+      "start_time": 497.642857142857,
+      "duration_seconds": 1.0714285714285714,
+      "end_time": 498.71428571428555
+    },
+    {
+      "chunk_id": 83,
+      "text": "The joint receptors are low-threshold mechanoreceptors and have been divided into four groups. They signal different characteristics of joint function (position, movements, direction and speed of movements). The free receptors or type 4 joint receptors are nociceptors.",
+      "page": 4,
+      "block_index": 28,
+      "sentences": [
+        {
+          "global_index": 114,
+          "sentence_in_block": 0,
+          "text": "The joint receptors are low-threshold mechanoreceptors and have been divided into four groups."
+        },
+        {
+          "global_index": 115,
+          "sentence_in_block": 1,
+          "text": "They signal different characteristics of joint function (position, movements, direction and speed of movements)."
+        },
+        {
+          "global_index": 116,
+          "sentence_in_block": 2,
+          "text": "The free receptors or type 4 joint receptors are nociceptors."
+        }
+      ],
+      "start_time": 498.71428571428555,
+      "duration_seconds": 19.214285714285715,
+      "end_time": 517.9285714285712
+    },
+    {
+      "chunk_id": 84,
+      "text": "4",
+      "page": 4,
+      "block_index": 29,
+      "sentences": [
+        {
+          "global_index": 117,
+          "sentence_in_block": 0,
+          "text": "4"
+        }
+      ],
+      "start_time": 517.9285714285712,
+      "duration_seconds": 0.07142857142857142,
+      "end_time": 517.9999999999998
+    }
+  ]
+}

@@ -1,0 +1,692 @@
+{
+  "metadata": {
+    "title": "Anatomy of the Somatosensory System",
+    "author": "",
+    "source_filename": "somatosensory.pdf",
+    "total_pages": 4
+  },
+  "book_id": "Anatomy_of_the_Somatosensory_System",
+  "total_chunks": 85,
+  "ready_chunks": [
+    {
+      "chunk_id": 0,
+      "filename": "chunk_0000_p1.wav",
+      "page": 1,
+      "text_snippet": "Anatomy of the Somatosensory System...",
+      "start_time": 0.0,
+      "duration_seconds": 2.5
+    },
+    {
+      "chunk_id": 1,
+      "filename": "chunk_0001_p1.wav",
+      "page": 1,
+      "text_snippet": "FROM WIKIBOOKS1...",
+      "start_time": 2.5,
+      "duration_seconds": 1.0714285714285714
+    },
+    {
+      "chunk_id": 2,
+      "filename": "chunk_0002_p1.wav",
+      "page": 1,
+      "text_snippet": "Our somatosensory system consists of sensors in th...",
+      "start_time": 3.571428571428571,
+      "duration_seconds": 28.357142857142858
+    },
+    {
+      "chunk_id": 3,
+      "filename": "chunk_0003_p1.wav",
+      "page": 1,
+      "text_snippet": "This is a sample document to showcase page-based f...",
+      "start_time": 31.92857142857143,
+      "duration_seconds": 15.071428571428571
+    },
+    {
+      "chunk_id": 4,
+      "filename": "chunk_0004_p1.wav",
+      "page": 1,
+      "text_snippet": "Cutaneous receptors...",
+      "start_time": 47.0,
+      "duration_seconds": 1.3571428571428572
+    },
+    {
+      "chunk_id": 5,
+      "filename": "chunk_0005_p1.wav",
+      "page": 1,
+      "text_snippet": "Sensory information from Meissner corpuscles and r...",
+      "start_time": 48.357142857142854,
+      "duration_seconds": 20.285714285714285
+    },
+    {
+      "chunk_id": 6,
+      "filename": "chunk_0006_p1.wav",
+      "page": 1,
+      "text_snippet": "Hairy skin Glabrous skin...",
+      "start_time": 68.64285714285714,
+      "duration_seconds": 1.7142857142857142
+    },
+    {
+      "chunk_id": 7,
+      "filename": "chunk_0007_p1.wav",
+      "page": 1,
+      "text_snippet": "Figure 1: Receptors in the hu...",
+      "start_time": 70.35714285714285,
+      "duration_seconds": 2.0714285714285716
+    },
+    {
+      "chunk_id": 8,
+      "filename": "chunk_0008_p1.wav",
+      "page": 1,
+      "text_snippet": "Papillary Ridges...",
+      "start_time": 72.42857142857142,
+      "duration_seconds": 1.1428571428571428
+    },
+    {
+      "chunk_id": 9,
+      "filename": "chunk_0009_p1.wav",
+      "page": 1,
+      "text_snippet": "Epidermis...",
+      "start_time": 73.57142857142856,
+      "duration_seconds": 0.6428571428571429
+    },
+    {
+      "chunk_id": 10,
+      "filename": "chunk_0010_p1.wav",
+      "page": 1,
+      "text_snippet": "Septa...",
+      "start_time": 74.2142857142857,
+      "duration_seconds": 0.35714285714285715
+    },
+    {
+      "chunk_id": 11,
+      "filename": "chunk_0011_p1.wav",
+      "page": 1,
+      "text_snippet": "Free nerve...",
+      "start_time": 74.57142857142856,
+      "duration_seconds": 0.7142857142857143
+    },
+    {
+      "chunk_id": 12,
+      "filename": "chunk_0012_p1.wav",
+      "page": 1,
+      "text_snippet": "ending...",
+      "start_time": 75.28571428571426,
+      "duration_seconds": 0.42857142857142855
+    },
+    {
+      "chunk_id": 13,
+      "filename": "chunk_0013_p1.wav",
+      "page": 1,
+      "text_snippet": "Merkel\u2019s receptor...",
+      "start_time": 75.7142857142857,
+      "duration_seconds": 1.2142857142857142
+    },
+    {
+      "chunk_id": 14,
+      "filename": "chunk_0014_p1.wav",
+      "page": 1,
+      "text_snippet": "Meissner\u2019s corpuscle Sebaceous...",
+      "start_time": 76.9285714285714,
+      "duration_seconds": 2.142857142857143
+    },
+    {
+      "chunk_id": 15,
+      "filename": "chunk_0015_p1.wav",
+      "page": 1,
+      "text_snippet": "gland...",
+      "start_time": 79.07142857142854,
+      "duration_seconds": 0.35714285714285715
+    },
+    {
+      "chunk_id": 16,
+      "filename": "chunk_0016_p1.wav",
+      "page": 1,
+      "text_snippet": "Dermis...",
+      "start_time": 79.4285714285714,
+      "duration_seconds": 0.42857142857142855
+    },
+    {
+      "chunk_id": 17,
+      "filename": "chunk_0017_p1.wav",
+      "page": 1,
+      "text_snippet": "man skin: Mechanoreceptors can be free receptors o...",
+      "start_time": 79.85714285714283,
+      "duration_seconds": 21.5
+    },
+    {
+      "chunk_id": 18,
+      "filename": "chunk_0018_p1.wav",
+      "page": 1,
+      "text_snippet": "Ruffini\u2019s  corpuscle...",
+      "start_time": 101.35714285714283,
+      "duration_seconds": 1.4285714285714286
+    },
+    {
+      "chunk_id": 19,
+      "filename": "chunk_0019_p1.wav",
+      "page": 1,
+      "text_snippet": "Hair receptor...",
+      "start_time": 102.78571428571426,
+      "duration_seconds": 0.9285714285714286
+    },
+    {
+      "chunk_id": 20,
+      "filename": "chunk_0020_p1.wav",
+      "page": 1,
+      "text_snippet": "Pacinian corpuscle...",
+      "start_time": 103.7142857142857,
+      "duration_seconds": 1.2857142857142858
+    },
+    {
+      "chunk_id": 21,
+      "filename": "chunk_0021_p1.wav",
+      "page": 1,
+      "text_snippet": "1 The following description is based on lecture no...",
+      "start_time": 104.99999999999999,
+      "duration_seconds": 7.214285714285714
+    },
+    {
+      "chunk_id": 22,
+      "filename": "chunk_0022_p1.wav",
+      "page": 1,
+      "text_snippet": "1...",
+      "start_time": 112.2142857142857,
+      "duration_seconds": 0.07142857142857142
+    },
+    {
+      "chunk_id": 23,
+      "filename": "chunk_0023_p2.wav",
+      "page": 2,
+      "text_snippet": "From Wikibooks...",
+      "start_time": 112.28571428571426,
+      "duration_seconds": 1.0
+    },
+    {
+      "chunk_id": 24,
+      "filename": "chunk_0024_p2.wav",
+      "page": 2,
+      "text_snippet": "Figure 2: Mammalian muscle...",
+      "start_time": 113.28571428571426,
+      "duration_seconds": 1.8571428571428572
+    },
+    {
+      "chunk_id": 25,
+      "filename": "chunk_0025_p2.wav",
+      "page": 2,
+      "text_snippet": "<image: ICCBased(RGB,sRGB IEC61966-2-1 black scale...",
+      "start_time": 115.14285714285712,
+      "duration_seconds": 6.142857142857143
+    },
+    {
+      "chunk_id": 26,
+      "filename": "chunk_0026_p2.wav",
+      "page": 2,
+      "text_snippet": "spindle showing typical position in a muscle (left...",
+      "start_time": 121.28571428571426,
+      "duration_seconds": 16.928571428571427
+    },
+    {
+      "chunk_id": 27,
+      "filename": "chunk_0027_p2.wav",
+      "page": 2,
+      "text_snippet": "The sensory endings of a primary (group Ia) affere...",
+      "start_time": 138.2142857142857,
+      "duration_seconds": 11.642857142857142
+    },
+    {
+      "chunk_id": 28,
+      "filename": "chunk_0028_p2.wav",
+      "page": 2,
+      "text_snippet": "rapidly adapting afferent activity, muscle force i...",
+      "start_time": 149.85714285714283,
+      "duration_seconds": 17.214285714285715
+    },
+    {
+      "chunk_id": 29,
+      "filename": "chunk_0029_p2.wav",
+      "page": 2,
+      "text_snippet": "The slowly adapting Merkel\u2019s receptors are respons...",
+      "start_time": 167.07142857142856,
+      "duration_seconds": 3.857142857142857
+    },
+    {
+      "chunk_id": 30,
+      "filename": "chunk_0030_p2.wav",
+      "page": 2,
+      "text_snippet": "for form and texture perception. As would be expec...",
+      "start_time": 170.92857142857142,
+      "duration_seconds": 20.428571428571427
+    },
+    {
+      "chunk_id": 31,
+      "filename": "chunk_0031_p2.wav",
+      "page": 2,
+      "text_snippet": "This innervations density shrinks progressively wi...",
+      "start_time": 191.35714285714283,
+      "duration_seconds": 23.142857142857142
+    },
+    {
+      "chunk_id": 32,
+      "filename": "chunk_0032_p2.wav",
+      "page": 2,
+      "text_snippet": "Activation of the rapidly adapting Pacinian corpus...",
+      "start_time": 214.49999999999997,
+      "duration_seconds": 3.857142857142857
+    },
+    {
+      "chunk_id": 33,
+      "filename": "chunk_0033_p2.wav",
+      "page": 2,
+      "text_snippet": "gives a feeling of vibration, while the slowly ada...",
+      "start_time": 218.35714285714283,
+      "duration_seconds": 9.214285714285714
+    },
+    {
+      "chunk_id": 34,
+      "filename": "chunk_0034_p2.wav",
+      "page": 2,
+      "text_snippet": "Nociceptors...",
+      "start_time": 227.57142857142856,
+      "duration_seconds": 0.7857142857142857
+    },
+    {
+      "chunk_id": 35,
+      "filename": "chunk_0035_p2.wav",
+      "page": 2,
+      "text_snippet": "Nociceptors have free nerve endings. Functionally,...",
+      "start_time": 228.35714285714283,
+      "duration_seconds": 11.857142857142858
+    },
+    {
+      "chunk_id": 36,
+      "filename": "chunk_0036_p2.wav",
+      "page": 2,
+      "text_snippet": "2...",
+      "start_time": 240.2142857142857,
+      "duration_seconds": 0.07142857142857142
+    },
+    {
+      "chunk_id": 37,
+      "filename": "chunk_0037_p3.wav",
+      "page": 3,
+      "text_snippet": "Anatomy of the Somatosensory System...",
+      "start_time": 240.28571428571428,
+      "duration_seconds": 2.5
+    },
+    {
+      "chunk_id": 38,
+      "filename": "chunk_0038_p3.wav",
+      "page": 3,
+      "text_snippet": "Rapidly adapting Slowly adapting...",
+      "start_time": 242.78571428571428,
+      "duration_seconds": 2.2857142857142856
+    },
+    {
+      "chunk_id": 39,
+      "filename": "chunk_0039_p3.wav",
+      "page": 3,
+      "text_snippet": "Surface receptor / small receptive field...",
+      "start_time": 245.07142857142856,
+      "duration_seconds": 2.857142857142857
+    },
+    {
+      "chunk_id": 40,
+      "filename": "chunk_0040_p3.wav",
+      "page": 3,
+      "text_snippet": "Hair receptor, Meissner\u2019s corpuscle: Detect an ins...",
+      "start_time": 247.92857142857142,
+      "duration_seconds": 7.785714285714286
+    },
+    {
+      "chunk_id": 41,
+      "filename": "chunk_0041_p3.wav",
+      "page": 3,
+      "text_snippet": "Merkel\u2019s receptor: Used for spatial details, e.g. ...",
+      "start_time": 255.7142857142857,
+      "duration_seconds": 6.428571428571429
+    },
+    {
+      "chunk_id": 42,
+      "filename": "chunk_0042_p3.wav",
+      "page": 3,
+      "text_snippet": "Pacinian corpuscle: \u201cA diffuse vibration\u201d e.g. tap...",
+      "start_time": 262.1428571428571,
+      "duration_seconds": 4.928571428571429
+    },
+    {
+      "chunk_id": 43,
+      "filename": "chunk_0043_p3.wav",
+      "page": 3,
+      "text_snippet": "Deep receptor / large receptive field...",
+      "start_time": 267.07142857142856,
+      "duration_seconds": 2.642857142857143
+    },
+    {
+      "chunk_id": 44,
+      "filename": "chunk_0044_p3.wav",
+      "page": 3,
+      "text_snippet": "Ruffini\u2019s corpuscle: \u201cA skin stretch\u201d. Used for jo...",
+      "start_time": 269.7142857142857,
+      "duration_seconds": 5.285714285714286
+    },
+    {
+      "chunk_id": 45,
+      "filename": "chunk_0045_p3.wav",
+      "page": 3,
+      "text_snippet": "Table 1...",
+      "start_time": 275.0,
+      "duration_seconds": 0.5
+    },
+    {
+      "chunk_id": 46,
+      "filename": "chunk_0046_p3.wav",
+      "page": 3,
+      "text_snippet": "only to intense mechanical stimuli, but also to he...",
+      "start_time": 275.5,
+      "duration_seconds": 15.5
+    },
+    {
+      "chunk_id": 47,
+      "filename": "chunk_0047_p3.wav",
+      "page": 3,
+      "text_snippet": "They also respond to temperatures in the range of ...",
+      "start_time": 291.0,
+      "duration_seconds": 16.357142857142858
+    },
+    {
+      "chunk_id": 48,
+      "filename": "chunk_0048_p3.wav",
+      "page": 3,
+      "text_snippet": "Pain signals can be separated into individual comp...",
+      "start_time": 307.35714285714283,
+      "duration_seconds": 3.642857142857143
+    },
+    {
+      "chunk_id": 49,
+      "filename": "chunk_0049_p3.wav",
+      "page": 3,
+      "text_snippet": "Notice how figure captions and sidenotes are shown...",
+      "start_time": 311.0,
+      "duration_seconds": 19.928571428571427
+    },
+    {
+      "chunk_id": 50,
+      "filename": "chunk_0050_p3.wav",
+      "page": 3,
+      "text_snippet": "nents, corresponding to different types of nerve f...",
+      "start_time": 330.92857142857144,
+      "duration_seconds": 27.5
+    },
+    {
+      "chunk_id": 51,
+      "filename": "chunk_0051_p3.wav",
+      "page": 3,
+      "text_snippet": "The third or deep pain, arising from viscera, musc...",
+      "start_time": 358.42857142857144,
+      "duration_seconds": 11.0
+    },
+    {
+      "chunk_id": 52,
+      "filename": "chunk_0052_p3.wav",
+      "page": 3,
+      "text_snippet": "Muscle Spindles...",
+      "start_time": 369.42857142857144,
+      "duration_seconds": 1.0714285714285714
+    },
+    {
+      "chunk_id": 53,
+      "filename": "chunk_0053_p3.wav",
+      "page": 3,
+      "text_snippet": "Scattered throughout virtually every striated musc...",
+      "start_time": 370.5,
+      "duration_seconds": 24.785714285714285
+    },
+    {
+      "chunk_id": 54,
+      "filename": "chunk_0054_p3.wav",
+      "page": 3,
+      "text_snippet": "The ends of the intrafusal fibers are attached to ...",
+      "start_time": 395.2857142857143,
+      "duration_seconds": 13.928571428571429
+    },
+    {
+      "chunk_id": 55,
+      "filename": "chunk_0055_p3.wav",
+      "page": 3,
+      "text_snippet": "3...",
+      "start_time": 409.2142857142857,
+      "duration_seconds": 0.07142857142857142
+    },
+    {
+      "chunk_id": 56,
+      "filename": "chunk_0056_p4.wav",
+      "page": 4,
+      "text_snippet": "From Wikibooks...",
+      "start_time": 409.2857142857143,
+      "duration_seconds": 1.0
+    },
+    {
+      "chunk_id": 57,
+      "filename": "chunk_0057_p4.wav",
+      "page": 4,
+      "text_snippet": "Force (Golgi tendon organ)...",
+      "start_time": 410.2857142857143,
+      "duration_seconds": 1.8571428571428572
+    },
+    {
+      "chunk_id": 58,
+      "filename": "chunk_0058_p4.wav",
+      "page": 4,
+      "text_snippet": "Force feedback...",
+      "start_time": 412.1428571428571,
+      "duration_seconds": 1.0
+    },
+    {
+      "chunk_id": 59,
+      "filename": "chunk_0059_p4.wav",
+      "page": 4,
+      "text_snippet": "Force control signal...",
+      "start_time": 413.1428571428571,
+      "duration_seconds": 1.4285714285714286
+    },
+    {
+      "chunk_id": 60,
+      "filename": "chunk_0060_p4.wav",
+      "page": 4,
+      "text_snippet": "Interneurons...",
+      "start_time": 414.57142857142856,
+      "duration_seconds": 0.8571428571428571
+    },
+    {
+      "chunk_id": 61,
+      "filename": "chunk_0061_p4.wav",
+      "page": 4,
+      "text_snippet": "External forces...",
+      "start_time": 415.4285714285714,
+      "duration_seconds": 1.0714285714285714
+    },
+    {
+      "chunk_id": 62,
+      "filename": "chunk_0062_p4.wav",
+      "page": 4,
+      "text_snippet": "Muscle length...",
+      "start_time": 416.49999999999994,
+      "duration_seconds": 0.9285714285714286
+    },
+    {
+      "chunk_id": 63,
+      "filename": "chunk_0063_p4.wav",
+      "page": 4,
+      "text_snippet": "Driving signal...",
+      "start_time": 417.4285714285714,
+      "duration_seconds": 1.0
+    },
+    {
+      "chunk_id": 64,
+      "filename": "chunk_0064_p4.wav",
+      "page": 4,
+      "text_snippet": "Muscle force...",
+      "start_time": 418.4285714285714,
+      "duration_seconds": 0.8571428571428571
+    },
+    {
+      "chunk_id": 65,
+      "filename": "chunk_0065_p4.wav",
+      "page": 4,
+      "text_snippet": "Muscle...",
+      "start_time": 419.2857142857142,
+      "duration_seconds": 0.42857142857142855
+    },
+    {
+      "chunk_id": 66,
+      "filename": "chunk_0066_p4.wav",
+      "page": 4,
+      "text_snippet": "Load...",
+      "start_time": 419.71428571428567,
+      "duration_seconds": 0.2857142857142857
+    },
+    {
+      "chunk_id": 67,
+      "filename": "chunk_0067_p4.wav",
+      "page": 4,
+      "text_snippet": "Tendon organs...",
+      "start_time": 419.99999999999994,
+      "duration_seconds": 0.9285714285714286
+    },
+    {
+      "chunk_id": 68,
+      "filename": "chunk_0068_p4.wav",
+      "page": 4,
+      "text_snippet": "Length (secondary muscle-spindel afferents)...",
+      "start_time": 420.9285714285714,
+      "duration_seconds": 3.0714285714285716
+    },
+    {
+      "chunk_id": 69,
+      "filename": "chunk_0069_p4.wav",
+      "page": 4,
+      "text_snippet": "Length error (primary muscle-spindel afferents)...",
+      "start_time": 423.99999999999994,
+      "duration_seconds": 3.357142857142857
+    },
+    {
+      "chunk_id": 70,
+      "filename": "chunk_0070_p4.wav",
+      "page": 4,
+      "text_snippet": "Velocity (primary muscle-spindel afferents)...",
+      "start_time": 427.3571428571428,
+      "duration_seconds": 3.0714285714285716
+    },
+    {
+      "chunk_id": 71,
+      "filename": "chunk_0071_p4.wav",
+      "page": 4,
+      "text_snippet": "Length & velocity feedback...",
+      "start_time": 430.42857142857133,
+      "duration_seconds": 1.8571428571428572
+    },
+    {
+      "chunk_id": 72,
+      "filename": "chunk_0072_p4.wav",
+      "page": 4,
+      "text_snippet": "Spindles...",
+      "start_time": 432.28571428571416,
+      "duration_seconds": 0.5714285714285714
+    },
+    {
+      "chunk_id": 73,
+      "filename": "chunk_0073_p4.wav",
+      "page": 4,
+      "text_snippet": "Length control signal...",
+      "start_time": 432.8571428571427,
+      "duration_seconds": 1.5
+    },
+    {
+      "chunk_id": 74,
+      "filename": "chunk_0074_p4.wav",
+      "page": 4,
+      "text_snippet": "Gamma bias...",
+      "start_time": 434.3571428571427,
+      "duration_seconds": 0.7142857142857143
+    },
+    {
+      "chunk_id": 75,
+      "filename": "chunk_0075_p4.wav",
+      "page": 4,
+      "text_snippet": "Figure 3: Feedback loops for proprioceptive signal...",
+      "start_time": 435.07142857142844,
+      "duration_seconds": 12.857142857142858
+    },
+    {
+      "chunk_id": 76,
+      "filename": "chunk_0076_p4.wav",
+      "page": 4,
+      "text_snippet": "few myofilaments and is non-contractile, but it do...",
+      "start_time": 447.9285714285713,
+      "duration_seconds": 16.0
+    },
+    {
+      "chunk_id": 77,
+      "filename": "chunk_0077_p4.wav",
+      "page": 4,
+      "text_snippet": "Muscle spindles also receive a motor innervation. ...",
+      "start_time": 463.9285714285713,
+      "duration_seconds": 3.7857142857142856
+    },
+    {
+      "chunk_id": 78,
+      "filename": "chunk_0078_p4.wav",
+      "page": 4,
+      "text_snippet": "For more examples of how to use...",
+      "start_time": 467.71428571428555,
+      "duration_seconds": 2.2142857142857144
+    },
+    {
+      "chunk_id": 79,
+      "filename": "chunk_0079_p4.wav",
+      "page": 4,
+      "text_snippet": "HTML and CSS for paper-based...",
+      "start_time": 469.9285714285713,
+      "duration_seconds": 2.0
+    },
+    {
+      "chunk_id": 80,
+      "filename": "chunk_0080_p4.wav",
+      "page": 4,
+      "text_snippet": "publishing, see css4.pub....",
+      "start_time": 471.9285714285713,
+      "duration_seconds": 1.7857142857142858
+    },
+    {
+      "chunk_id": 81,
+      "filename": "chunk_0081_p4.wav",
+      "page": 4,
+      "text_snippet": "large motor neurons that supply extrafusal muscle ...",
+      "start_time": 473.71428571428555,
+      "duration_seconds": 23.928571428571427
+    },
+    {
+      "chunk_id": 82,
+      "filename": "chunk_0082_p4.wav",
+      "page": 4,
+      "text_snippet": "Joint receptors...",
+      "start_time": 497.642857142857,
+      "duration_seconds": 1.0714285714285714
+    },
+    {
+      "chunk_id": 83,
+      "filename": "chunk_0083_p4.wav",
+      "page": 4,
+      "text_snippet": "The joint receptors are low-threshold mechanorecep...",
+      "start_time": 498.71428571428555,
+      "duration_seconds": 19.214285714285715
+    },
+    {
+      "chunk_id": 84,
+      "filename": "chunk_0084_p4.wav",
+      "page": 4,
+      "text_snippet": "4...",
+      "start_time": 517.9285714285712,
+      "duration_seconds": 0.07142857142857142
+    }
+  ]
+}
