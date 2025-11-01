@@ -40,7 +40,7 @@ class NativeAudioBackend extends AudioBackend {
    * @param {string} options.audioElementId - ID of <audio> element (default: 'player')
    */
   async init(container, options = {}) {
-    const audioElementId = options.audioElementId || 'player';
+    const audioElementId = options.audioElementId || 'audio-element';
     this.audioElement = document.getElementById(audioElementId);
 
     if (!this.audioElement) {
@@ -162,6 +162,18 @@ class NativeAudioBackend extends AudioBackend {
     // Clamp to valid range
     const clampedVolume = Math.max(0.0, Math.min(volume, 1.0));
     this.audioElement.volume = clampedVolume;
+  }
+
+  /**
+   * Set loop state
+   * @param {boolean} isLooping - True to loop, false to not
+   */
+  setLoop(isLooping) {
+    if (!this._isInitialized) {
+      throw new Error('NativeAudioBackend: init() must be called before setLoop()');
+    }
+
+    this.audioElement.loop = isLooping;
   }
 
   /**

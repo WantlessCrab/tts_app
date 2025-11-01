@@ -4,6 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Garden TTS Player</title>
+    <!-- Backend class files (in order) -->
+    <script src="/static/event-emitter.js"></script>
+    <script src="/static/audio-backend.js"></script>
+    <script src="/static/native-audio-backend.js"></script>
+    <script src="https://unpkg.com/wavesurfer.js@7"></script>
+    <script src="/static/wavesurfer-backend.js"></script>
+
+    <script src="/static/player.js"></script>
+
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -148,6 +157,7 @@
             color: #74b9ff;
             margin-bottom: 10px;
         }
+
     </style>
 </head>
 <body>
@@ -157,7 +167,8 @@
         <div class="player-section">
             <div id="now-playing">Now Playing: <span id="current-file">None</span></div>
 
-            <audio id="player" controls></audio>
+            <audio id="audio-element" controls></audio>
+            <div id="waveform" style="width: 100%; height: 128px; margin: 10px 0; background: #1a1a1a; border-radius: 4px;"></div>
 
             <div class="time-display">
                 <span id="time-display">0:00 / 0:00</span>
@@ -217,122 +228,5 @@
         <div id="error-log" style="color: #d63031; margin-top: 10px;"></div>
     </div>
 
-    <script src="/static/event-emitter.js"></script>
-    <script src="/static/audio-backend.js"></script>
-    <script src="/static/native-audio-backend.js"></script> <script src="/static/player.js"></script>
-
-    <!-- TEMPORARY: Add to player.html <head> for testing -->
-    <!-- Remove this entire block after Step 0B.4 verification -->
-    <script>
-    // Wait for DOM ready
-    document.addEventListener('DOMContentLoaded', async () => {
-      console.log('=== NativeAudioBackend Isolation Test ===');
-
-      // Create backend instance
-      const backend = new NativeAudioBackend();
-      console.log('✓ Backend instantiated');
-
-      // Subscribe to all events
-      backend.on('loading', () => {
-        console.log('✓ Event: LOADING');
-      });
-
-      backend.on('ready', (data) => {
-        console.log('✓ Event: READY', data);
-        console.log('  Duration:', data.duration, 'seconds');
-      });
-
-      backend.on('play', () => {
-        console.log('✓ Event: PLAY');
-      });
-
-      backend.on('pause', () => {
-        console.log('✓ Event: PAUSE');
-      });
-
-      backend.on('timeupdate', (data) => {
-        // Log every 2 seconds to avoid console spam
-        const time = data.currentTime;
-        if (Math.floor(time) % 2 === 0 && Math.floor(time * 10) % 10 === 0) {
-          console.log('  TIMEUPDATE:', time.toFixed(1), 'seconds');
-        }
-      });
-
-      backend.on('finish', () => {
-        console.log('✓ Event: FINISH');
-      });
-
-      backend.on('seeking', (data) => {
-        console.log('✓ Event: SEEKING to', data.currentTime.toFixed(1));
-      });
-
-      backend.on('error', (data) => {
-        console.error('✗ Event: ERROR', data.error.message);
-      });
-
-      // Initialize backend
-      try {
-        await backend.init(document.body, { audioElementId: 'player' });
-        console.log('✓ Backend initialized');
-      } catch (error) {
-        console.error('✗ Init failed:', error.message);
-        return;
-      }
-
-      // Load test audio
-      const testAudioUrl = '/api/audiobook/Anatomy_of_the_Somatosensory_System/play/chunk_0002_p1.wav';
-
-      try {
-        await backend.load(testAudioUrl);
-        console.log('✓ Load initiated');
-      } catch (error) {
-        console.error('✗ Load failed:', error.message);
-        return;
-      }
-
-      // Wait for ready event, then test controls
-      backend.on('ready', async () => {
-        console.log('\n--- Testing Controls ---');
-
-        // Test play
-        console.log('Testing play()...');
-        await backend.play();
-
-        // Test pause after 2 seconds
-        setTimeout(() => {
-          console.log('Testing pause()...');
-          backend.pause();
-        }, 2000);
-
-        // Test seek after 3 seconds
-        setTimeout(() => {
-          console.log('Testing setTime(5)...');
-          backend.setTime(5);
-        }, 3000);
-
-        // Test speed after 4 seconds
-        setTimeout(() => {
-          console.log('Testing setPlaybackRate(1.5)...');
-          backend.setPlaybackRate(1.5);
-        }, 4000);
-
-        // Test volume after 5 seconds
-        setTimeout(() => {
-          console.log('Testing setVolume(0.5)...');
-          backend.setVolume(0.5);
-        }, 5000);
-
-        // Verify state getters
-        setTimeout(() => {
-          console.log('\n--- State Getters ---');
-          console.log('getCurrentTime():', backend.getCurrentTime().toFixed(2));
-          console.log('getDuration():', backend.getDuration().toFixed(2));
-          console.log('isPlaying():', backend.isPlaying());
-        }, 6000);
-
-        console.log('\nTest sequence initiated. Watch console for results.');
-      });
-    });
-    </script>
 </body>
 </html>
