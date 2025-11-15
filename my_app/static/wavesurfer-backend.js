@@ -72,7 +72,7 @@ class WavesurferBackend extends AudioBackend {
       barRadius: 2,
       height: 128,
       normalize: true,
-      backend: 'WebAudio', // Use Web Audio API backend for best performance
+      audioRate: 1
     });
 
     // Bind event listeners
@@ -152,10 +152,6 @@ class WavesurferBackend extends AudioBackend {
     });
   }
 
-  /**
-   * Set playback speed
-   * @param {number} rate - Speed (0.5 - 2.0)
-   */
   setPlaybackRate(rate) {
     if (!this._isInitialized) {
       throw new Error('WavesurferBackend: init() must be called before setPlaybackRate()');
@@ -163,17 +159,8 @@ class WavesurferBackend extends AudioBackend {
 
     const clampedRate = Math.max(0.5, Math.min(rate, 2.0));
 
-    // --- BEGIN FIX ---
-    // Get the underlying HTML5 <audio> element that Wavesurfer is using
-    const mediaElement = this.wavesurfer.getMediaElement();
-    if (mediaElement) {
-        // This is the magic property that fixes the pitch
-        mediaElement.preservesPitch = true;
-    }
-    // --- END FIX ---
-
-    // Now, set the rate
-    this.wavesurfer.setPlaybackRate(clampedRate);
+    // Pass true as second parameter to preserve pitch
+    this.wavesurfer.setPlaybackRate(clampedRate, true);
   }
 
   /**

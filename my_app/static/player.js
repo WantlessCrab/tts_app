@@ -45,10 +45,12 @@ class TTSAudioPlayer {
       currentPageNum: 1,
       totalPages: 0,
       scale: 1.0,
+      fitMode: 'height', //  'width' or 'height'
       isPageRendering: false,
       pendingPageNum: null,
       currentTextLayer: null,
       viewport: null,
+      clickSeekEnabled: false,
     },
     polling: {
       intervalId: null,
@@ -155,6 +157,13 @@ class TTSAudioPlayer {
       // STEP 4: Bind DOM event listeners
       console.log('Step 4: Binding DOM event listeners...');
       this._bindDOMEvents();
+      // Hide PDF viewer initially
+      if (this.elements.pdfViewerContainer) {
+        this.elements.pdfViewerContainer.style.display = 'none';
+      }
+      if (this.elements.pdfCanvas) {
+        this.elements.pdfCanvas.style.display = 'none';
+      }
 
       // STEP 5: Load initial data
       console.log('Step 5: Loading initial data...');
@@ -232,6 +241,23 @@ class TTSAudioPlayer {
     if (!this.elements.audioElement) {
       throw new Error('Critical: <audio id="audio-element"> element not found');
     }
+    // PDF VIEWER
+    this.elements.pdfViewerContainer = document.getElementById('pdf-viewer-container');
+    this.elements.pdfCanvas = document.getElementById('pdf-canvas');
+    this.elements.pageIndicator = document.getElementById('page-indicator');
+    this.elements.prevPageButton = document.getElementById('prev-page-button');
+    this.elements.nextPageButton = document.getElementById('next-page-button');
+    this.elements.audioPlayerComponent = document.getElementById('audio-player-component');
+
+    // PDF controls (enhanced)
+    this.elements.pageJumpInput = document.getElementById('page-jump-input');
+    this.elements.zoomInButton = document.getElementById('zoom-in-button');
+    this.elements.zoomOutButton = document.getElementById('zoom-out-button');
+    this.elements.zoomFitWidthButton = document.getElementById('zoom-fit-width-button');  // NEW
+    this.elements.zoomFitHeightButton = document.getElementById('zoom-fit-height-button');
+    this.elements.zoomLevel = document.getElementById('zoom-level');
+    this.elements.clickSeekToggle = document.getElementById('click-seek-toggle');
+    this.elements.pdfPageControls = document.getElementById('pdf-page-controls');
 
     // PLAYBACK CONTROLS
     this.elements.playPauseButton = document.getElementById('play-pause-button');
@@ -330,6 +356,18 @@ class TTSAudioPlayer {
       this.state.audio.currentTime = data.currentTime;
       this._updateTimeDisplay();
       this._updateSeekSlider();
+    });
+    // AUDIOPROCESS: High-frequency time updates (60Hz)
+    backend.on(AudioBackend.EVENTS.AUDIOPROCESS, (data) => {
+      // Sync PDF page
+      if (this.state.audiobook.mode === 'audiobook' && this.state.pdf.pdfDocument) {
+        const newPage = this.getPageForTimestamp(data.currentTime);
+
+        // Only trigger re-render if page actually changed (debouncing)
+        if (newPage && newPage !== this.state.pdf.currentPageNum) {
+          this.queueRenderPage(newPage);
+        }
+      }
     });
 
     backend.on(AudioBackend.EVENTS.FINISH, () => {
@@ -443,6 +481,50 @@ class TTSAudioPlayer {
       this.downloadCurrentFile();
     });
     */
+
+
+    // PDF Navigation
+    this.elements.nextPageButton.addEventListener('click', () => {
+      this.nextPage();
+    });
+
+    this.elements.prevPageButton.addEventListener('click', () => {
+      this.previousPage();
+    });
+
+    // PDF zoom controls
+    this.elements.zoomInButton.addEventListener('click', () => {
+      this.zoomIn();
+    });
+
+    this.elements.zoomOutButton.addEventListener('click', () => {
+      this.zoomOut();
+    });
+
+    this.elements.zoomFitWidthButton.addEventListener('click', () => {
+      this.zoomFitWidth();
+    });
+
+    this.elements.zoomFitHeightButton.addEventListener('click', () => {
+      this.zoomFitHeight();
+    });
+
+    // Page jump input (on Enter key)
+    this.elements.pageJumpInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.jumpToPage(e.target.value);
+      }
+    });
+
+    // Click-to-seek toggle
+    this.elements.clickSeekToggle.addEventListener('click', () => {
+      this.toggleClickSeekMode();
+    });
+
+    // PDF canvas click handler
+    this.elements.pdfCanvas.addEventListener('click', (e) => {
+      this.handlePdfClick(e);
+    });
 
     console.log('  ✓ All DOM event listeners bound');
   }
@@ -874,8 +956,25 @@ class TTSAudioPlayer {
 
       console.log(`Audiobook loaded: ${this.state.audiobook.totalChunks} total chunks.`);
 
+      // --- ADD THIS (Phase 2B / E2's Step 7) ---
+      // Load the corresponding PDF
+      // The source_filename is in the metadata
+      const pdfFilename = data.metadata?.source_filename;
+      if (pdfFilename) {
+        await this.loadPdf(pdfFilename);
+      } else {
+        console.warn('No source_filename found in manifest. PDF will not be loaded.');
+        if (this.elements.pdfViewerComponent) {
+          this.elements.pdfViewerComponent.style.display = 'none'; // Hide if no PDF
+        }
+      }
+      // --- END ADDITION ---
+
       // Start playing first chunk
       await this.playChunk(0);
+
+      // Tell the backend to play the chunk it just loaded.
+      await this.play();
 
     } catch (error) {
       this.logError('Failed to load audiobook: ' + error.message);
@@ -892,8 +991,12 @@ class TTSAudioPlayer {
     if (nextIndex < this.state.audiobook.readyChunks.length) {
       console.log(`Advancing to chunk ${nextIndex + 1}/${this.state.audiobook.totalChunks}`);
       await this.playChunk(nextIndex);
+
+      // Tell the backend to play the new chunk.
+      await this.play();
     } else {
       console.log('Reached end of available audiobook chunks');
+
       this.state.audio.isPlaying = false;
       if (this.elements.playPauseButton) {
         this.elements.playPauseButton.textContent = 'Play';
@@ -951,20 +1054,402 @@ class TTSAudioPlayer {
   }
 
   // ===========================================
-  // Feature 5 & 6: PDF Sync (STUBS)
+  // Feature 5 & 6: PDF Sync (some STUBS)
   // ===========================================
 
-  async loadPdf(pdfUrl) {
-    console.warn('loadPdf() not yet implemented.');
+  /**
+   * Zoom in on PDF
+   */
+  zoomIn() {
+    if (!this.state.pdf.pdfDocument) return;
+
+    // Increase scale by 25%
+    const newScale = this.state.pdf.scale * 1.25;
+    const maxScale = 3.0;  // 300% max zoom
+
+    if (newScale <= maxScale) {
+      this.state.pdf.scale = newScale;
+      this.renderPage(this.state.pdf.currentPageNum);
+      this.updateZoomDisplay();
+    }
   }
 
-  async renderPage(pageNum) {
-    console.warn('renderPage() not yet implemented.');
+  /**
+   * Zoom out on PDF
+   */
+  zoomOut() {
+    if (!this.state.pdf.pdfDocument) return;
+
+    // Decrease scale by 25%
+    const newScale = this.state.pdf.scale * 0.75;
+    const minScale = 0.5;  // 50% min zoom
+
+    if (newScale >= minScale) {
+      this.state.pdf.scale = newScale;
+      this.renderPage(this.state.pdf.currentPageNum);
+      this.updateZoomDisplay();
+    }
   }
 
-  queueRenderPage(pageNum) {
-    console.warn('queueRenderPage() not yet implemented.');
+  /**
+   * Fit PDF to width of container
+   */
+  zoomFitWidth() {
+    if (!this.state.pdf.pdfDocument) return;
+
+    // Set scale to null to trigger width calculation
+    this.state.pdf.fitMode = 'width';  // Track fit mode
+    this.state.pdf.scale = null;
+    this.renderPage(this.state.pdf.currentPageNum);
+
+    console.log('Fit to width');
   }
+
+  /**
+   * Fit PDF to height of container
+   */
+  zoomFitHeight() {
+    if (!this.state.pdf.pdfDocument) return;
+
+    this.state.pdf.fitMode = 'height';  // Track fit mode
+
+    // Calculate fit-to-height scale
+    // Need to get page first to know its dimensions
+    this._calculateFitHeight(this.state.pdf.currentPageNum);
+  }
+
+  /**
+   * Calculate and apply fit-to-height scale
+   * @param {number} pageNum - Page to render
+   * @private
+   */
+  async _calculateFitHeight(pageNum) {
+    try {
+      const page = await this.state.pdf.pdfDocument.getPage(pageNum);
+
+      // Get desired height (container height minus padding)
+      const desiredHeight = this.elements.pdfViewerContainer.clientHeight - 40;
+
+      // Get page viewport at scale 1.0 to know natural dimensions
+      const viewportDefault = page.getViewport({scale: 1.0});
+
+      // Calculate scale to fit height
+      const scale = desiredHeight / viewportDefault.height;
+
+      // Store and render
+      this.state.pdf.scale = scale;
+      await this.renderPage(pageNum);
+
+      console.log(`Fit to height: ${Math.round(scale * 100)}%`);
+
+    } catch (error) {
+      console.error('Failed to calculate fit-to-height:', error);
+    }
+  }
+
+  /**
+   * Update zoom level display
+   */
+  updateZoomDisplay() {
+    if (!this.elements.zoomLevel) return;
+
+    const percentage = Math.round(this.state.pdf.scale * 100);
+    this.elements.zoomLevel.textContent = `${percentage}%`;
+  }
+
+  /**
+   * Jump to specific page number
+   * @param {number} pageNum - Page number (1-indexed)
+   */
+  jumpToPage(pageNum) {
+    const page = parseInt(pageNum, 10);
+
+    if (isNaN(page)) {
+      this.logError('Invalid page number');
+      return;
+    }
+
+    if (page < 1 || page > this.state.pdf.totalPages) {
+      this.logError(`Page must be between 1 and ${this.state.pdf.totalPages}`);
+      return;
+    }
+
+    this.queueRenderPage(page);
+
+    // Clear input after successful jump
+    if (this.elements.pageJumpInput) {
+      this.elements.pageJumpInput.value = '';
+    }
+  }
+
+  /**
+   * Toggle click-to-seek mode
+   */
+  toggleClickSeekMode() {
+    this.state.pdf.clickSeekEnabled = !this.state.pdf.clickSeekEnabled;
+
+    // Update button appearance
+    if (this.elements.clickSeekToggle) {
+      if (this.state.pdf.clickSeekEnabled) {
+        this.elements.clickSeekToggle.classList.add('active');
+        this.elements.clickSeekToggle.textContent = '🎯 Seek: ON';
+      } else {
+        this.elements.clickSeekToggle.classList.remove('active');
+        this.elements.clickSeekToggle.textContent = '🎯 Seek Mode';
+      }
+    }
+
+    console.log(`Click-to-seek mode: ${this.state.pdf.clickSeekEnabled ? 'ON' : 'OFF'}`);
+  }
+
+  /**
+   * Handle click on PDF canvas to seek audio
+   * @param {MouseEvent} event - Click event
+   */
+  async handlePdfClick(event) {
+    if (!this.state.pdf.clickSeekEnabled) return;
+    if (!this.state.audiobook.manifest) return;
+
+    // Get current page
+    const currentPage = this.state.pdf.currentPageNum;
+
+    // Find chunk for this page
+    const chunk = this.state.audiobook.readyChunks.find(c => c.page === currentPage);
+
+    if (!chunk) {
+      console.warn(`No audio chunk found for page ${currentPage}`);
+      this.logError(`Page ${currentPage} has no associated audio`);
+      return;
+    }
+
+    // Seek to start of this chunk
+    const seekTime = chunk.start_time || 0;
+
+    console.log(`Seeking to page ${currentPage} at ${seekTime}s`);
+    this.seekTo(seekTime);
+
+    // Optional: Auto-play if paused
+    if (!this.state.audio.isPlaying) {
+      await this.play();
+    }
+  }
+
+  /**
+     * Load PDF document
+     * @param {string} pdfSourceFilename - PDF file URL (just the filename)
+     * @returns {Promise<void>}
+     */
+    async loadPdf(pdfSourceFilename) {
+      try {
+        // Use the existing sanitize utility
+        const safeFilename = this.sanitizeFilename(pdfSourceFilename);
+        const pdfUrl = `/api/pdf/${safeFilename}`;
+
+        this.clearError();
+
+        // Set loading state
+        this.state.pdf.documentUrl = pdfUrl;
+
+        // Load PDF (uses pdfjsLib from the script tag)
+        console.log(`Loading PDF: ${pdfUrl}`);
+        const loadingTask = pdfjsLib.getDocument(pdfUrl);
+        this.state.pdf.pdfDocument = await loadingTask.promise;
+
+        // Get total pages
+        this.state.pdf.totalPages = this.state.pdf.pdfDocument.numPages;
+
+        console.log(`PDF loaded: ${this.state.pdf.totalPages} pages`);
+
+        // Show PDF viewer
+        if (this.elements.pdfViewerContainer) {
+          this.elements.pdfViewerContainer.style.display = 'flex';
+        }
+        if (this.elements.pdfCanvas) {
+          this.elements.pdfCanvas.style.display = 'block';
+        }
+
+        // Render first page
+        await this.renderPage(1);
+
+        // Show PDF controls
+        if (this.elements.pdfPageControls) {
+          this.elements.pdfPageControls.style.display = 'flex';
+        }
+
+        // Update zoom display
+        this.updateZoomDisplay();
+
+        // Enable click-to-seek if in audiobook mode
+        if (this.state.audiobook.mode === 'audiobook') {
+          if (this.elements.clickSeekToggle) {
+            this.elements.clickSeekToggle.disabled = false;
+          }
+        }
+
+      } catch (error) {
+        this.logError('Failed to load PDF: ' + error.message);
+        console.error('PDF load error:', error);
+        // Hide PDF viewer on error
+        if (this.elements.pdfViewerContainer) {
+          this.elements.pdfViewerContainer.style.display = 'none';
+        }
+      }
+    }
+
+    /**
+     * Render specific PDF page with HiDPI support and Fit-to-Width
+     * @param {number} pageNum - Page number (1-indexed)
+     * @returns {Promise<void>}
+     */
+    async renderPage(pageNum) {
+      // Validate
+      if (!this.state.pdf.pdfDocument) {
+        console.warn('No PDF loaded');
+        return;
+      }
+
+      if (pageNum < 1 || pageNum > this.state.pdf.totalPages) {
+        console.warn(`Invalid page number: ${pageNum}`);
+        return;
+      }
+
+      // Set render lock (prevents simultaneous renders)
+      if (this.state.pdf.isPageRendering) {
+        this.state.pdf.pendingPageNum = pageNum;
+        return;
+      }
+
+      this.state.pdf.isPageRendering = true;
+      this.state.pdf.currentPageNum = pageNum;
+
+      // Disable buttons during render
+      if (this.elements.prevPageButton) this.elements.prevPageButton.disabled = true;
+      if (this.elements.nextPageButton) this.elements.nextPageButton.disabled = true;
+
+      try {
+        // Get page
+        const page = await this.state.pdf.pdfDocument.getPage(pageNum);
+
+        // Calculate viewport with HiDPI support
+        const outputScale = window.devicePixelRatio || 1;
+
+        // ZOOM LOGIC: Use existing scale or calculate based on fit mode
+        let scale = this.state.pdf.scale;
+
+        // If scale is null/undefined, calculate based on fit mode
+        if (scale === null || scale === undefined) {
+          const fitMode = this.state.pdf.fitMode || 'width';  // Default to width
+
+          if (fitMode === 'height') {
+            // Calculate fit-to-height scale
+            const desiredHeight = this.elements.pdfViewerContainer.clientHeight - 40;
+            const viewportDefault = page.getViewport({scale: 1.0});
+            scale = desiredHeight / viewportDefault.height;
+          } else {
+            // Calculate fit-to-width scale (default)
+            const desiredWidth = this.elements.pdfViewerContainer.clientWidth - 40;
+            const viewportDefault = page.getViewport({scale: 1.0});
+            scale = desiredWidth / viewportDefault.width;
+          }
+
+          this.state.pdf.scale = scale;
+        }
+        // Otherwise, use the existing zoom scale (from zoom in/out)
+
+        const viewport = page.getViewport({scale: scale});
+        this.state.pdf.viewport = viewport;
+
+        // Setup canvas
+        const canvas = this.elements.pdfCanvas;
+        const context = canvas.getContext('2d');
+
+        // Set internal resolution (quality)
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+
+        // Set display size (layout)
+        canvas.style.width = Math.floor(viewport.width) + 'px';
+        canvas.style.height = Math.floor(viewport.height) + 'px';
+
+        // Render with transform for HiDPI
+        const transform = outputScale !== 1
+            ? [outputScale, 0, 0, outputScale, 0, 0]
+            : null;
+
+        const renderContext = {
+          canvasContext: context,
+          viewport: viewport,
+          transform: transform
+        };
+
+        const renderTask = page.render(renderContext);
+        await renderTask.promise;
+
+        // Update UI
+        this.elements.pageIndicator.textContent =
+            `Page: ${pageNum} / ${this.state.pdf.totalPages}`;
+
+        // Update zoom display (if zoom controls exist)
+        if (this.elements.zoomLevel) {
+          this.updateZoomDisplay();
+        }
+
+        console.log(`Rendered page ${pageNum}`);
+
+      } catch (error) {
+        console.error('Page render error:', error);
+        this.logError('Failed to render page: ' + error.message);
+      } finally {
+        // Release lock
+        this.state.pdf.isPageRendering = false;
+
+        // Re-enable buttons based on page number
+        if (this.elements.prevPageButton) this.elements.prevPageButton.disabled = (pageNum === 1);
+        if (this.elements.nextPageButton) this.elements.nextPageButton.disabled = (pageNum === this.state.pdf.totalPages);
+
+        // Process pending page request
+        if (this.state.pdf.pendingPageNum !== null) {
+          const pending = this.state.pdf.pendingPageNum;
+          this.state.pdf.pendingPageNum = null;
+          this.renderPage(pending);
+        }
+      }
+    }
+
+    /**
+     * Queue page render (safe for rapid calls)
+     * @param {number} pageNum - Page number to render
+     */
+    queueRenderPage(pageNum) {
+      if (this.state.pdf.isPageRendering) {
+        // Canvas busy, queue request
+        this.state.pdf.pendingPageNum = pageNum;
+      } else {
+        // Canvas free, render immediately
+        this.renderPage(pageNum);
+      }
+    }
+
+    /**
+     * Go to next page
+     */
+    nextPage() {
+      const nextPageNum = this.state.pdf.currentPageNum + 1;
+      if (nextPageNum <= this.state.pdf.totalPages) {
+        this.queueRenderPage(nextPageNum);
+      }
+    }
+
+    /**
+     * Go to previous page
+     */
+    previousPage() {
+      const prevPageNum = this.state.pdf.currentPageNum - 1;
+      if (prevPageNum >= 1) {
+        this.queueRenderPage(prevPageNum);
+      }
+    }
+
 
   async _renderTextLayer(page, viewport) {
     console.warn('_renderTextLayer() not yet implemented.');
@@ -974,8 +1459,33 @@ class TTSAudioPlayer {
     console.warn('syncPdfToAudio() not yet implemented.');
   }
 
+  /**
+   * Get page number for audio timestamp
+   * @param {number} timestamp - Current audio time in seconds
+   * @returns {number|null} Page number or null if not found
+   */
   getPageForTimestamp(timestamp) {
-    console.warn('getPageForTimestamp() not yet implemented.');
+    if (!this.state.audiobook.manifest || !this.state.audiobook.readyChunks) {
+      return null;
+    }
+
+    const chunks = this.state.audiobook.readyChunks;
+
+    // Find the chunk where the current time falls within its start/end
+    // We use the global 'start_time' and 'duration_seconds' from the manifest
+    const chunk = chunks.find(c =>
+      timestamp >= c.start_time && timestamp < (c.start_time + c.duration_seconds)
+    );
+
+    if (chunk) {
+      return chunk.page || null; // 'page' is the correct field from the manifest
+    }
+
+    // Fallback for edge cases (e.g., end of book)
+    if (chunks.length > 0 && timestamp >= chunks[chunks.length - 1].start_time) {
+        return chunks[chunks.length - 1].page;
+    }
+
     return null;
   }
 

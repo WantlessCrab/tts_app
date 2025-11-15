@@ -1,0 +1,90 @@
+# Dockerfile.gpu-base — Project Rebuild “Gold Standard” v2
+# Purpose: Immutable GPU base image for all ROCm services.
+# STRATEGY: "Clean Room" build from a bare Ubuntu 22.04 image.
+# We will manually install the WSL2-AWARE ROCm stack.
+# This ensures all internal libraries (glibc, pthread) are compatible.
+
+# ---- 1. Locked Base (Ubuntu 22.04) -----------------------------------
+FROM ubuntu:22.04
+
+# ---- Metadata ---------------------------------------------------------------
+LABEL org.opencontainers.image.title="Project Rebuild ROCm Base (WSL2-Aware)" \
+      org.opencontainers.image.description="Gold-standard ROCm GPU base (Python 3.11, ROCm 6.4.4, PyTorch 2.8.0) built for Windows 11 / WSL2" \
+      org.opencontainers.image.vendor="Project Rebuild" \
+      org.opencontainers.image.licenses="MIT"
+
+WORKDIR /workspace
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---- 2. Core System Dependencies ------------------------------------------
+# Install prerequisites for Python 3.11, ROCm install, and our apps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    curl \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    gcc g++ make \
+    git \
+    python3.11 python3.11-dev python3.11-venv \
+    python3-pip python3-wheel python3-setuptools \
+    espeak-ng libsndfile1-dev ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- 3. Install ROCm 6.4.4 for WSL2 (The "Handshake") -------------------
+# This is the "magic" step. We are installing the ROCm stack from
+# scratch, using the official WSL2 use-case flag.
+RUN set -eux; \
+    # Add AMD package repositories
+    wget https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/jammy/amdgpu-install_6.4.60404-1_all.deb; \
+    apt-get install -y ./amdgpu-install_6.4.60404-1_all.deb; \
+    rm ./amdgpu-install_6.4.60404-1_all.deb; \
+    # Run the installer, specifying WSL2 and ROCm use cases
+    # This installs the correct /dev/dxg-aware libraries
+    amdgpu-install -y --usecase=wsl,rocm --no-dkms; \
+    # Clean up installer files
+    rm -rf /var/lib/apt/lists/*
+
+# ---- 4. Verify Python 3.11 is default -------------------------------------
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    python --version && \
+    python -m pip install --upgrade pip wheel setuptools
+
+# ---- 5. PyTorch ROCm wheels (ROCm 6.4 / Python 3.11) -----------------------
+# Install PyTorch using the verified pip/index method
+# This will now link against the *correct* (WSL2-aware) ROCm libraries.
+RUN set -eux; \
+    python3.11 -m pip install --no-cache-dir \
+        torch==2.8.0+rocm6.4 \
+        torchvision==0.23.0+rocm6.4 \
+        torchaudio==2.8.0+rocm6.4 \
+        pytorch_triton_rocm==3.4.0 \
+        --extra-index-url https://download.pytorch.org/whl/rocm6.4
+
+# ---- 6. Sanity checks (do not relax) ---------------------------------------
+RUN python3.11 - <<'PY'
+import torch
+v = torch.__version__
+assert "2.8.0+rocm6.4" in v, f"Wrong torch version installed: {v}"
+print("✓ PyTorch version OK:", v)
+PY
+
+RUN (python3.11 -m pip list | grep -i nvidia && echo "ERROR: NVIDIA contamination" && exit 1) || echo "✓ No NVIDIA contamination"
+
+# ---- 7. ROCm / PyTorch runtime tuning --------------------------------------
+# We still need the override for our specific gfx1100 card
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+    PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512 \
+    PYTHONUNBUFFERED=1
+
+# ---- 8. Standard dirs -----------------------------------------------------
+RUN mkdir -p /root/.cache /workspace/outputs
+
+# ---- 9. ADD-READY ZONE (safe extension hooks) -----------------------------
+COPY requirements-base-additions.txt /tmp/requirements-base-additions.txt
+RUN if [ -s /tmp/requirements-base-additions.txt ]; then \
+      python3.11 -m pip install --no-cache-dir -r /tmp/requirements-base-additions.txt; \
+    fi && rm -f /tmp/requirements-base-additions.txt || true
+# ---- END ADD-READY ZONE ---------------------------------------------------
+
+CMD ["/bin/bash"]

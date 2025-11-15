@@ -1,0 +1,13 @@
+services:
+  # This MUST match the service name in the base file
+  rebuild-gpu-service:
+    build:
+      # Override to the 'gpu-testing' Dockerfile
+      context: .
+      dockerfile: dockerfile.gpu-testing
+    image: project-rebuild-gpu-testing:latest # Use a new image name
+    container_name: project-rebuild-gpu-testing
+
+    # Override the inherited 'WORKDIR /app' to start
+    # in the root (/) directory for sandbox testing.
+    working_dir: /

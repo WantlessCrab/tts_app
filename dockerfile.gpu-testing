@@ -1,0 +1,14 @@
+# ========================================
+# 1. THE BASE IMAGE (OUR "GOLDEN TEMPLATE")
+# ========================================
+
+FROM project-rebuild-gold-standard:latest
+
+# ========================================
+# 2. THE "APPLICATION LAYER" (THE TEST)
+# ========================================
+
+RUN pip3 install --no-cache-dir tiktoken
+
+# Install 'whisper' itself using --no-deps (safe)
+RUN pip3 install --no-cache-dir --no-deps openai-whisper

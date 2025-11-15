@@ -1,0 +1,54 @@
+services:
+  rebuild-gpu-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: project-rebuild-gold-standard:latest
+    container_name: project-rebuild-gpu-service
+
+    devices:
+      # passes the WSL2 GPU Bridge (/dev/dxg) into the container
+      - /dev/dxg:/dev/dxg
+    group_add:
+      - video
+    volumes:
+      # Mounts the host's "known-good" WSL2 bridge library
+      - /usr/lib/wsl/lib/libdxcore.so:/usr/lib/wsl/lib/libdxcore.so:ro
+
+      # Mounts the host's 6.4.2 HSA library (using our validated path)
+      - /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1:/opt/rocm/lib/libhsa-runtime64.so.1:ro
+
+    # 3. STABILITY & PERFORMANCE FLAGS (FROM DEV GUIDANCE)
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    shm_size: 8g # Critical for ML shared memory
+
+    # 4. ENVIRONMENT VARIABLES
+    #  targets my gfx1100 GPU
+    environment:
+      - ROCR_VISIBLE_DEVICES=0
+      - HIP_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1 # For real-time logs
+      - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/rocm/lib
+
+
+    command: >
+      bash -c "
+        # Use $$() so Docker Compose passes $(...) to bash
+        TORCH_LIB_PATH=$$(python3 -c 'import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))');
+      
+        # Use $$TORCH_LIB_PATH to use the shell variable
+        echo \"--- [Runtime] Patching PyTorch: Found torch/lib at $$TORCH_LIB_PATH\";
+        rm -f \"$$TORCH_LIB_PATH/libhsa-runtime64.so\"*;
+      
+        echo \"--- [Runtime] Patch complete. Bundled libhsa removed.\";
+      
+        # This 'exec' hands control over to the *real* command
+        exec bash
+      "
+      
+    stdin_open: true
+    tty: true

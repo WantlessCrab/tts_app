@@ -1,4 +1,5 @@
 # ~/TTS/my_app/pdf_processor/process.py
+from fastapi.responses import FileResponse
 import fitz  # PyMuPDF
 import sys
 import json
@@ -32,7 +33,7 @@ app = FastAPI(title="PDF Processing Service")
 # The 'app' logic handles startup/shutdown events
 client = httpx.AsyncClient(timeout=300.0)
 TTS_SERVICE_URL = "http://tts-service:5002/api/tts"
-# This is the model specified in your docker-compose.yml
+# This is the model specified in your docker-compose.base.yml
 TTS_MODEL_NAME = "tts_models/en/ljspeech/tacotron2-DDC"
 
 
@@ -110,6 +111,40 @@ async def get_citation(book_id: str, timestamp: float = 0.0):
     return citation_data
 
 
+@app.get("/api/v1/document/{pdf_filename}")
+async def serve_pdf_document(pdf_filename: str):
+    """
+    Serves the original source PDF document from the input directory.
+    """
+    safe_filename = re.sub(r'[^\w\-\.]', '', pdf_filename).strip()
+
+    if not safe_filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Must be a PDF file")
+
+    file_path = INPUT_DIR / safe_filename
+
+    # Verify file exists and is actually a file
+    if not file_path.exists() or not file_path.is_file():
+        logger.warning(f"Document request failed: File not found at {file_path}")
+        raise HTTPException(status_code=404, detail="PDF document not found")
+
+    # Optional: Check file size (prevent serving corrupted/huge files)
+    file_size = file_path.stat().st_size
+    if file_size > 100 * 1024 * 1024:  # 100MB
+        logger.error(f"PDF exceeds size limit: {file_size} bytes")
+        raise HTTPException(status_code=413, detail="PDF file too large")
+
+    logger.info(f"Serving source PDF: {file_path} ({file_size} bytes)")
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=\"{safe_filename}\"",
+            "Cache-Control": "public, max-age=3600",
+            "Accept-Ranges": "bytes"
+        }
+    )
+
 # ========================================
 # Core Processing Pipeline
 # (These functions are now called by the API, not __main__)
@@ -174,6 +209,53 @@ async def run_full_pipeline(pdf_filename: str):
         logger.error(f"Pipeline HALTED for {pdf_filename} before Stage 3 due to missing citation path.")
 
 
+# ADD THIS NEW HELPER FUNCTION
+# (This is from E2's proposal)
+
+def extract_text_blocks_with_coords(page):
+    """
+    Extract text blocks with bounding box coordinates from a PDF page.
+
+    Uses PyMuPDF's get_text("dict") for structured extraction.
+
+    Args:
+        page: fitz.Page object
+
+    Returns:
+        list: Text blocks with coordinates
+    """
+    blocks_data = []
+
+    # Get structured text data
+    text_dict = page.get_text("dict")
+
+    for block in text_dict["blocks"]:
+        # Skip non-text blocks (images, etc)
+        if block["type"] != 0:
+            continue
+
+        # Process each line in the block
+        for line in block["lines"]:
+            # Process each span (text run with same formatting)
+            for span in line["spans"]:
+                # Extract bounding box
+                bbox = span["bbox"]  # [x0, y0, x1, y1]
+
+                blocks_data.append({
+                    "text": span["text"],
+                    "bbox": {
+                        "x": round(bbox[0], 2),
+                        "y": round(bbox[1], 2),
+                        "width": round(bbox[2] - bbox[0], 2),
+                        "height": round(bbox[3] - bbox[1], 2)
+                    },
+                    "font_size": round(span["size"], 2),
+                    "font_name": span["font"],
+                    "block_type": "span"  # Granularity level
+                })
+
+    return blocks_data
+
 # --- Stage 1: Process PDF to Raw JSON ---
 # (This function is unchanged from your original)
 def process_pdf(pdf_filename: str):
@@ -196,19 +278,28 @@ def process_pdf(pdf_filename: str):
             }
             for page_num in range(doc.page_count):
                 page = doc.load_page(page_num)
+
+                # --- OLD (Keep for backward compatibility) ---
                 blocks = page.get_text("blocks", sort=True)
                 page_text_chunks = []
                 for b_index, b in enumerate(blocks):
                     block_text = b[4].replace("-\n", "").replace("\n", " ").strip()
                     if block_text:
                         page_text_chunks.append(block_text)
-                if page_text_chunks:
+
+                # --- NEW (Add coordinate data) ---
+                coordinate_blocks = extract_text_blocks_with_coords(page)
+
+                # --- MODIFIED (Add new key to output) ---
+                if page_text_chunks or coordinate_blocks:
                     output_data["content"].append({
                         "page_number": page_num + 1,
-                        "text_blocks": page_text_chunks
+                        "text_blocks": page_text_chunks,  # <-- OLD list of strings
+                        "coordinate_blocks": coordinate_blocks  # <-- NEW list of dicts
                     })
-        with open(cache_file_path, 'w', encoding='utf-8') as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False)
+
+            with open(cache_file_path, 'w', encoding='utf-8') as f:
+                json.dump(output_data, f, indent=2, ensure_ascii=False)
         logger.info(f"Stage 1 complete. Raw text cache saved to: {cache_file_path}")
         return cache_file_path
     except Exception as e:
@@ -460,5 +551,3 @@ def get_citation_at_timestamp(citation_json_path: Path, timestamp_seconds: float
             }
     logger.warning(f"No chunk found for timestamp: {timestamp_seconds}")
     return None
-
-

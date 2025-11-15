@@ -1,0 +1,87 @@
+# =============================================================================
+# Project Rebuild — ROCm Base (Host-Linked Edition for WSL2)
+# -----------------------------------------------------------------------------
+# Purpose:
+#   Use the host ROCm (6.4.2) and DXG bridge directly, avoiding symbol mismatch.
+#   Container remains clean and stable, only differing in runtime linkage.
+#
+# Base:
+#   rocm/pytorch:rocm6.4.4_ubuntu22.04_py3.10_pytorch_release_2.7.1
+#   (Still provides PyTorch 2.7.1 build, Python 3.10)
+# =============================================================================
+
+FROM rocm/pytorch:rocm6.4.4_ubuntu22.04_py3.10_pytorch_release_2.7.1
+
+LABEL org.opencontainers.image.title="Project Rebuild ROCm Base (WSL Host-Linked)" \
+      org.opencontainers.image.description="ROCm base configured to use WSL2 host runtime (ROCm 6.4.2 + DXG bridge)" \
+      org.opencontainers.image.vendor="Project Rebuild" \
+      org.opencontainers.image.licenses="MIT"
+
+WORKDIR /workspace
+
+# -----------------------------------------------------------------------------
+# Core system dependencies
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      wget curl ca-certificates \
+      git gcc g++ make \
+      espeak-ng libsndfile1-dev ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Environment variables for ROCm runtime + PyTorch tuning
+# -----------------------------------------------------------------------------
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+    HIP_VISIBLE_DEVICES=0 \
+    ROCR_VISIBLE_DEVICES=0 \
+    HSA_FORCE_FINE_GRAIN_PCIE=1 \
+    PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512 \
+    PYTHONUNBUFFERED=1 \
+    LD_LIBRARY_PATH="/usr/lib/wsl/lib:/opt/rocm/magma/lib:/opt/rocm/lib:/usr/local/lib"
+
+# -----------------------------------------------------------------------------
+# Sanity verification (keeps image’s /opt/rocm intact for build)
+# -----------------------------------------------------------------------------
+RUN python3 - <<'PY'
+import torch, sys
+print("Python:", sys.version)
+print("Torch version:", torch.__version__)
+assert torch.__version__.startswith("2.7.1"), f"Unexpected torch version: {torch.__version__}"
+print("✓ Torch version OK and compatible with ROCm userland.")
+PY
+
+# -----------------------------------------------------------------------------
+# Optional: Document the runtime override (do not move /opt/rocm)
+# -----------------------------------------------------------------------------
+# NOTE: We keep /opt/rocm intact for build compatibility.
+# At runtime, the host’s ROCm (e.g. /opt/rocm-6.4.2) will override this path:
+#   docker run -it --rm \
+#     --device=/dev/dxg \
+#     --group-add=video \
+#     --security-opt=seccomp:unconfined \
+#     -v /usr/lib/wsl/lib:/usr/lib/wsl/lib:ro \
+#     -v /opt/rocm-6.4.2:/opt/rocm:ro \
+#     -e LD_LIBRARY_PATH="/usr/lib/wsl/lib:/opt/rocm/magma/lib:/opt/rocm/lib:/usr/local/lib" \
+#     -e HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+#     project-rebuild-gpu:wsl-linked \
+#     /bin/bash
+#
+# This ensures the container can build and import torch,
+# but at runtime uses the live WSL ROCm driver stack.
+
+
+# -----------------------------------------------------------------------------
+# Optional child-extension layer
+# -----------------------------------------------------------------------------
+ARG EXTRA_APT=""
+RUN if [ -n "$EXTRA_APT" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends $EXTRA_APT && \
+      rm -rf /var/lib/apt/lists/* ; \
+    fi
+
+COPY requirements-base-additions.txt /tmp/requirements-base-additions.txt
+RUN if [ -s /tmp/requirements-base-additions.txt ]; then \
+      python3 -m pip install --no-cache-dir -r /tmp/requirements-base-additions.txt; \
+    fi && rm -f /tmp/requirements-base-additions.txt || true
+
+CMD ["/bin/bash"]

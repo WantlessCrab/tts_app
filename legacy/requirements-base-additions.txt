@@ -1,0 +1,6 @@
+# Only linked to the foundation Dockerfile.rocm-base
+fastapi==0.104.1
+uvicorn==0.24.0
+httpx==0.25.1
+aiofiles==23.2.1
+python-multipart

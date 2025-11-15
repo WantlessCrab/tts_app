@@ -1,6 +1,6 @@
 # ~/TTS/my_app/audio_server.py
 from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -253,6 +253,54 @@ async def get_audiobook_status(book_id: str):
         logger.error(f"Error reading manifest for {book_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to read audiobook data")
 
+
+@app.get("/api/pdf/{pdf_filename}")
+async def proxy_serve_pdf(pdf_filename: str):
+    """
+    Proxies request for source PDF document to the pdf-service.
+    FIXED: Uses client.get() for small files to avoid stream closure bugs.
+    """
+    safe_filename = re.sub(r'[^\w\-\.]', '', pdf_filename).strip()
+
+    if not safe_filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Must be a PDF file")
+
+    try:
+        api_url = f"{PDF_SERVICE_URL}/api/v1/document/{safe_filename}"
+        logger.info(f"Proxying PDF request via GET: {api_url}")
+
+        # --- THE FIX ---
+        # 1. Use client.get() to download the entire file (it's small)
+        response = await client.get(api_url, timeout=30.0)
+
+        # Propagate error from pdf-service if it occurs
+        response.raise_for_status()
+
+        # 2. Return a standard Response with the full content
+        return Response(
+            content=response.content,  # Send all content at once
+            status_code=response.status_code,
+            media_type=response.headers.get("content-type", "application/pdf"),
+            headers={
+                k: v for k, v in response.headers.items()
+                if k.lower() in [
+                    'content-disposition', 'content-length', 'etag',
+                    'accept-ranges', 'last-modified', 'cache-control'
+                ]
+            }
+        )
+        # --- END FIX ---
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Error proxying PDF from pdf-service: {e.response.status_code}")
+        try:
+            detail = e.response.json().get("detail", "Failed to retrieve PDF")
+        except:
+            detail = f"Failed to retrieve PDF (HTTP {e.response.status_code})"
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+    except Exception as e:
+        logger.error(f"Error proxying PDF: {e}")
+        raise HTTPException(status_code=500, detail="PDF service not available")
 
 @app.get("/api/audiobook/{book_id}/play/{chunk_filename}")
 async def serve_audiobook_chunk(book_id: str, chunk_filename: str):

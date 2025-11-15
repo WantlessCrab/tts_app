@@ -51,7 +51,9 @@
         "dist",
         "build",
         "model",
-        "models"
+        "models",
+        "pdfjs",
+        "wavesurfer"
     ],
     "global_exclude_patterns": [
           "README.md",
