@@ -2,7 +2,7 @@ services:
   # This MUST match the service name in the base file
   rebuild-gpu-service:
     build:
-      # Override to the 'gpu-testing' Dockerfile
+      # Override to the 'gpu-testing' dockerfile.base
       context: .
       dockerfile: dockerfile.gpu-testing
     image: project-rebuild-gpu-testing:latest # Use a new image name

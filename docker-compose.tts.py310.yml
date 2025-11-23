@@ -1,0 +1,54 @@
+# ===================================================================
+# 1. DEFINE the "Immutable" GPU Fixes (YAML Anchor)
+# ===================================================================
+x-gpu-service-config: &gpu-service-config
+  devices:
+    - /dev/dxg:/dev/dxg
+  group_add:
+    - video
+  cap_add:
+    - SYS_PTRACE
+  security_opt:
+    - seccomp:unconfined
+  ipc: host
+  shm_size: 8g
+  environment:
+    - ROCR_VISIBLE_DEVICES=0
+    - HIP_VISIBLE_DEVICES=0
+    - PYTHONUNBUFFERED=1
+    - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/rocm/lib
+
+# ===================================================================
+# 2. SINGLE SERVICE - TTS Processor Only
+# ===================================================================
+services:
+  tts-processor-service:
+    build:
+      context: .
+      # --- CHANGE 1: Point to the new Dockerfile ---
+      dockerfile: dockerfile.tts
+    # --- CHANGE 2: New container name ---
+    container_name: project-rebuild-tts-service
+    <<: *gpu-service-config
+
+    # --- CHANGE 3: Map to a different host port (e.g., 8002) ---
+    ports:
+      - "8002:8000" # Access TTS service on host port 8002
+
+    volumes:
+      # Surgical Mounts (from our proven template)
+      - /usr/lib/wsl/lib/libdxcore.so:/usr/lib/wsl/lib/libdxcore.so:ro
+      - /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1:/opt/rocm/lib/libhsa-runtime64.so.1:ro
+
+      # --- CHANGE 4: Add TTS Model Cache (from e2's feedback) ---
+      # This saves models to your host, preventing re-downloading
+      - ./tts_models:/root/.local/share/tts
+
+    # --- CHANGE 5: The command to run the TTS server ---
+    command: >
+      bash -c "
+        TORCH_LIB_PATH=$$(python3 -c 'import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))');
+        rm -f \"$$TORCH_LIB_PATH/libhsa-runtime64.so\"*;
+        echo '--- [TTS-PROC] Patch complete. Bundled libhsa removed.';
+        exec python3 -m TTS.server.server --model_name 'tts_models/en/ljspeech/tacotron2-DDC' --host 0.0.0.0 --port 8000
+      "
