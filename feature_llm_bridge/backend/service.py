@@ -11,7 +11,7 @@ class RelayService:
         agent_id = status.agent_id
         self.state.connected_agents[agent_id] = status
 
-        # Ensure config exists for this agent
+        # Ensure config exists
         if agent_id not in self.state.agent_configs:
             self.state.agent_configs[agent_id] = AgentRoutingConfig()
 
@@ -32,33 +32,30 @@ class RelayService:
         if target == "None" or target not in self.state.connected_agents:
             return {"status": "no_target"}
 
-        # --- LOGIC GATE ---
-
         should_send = False
 
-        # 1. The "Toggle Next" (One-Shot)
+        # 1. One-Shot
         if config.send_next_only:
             should_send = True
-            # Auto-disable after use (The "Toggle" effect)
             config.send_next_only = False
             print(f"[Brain] One-Shot fired: {source_id} -> {target}")
 
-        # 2. The "One-Way Stream"
+        # 2. Streaming
         elif config.auto_stream:
             should_send = True
             print(f"[Brain] Streaming: {source_id} -> {target}")
 
-        # 3. The "Two-Way Loop"
+        # 3. Loop
         elif config.recursive_loop:
             if self.state.max_iterations > 0:
                 should_send = True
                 self.state.max_iterations -= 1
-                print(f"[Brain] Loop Step: {source_id} -> {target}")
+                print(
+                    f"[Brain] Loop Step: {source_id} -> {target} (Turns left: {self.state.max_iterations})")
             else:
-                # Safety Brake
                 config.recursive_loop = False
+                print(f"[Brain] 🛑 Max turns reached. Stopping {source_id}.")
 
-                # Execute
         if should_send:
             self.pending_payloads[target] = content
             return {"status": "routed", "target": target}
@@ -66,7 +63,32 @@ class RelayService:
         return {"status": "captured_only"}
 
     def update_config(self, agent_id: str, new_config: AgentRoutingConfig):
+        """
+        Updates configuration and handles 'Linked State' logic.
+        """
+        # 1. Get the previous state to detect changes
+        old_config = self.state.agent_configs.get(agent_id, AgentRoutingConfig())
+
+        # 2. Apply the new state
         self.state.agent_configs[agent_id] = new_config
+
+        # 3. THE SYNC LOGIC: Did we just turn OFF the loop?
+        if old_config.recursive_loop and not new_config.recursive_loop:
+            target_id = new_config.target_agent
+
+            # Check if target exists
+            if target_id in self.state.agent_configs:
+                target_config = self.state.agent_configs[target_id]
+
+                # Check for MUTUAL PAIRING (Are they linked?)
+                # Condition 1: Target is looping
+                # Condition 2: Target is pointing back at us
+                if (target_config.recursive_loop and
+                        target_config.target_agent == agent_id):
+                    print(
+                        f"[Brain] 🔗 Link broken by {agent_id}. Auto-stopping partner: {target_id}.")
+                    target_config.recursive_loop = False
+
         return self.state.agent_configs[agent_id]
 
 
