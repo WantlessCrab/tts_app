@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "LLM Bridge - The Orchestrator",
+  "version": "1.0",
+  "description": "Connects browser-based AI agents to the local orchestration server.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*",
+    "http://localhost:8005/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "overlay.css"
+      ]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

@@ -3,8 +3,8 @@ services:
   rebuild-gpu-service:
     build:
       # Override to the 'gpu-testing' dockerfile.base
-      context: .
-      dockerfile: dockerfile.gpu-testing
+      context: ..
+      dockerfile: ../dockerfile.gpu-testing
     image: project-rebuild-gpu-testing:latest # Use a new image name
     container_name: project-rebuild-gpu-testing
 

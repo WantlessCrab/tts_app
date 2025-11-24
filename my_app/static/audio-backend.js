@@ -1,5 +1,5 @@
 /**
- * AUDIO BACKEND BASE CLASS
+ * audio-backend.js
  *
  * Abstract interface for audio playback engines.
  * All methods must be implemented by subclasses.
@@ -81,6 +81,14 @@ class AudioBackend extends EventEmitter {
    */
   setVolume(volume) {
     throw new Error('AudioBackend.setVolume() must be implemented by subclass');
+  }
+
+  /**
+   * Set loop state
+   * @param {boolean} isLooping - True to loop, false to not
+   */
+  setLoop(isLooping) {
+    throw new Error('AudioBackend.setLoop() must be implemented by subclass');
   }
 
   /**

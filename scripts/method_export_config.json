@@ -1,0 +1,13 @@
+{
+  "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
+  "target_files": [
+    {
+      "file": "../my_app/pdf_processor/process.py",
+      "methods": [
+        "run_full_pipeline",
+        "generate_audio_streaming"
+      ]
+    }
+  ],
+  "max_file_size_mb": 10
+}

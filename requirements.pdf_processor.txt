@@ -1,0 +1,13 @@
+# requirements.pdf_processor.txt
+
+# 1. The Web Server Framework
+fastapi
+
+# 2. The ASGI Server to run FastAPI
+uvicorn[standard]
+
+# 3. The HTTP client to call the tts-service
+httpx
+
+# 4. The PDF processing library
+PyMuPDF

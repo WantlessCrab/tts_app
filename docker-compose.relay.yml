@@ -1,0 +1,27 @@
+# docker-compose.relay.yml
+
+services:
+  llm-relay-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    container_name: project-rebuild-llm-relay
+    ports:
+      - "8005:8005"
+    volumes:
+      - ./feature_llm_bridge/backend:/app
+      # NEW: Mount the certificates
+      - ./certs:/app/certs:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HOST_GATEWAY=host.docker.internal
+    stdin_open: true
+    tty: true
+    # NEW: Secure Start Command
+    command: >
+      uvicorn router:app 
+      --host 0.0.0.0 
+      --port 8005 
+      --ssl-keyfile /app/certs/key.pem 
+      --ssl-certfile /app/certs/cert.pem
+      --reload

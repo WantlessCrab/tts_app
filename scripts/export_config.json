@@ -1,47 +1,23 @@
 {
-    "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
-    "projects": [
-        {
-            "path": "/home/wantless/TTS/my_app",
-            "name": "TTS_App_Core"
-        },
-        {
-            "path": "/home/wantless/TTS",
-            "name": "TTS_Root_Files",
-            "include_patterns": [
-                "dockerfile.rocm",
-                "docker-compose.yml",
-                "requirements-rocm-clean.txt"
-            ],
-            "skip_dirs": [
-                "__pycache__",
-                ".git",
-                "node_modules",
-                ".idea",
-                "venv",
-                ".venv",
-                "dist",
-                "build",
-                "model",
-                "models",
-                "my_app"
-            ]
-        }
-    ],
-    "global_include_patterns": [
-        "*.py",
-        "*.yml",
-        "*.yaml",
-        "*.json",
-        "Dockerfile*",
-        "*.md",
-        "*.sh",
-        "*.json",
-        "*.html",
-        "*.js",
-        "*.ts"
-    ],
-    "global_skip_dirs": [
+  "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
+  "projects": [
+    {
+      "path": "/home/wantless/TTS/my_app",
+      "name": "TTS_App_Core",
+      "include_patterns": [
+        "audio_server.py",
+        "process.py",
+        "player.js",
+        "player.html"
+      ]
+    },
+    {
+      "path": "/home/wantless/TTS",
+      "name": "TTS_Root_Files",
+      "include_patterns": [
+        "audio-backend.js"
+      ],
+      "skip_dirs": [
         "__pycache__",
         ".git",
         "node_modules",
@@ -52,12 +28,30 @@
         "build",
         "model",
         "models",
+        "my_app",
         "pdfjs",
         "wavesurfer"
-    ],
-    "global_exclude_patterns": [
-          "README.md",
-          "README*.md"
-    ],
-    "max_file_size_mb": 10
+      ]
+    }
+  ],
+  "global_include_patterns": [],
+  "global_skip_dirs": [
+    "__pycache__",
+    ".git",
+    "node_modules",
+    ".idea",
+    "venv",
+    ".venv",
+    "dist",
+    "build",
+    "model",
+    "models",
+    "pdfjs",
+    "wavesurfer"
+  ],
+  "global_exclude_patterns": [
+    "README.md",
+    "README*.md"
+  ],
+  "max_file_size_mb": 10
 }

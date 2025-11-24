@@ -1,14 +1,17 @@
+# dockerfile.tts.py310
+
 # ========================================
-# 1. THE BASE IMAGE (OUR "GOLDEN TEMPLATE")
+# 1. THE BASE IMAGE (OUR "GOLDEN TEMPLATE" PY3.10)
 # ========================================
-# Inherits the OS, Python, PyTorch (ROCm), and Numpy
-FROM project-rebuild-gold-standard:latest
+# This is our new, compatible Py3.10 base
+FROM project-rebuild-gold-standard-py310:latest
 
 # ========================================
 # 2. THE "APPLICATION LAYER" (TTS SERVICE)
 # ========================================
 
 # --- 1. Install System Dependencies ---
+# These are the audio packages from your working legacy Dockerfile
 #
 RUN apt-get update && apt-get install -y --no-install-recommends \
     espeak-ng \
@@ -18,18 +21,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # --- 2. Install Python Dependencies (Proven Legacy Method) ---
 
-# 1. Copy the "safe" (and now Py3.12-compatible) requirements file
+# 1. Copy the "safe" requirements file
 COPY requirements-rocm-clean.txt .
 
-# 2. Install all "safe" packages from your list.
+# 2. Install all packages. These will all work
+#    because we are on Python 3.10.
 #
 RUN pip3 install --no-cache-dir -r requirements-rocm-clean.txt
 
-# 3. Install "problematic" packages separately
+# 3. Install "problematic" packages separately, as per legacy file
 #
 RUN pip3 install --no-cache-dir transformers>=4.33.0 --no-deps
 
-# 4. Manually install transformers' sub-dependencies
+# 4. Manually install transformers' sub-dependencies (from legacy file)
 #
 RUN pip3 install --no-cache-dir \
     tokenizers \
@@ -40,27 +44,18 @@ RUN pip3 install --no-cache-dir \
     filelock \
     typing-extensions
 
-# 5. Install other "problematic" packages
-# --- THIS LINE IS THE FIX for our last build failure ---
+# 5. Install trainer (this will work now on Py3.10)
 #
-# RUN pip3 install --no-cache-dir trainer>=0.0.36 --no-deps
+RUN pip3 install --no-cache-dir trainer>=0.0.36 --no-deps
 
-# --- 3. Install TTS from Local Source (The "Aha!" Moment) ---
-#
+# --- 3. Install TTS from Local Source ---
+# This replicates the logic from your legacy file
 COPY . /workspace/
 WORKDIR /workspace
 
-# 1. Remove the version check condition
-RUN sed -i 's/or Version(python_version) >= Version("3.12")//g' setup.py
-
-# 2. Fix the error message
-RUN sed -i 's/and < 3.12 //g' setup.py
-
-# 3. Fix python_requires - note the space after comma!
-RUN sed -i 's/>=3.9.0, <3.12/>=3.9.0/g' setup.py
-
 RUN ln -s requirements-rocm-clean.txt requirements.txt
 
+# We can now run this command *without* any patches
 RUN pip3 install --no-cache-dir -e .
 
 # --- 4. Verify the ROCm Stack Survived ---

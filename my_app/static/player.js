@@ -1,8 +1,7 @@
 //
 // my_app/static/player.js
-// Phase 0B.5: TTSAudioPlayer Class Shell
-// This file REPLACES the old player.js
-// It depends on event-emitter.js, audio-backend.js, and native-audio-backend.js
+// TTSAudioPlayer Class Shell
+// depends on event-emitter.js, audio-backend.js, and native-audio-backend.js
 //
 
 /**
@@ -33,9 +32,12 @@ class TTSAudioPlayer {
       mode: 'standalone',
       bookId: null,
       manifest: null,
+      coordinateData: null,
+      hasCoordinateIndex: false,
       currentChunkIndex: 0,
       totalChunks: 0,
       readyChunks: [],
+      chunks: null, // ← FINAL CONSISTENCY FIX: Declares property used later
       isProcessing: false,
       processingProgress: 0,
     },
@@ -45,7 +47,7 @@ class TTSAudioPlayer {
       currentPageNum: 1,
       totalPages: 0,
       scale: 1.0,
-      fitMode: 'height', //  'width' or 'height'
+      fitMode: 'height',
       isPageRendering: false,
       pendingPageNum: null,
       currentTextLayer: null,
@@ -66,6 +68,7 @@ class TTSAudioPlayer {
       citationDisplay: null,
       processingStatus: '',
       errorMessage: '',
+      lastCitation: null,
     },
   };
 
@@ -236,14 +239,15 @@ class TTSAudioPlayer {
    * @private
    */
   _queryDOMElements() {
-    // AUDIO ELEMENT (for backend initialization)
     this.elements.audioElement = document.getElementById('audio-element');
     if (!this.elements.audioElement) {
       throw new Error('Critical: <audio id="audio-element"> element not found');
     }
+
     // PDF VIEWER
     this.elements.pdfViewerContainer = document.getElementById('pdf-viewer-container');
     this.elements.pdfCanvas = document.getElementById('pdf-canvas');
+    this.elements.highlightContainer = document.getElementById('highlight-container'); // 1.1 FIX
     this.elements.pageIndicator = document.getElementById('page-indicator');
     this.elements.prevPageButton = document.getElementById('prev-page-button');
     this.elements.nextPageButton = document.getElementById('next-page-button');
@@ -253,8 +257,9 @@ class TTSAudioPlayer {
     this.elements.pageJumpInput = document.getElementById('page-jump-input');
     this.elements.zoomInButton = document.getElementById('zoom-in-button');
     this.elements.zoomOutButton = document.getElementById('zoom-out-button');
-    this.elements.zoomFitWidthButton = document.getElementById('zoom-fit-width-button');  // NEW
+    this.elements.zoomFitWidthButton = document.getElementById('zoom-fit-width-button');
     this.elements.zoomFitHeightButton = document.getElementById('zoom-fit-height-button');
+    this.elements.zoomResetButton = document.getElementById('zoom-reset-button'); // 3.3 FIX
     this.elements.zoomLevel = document.getElementById('zoom-level');
     this.elements.clickSeekToggle = document.getElementById('click-seek-toggle');
     this.elements.pdfPageControls = document.getElementById('pdf-page-controls');
@@ -292,10 +297,9 @@ class TTSAudioPlayer {
     // ERROR DISPLAY
     this.elements.errorLog = document.getElementById('error-log');
 
-    // VALIDATION: Check critical elements exist
     const criticalElements = [
       'playPauseButton', 'speedSlider', 'volumeSlider',
-      'sourceSelect', 'fileList', 'timeDisplay'
+      'sourceSelect', 'fileList', 'timeDisplay', 'highlightContainer'
     ];
 
     for (const elementName of criticalElements) {
@@ -321,21 +325,16 @@ class TTSAudioPlayer {
       this.state.audio.duration = data.duration;
       this._updateTimeDisplay();
 
-      // --- BEGIN FIX ---
-      // Re-apply cached state to the newly loaded audio,
-      // fixing the .load() reset bug.
       this.state.audio.backend.setPlaybackRate(this.state.audio.playbackRate);
       this.state.audio.backend.setVolume(this.state.audio.volume);
       this.state.audio.backend.setLoop(this.state.audio.isLooping);
-      // --- END FIX ---
 
-      // Enable play button (may be disabled during load)
       if (this.elements.playPauseButton) {
         this.elements.playPauseButton.disabled = false;
       }
     });
 
-    // PLAY: Playback started
+    // PLAY/PAUSE/TIMEUPDATE/ERROR events (Unchanged)
     backend.on(AudioBackend.EVENTS.PLAY, () => {
       this.state.audio.isPlaying = true;
       if (this.elements.playPauseButton) {
@@ -343,7 +342,6 @@ class TTSAudioPlayer {
       }
     });
 
-    // PAUSE: Playback paused
     backend.on(AudioBackend.EVENTS.PAUSE, () => {
       this.state.audio.isPlaying = false;
       if (this.elements.playPauseButton) {
@@ -351,34 +349,52 @@ class TTSAudioPlayer {
       }
     });
 
-    // TIMEUPDATE: Time position changed
     backend.on(AudioBackend.EVENTS.TIMEUPDATE, (data) => {
       this.state.audio.currentTime = data.currentTime;
       this._updateTimeDisplay();
       this._updateSeekSlider();
     });
-    // AUDIOPROCESS: High-frequency time updates (60Hz)
-    backend.on(AudioBackend.EVENTS.AUDIOPROCESS, (data) => {
-      // Sync PDF page
-      if (this.state.audiobook.mode === 'audiobook' && this.state.pdf.pdfDocument) {
-        const newPage = this.getPageForTimestamp(data.currentTime);
 
-        // Only trigger re-render if page actually changed (debouncing)
+    // 2.1 M2 FIX: Create throttled function for highlighting only
+    this._throttledHighlightUpdate = this.throttle(async (currentTime) => {
+      const bookId = this.state.audiobook.bookId;
+
+      if (this.state.audiobook.mode !== 'audiobook' || !bookId || !this.state.pdf.pdfDocument) {
+        return;
+      }
+
+      this.clearHighlights(); // Clear BEFORE fetching
+
+      try {
+        const citation = await this.fetchCitation(bookId, currentTime);
+
+        if (citation && citation.highlighting_enabled) {
+          // NOTE: Page sync logic is REMOVED from here (it's now 60Hz independent)
+          this.highlightAtTimestamp(citation);
+        }
+      } catch (error) {
+        console.warn('Highlight update failed (non-fatal):', error);
+      }
+    }, 100); // 100ms throttle
+
+    // Bind AUDIOPROCESS (60Hz) with SEPARATED concerns
+    backend.on(AudioBackend.EVENTS.AUDIOPROCESS, (data) => {
+      // PRIORITY 1: Page Sync (Must run at 60Hz and be API-independent)
+      if (this.state.audiobook.mode === 'audiobook' && this.state.pdf.pdfDocument) {
+        const newPage = this.getPageForTimestamp(data.currentTime); // Local lookup
         if (newPage && newPage !== this.state.pdf.currentPageNum) {
-          this.queueRenderPage(newPage);
+          this.queueRenderPage(newPage); // NO await here
         }
       }
+
+      // PRIORITY 2: Highlighting (Throttled, API-dependent)
+      this._throttledHighlightUpdate(data.currentTime);
     });
 
     backend.on(AudioBackend.EVENTS.FINISH, () => {
-      console.log('Playback finished');
-
-      // Check mode and advance if audiobook
       if (this.state.audiobook.mode === 'audiobook') {
-        console.log('Chunk finished, advancing to next...');
         this.playNextChunk();
       } else {
-        // Standalone mode - just stop
         this.state.audio.isPlaying = false;
         if (this.elements.playPauseButton) {
           this.elements.playPauseButton.textContent = 'Play';
@@ -391,15 +407,70 @@ class TTSAudioPlayer {
       this.state.audio.currentTime = data.currentTime;
       this._updateTimeDisplay();
       this._updateSeekSlider();
+      this.clearHighlights(); // Clear stale highlights immediately
     });
 
-    // ERROR: Backend error occurred
     backend.on(AudioBackend.EVENTS.ERROR, (data) => {
       console.error('Backend error:', data.error);
       this.logError(data.error.message);
     });
+  }
 
-    console.log('  ✓ Backend event listeners bound');
+  highlightAtTimestamp(citation) {
+    // Defensive check: Highlighting requires a valid index pointer and coordinate data cache
+    if (!citation || citation.span_start_index === -1 || !this.state.audiobook.coordinateData) {
+      return;
+    }
+
+    const currentPage = citation.page;
+
+    // ✅ FIX 2: Page Guard (Rendering Stability)
+    // Only draw the highlight if the citation page matches the currently rendered page.
+    if (currentPage !== this.state.pdf.currentPageNum) {
+      return;
+    }
+
+    // Use the coordinateData cache (which is the content of the _raw.json file)
+    const pageCoordData = this.state.audiobook.coordinateData[currentPage - 1];
+
+    if (!pageCoordData || !pageCoordData.coordinate_blocks) {
+      return;
+    }
+
+    const allSpans = pageCoordData.coordinate_blocks;
+    const startIdx = citation.span_start_index;
+    const endIdx = citation.span_end_index;
+
+    // Slice the spans array using the indices provided by the backend
+    const sentenceSpans = allSpans.slice(startIdx, endIdx + 1);
+
+    if (sentenceSpans.length === 0) {
+      return;
+    }
+
+    // Aggregate the span bounding boxes into rectangular lines
+    const lineBoxes = this._aggregateSpanBounds(sentenceSpans);
+    const container = this.elements.highlightContainer;
+
+    // Draw rectangles for each line box
+    lineBoxes.forEach((lineBox) => {
+      const screenCoords = this.calculateCanvasCoordinates(lineBox);
+      if (!screenCoords) return;
+
+      const highlightDiv = document.createElement('div');
+      highlightDiv.className = 'highlight-rect sentence current';
+
+      highlightDiv.style.left = `${screenCoords.x}px`;
+
+      // ✅ FINAL SPATIAL FIX: Subtract the height to correct the Y-axis inversion
+      // screenCoords.y represents the bottom edge in flipped space. Subtracting height gives the true top edge.
+      highlightDiv.style.top = `${screenCoords.y - screenCoords.height}px`;
+
+      highlightDiv.style.width = `${screenCoords.width}px`;
+      highlightDiv.style.height = `${screenCoords.height}px`;
+
+      container.appendChild(highlightDiv);
+    });
   }
 
   /**
@@ -410,118 +481,78 @@ class TTSAudioPlayer {
    * @private
    */
   _bindDOMEvents() {
-    // CRITICAL: All handlers use arrow functions to preserve 'this' context
-
-    // === PLAYBACK CONTROLS ===
-    // Phase 5.1: Play/Pause (bound now for initial testing)
     this.elements.playPauseButton.addEventListener('click', () => {
       this.playPause();
     });
-
-    // Phase 5.2: Skip controls (to be uncommented in Part 5.2)
-
     this.elements.skipBack5.addEventListener('click', () => {
       this.skip(-5);
     });
-
     this.elements.skipBack10.addEventListener('click', () => {
       this.skip(-10);
     });
-
     this.elements.skipForward5.addEventListener('click', () => {
       this.skip(5);
     });
-
     this.elements.skipForward10.addEventListener('click', () => {
       this.skip(10);
     });
-
-
-    // Phase 5.3: Sliders (to be uncommented in Part 5.3)
-
     this.elements.speedSlider.addEventListener('input', (e) => {
-      const speed = parseFloat(e.target.value);
-      this.setSpeed(speed);
+      this.setSpeed(parseFloat(e.target.value));
     });
-
     this.elements.volumeSlider.addEventListener('input', (e) => {
-      const volume = parseFloat(e.target.value) / 100;
-      this.setVolume(volume);
+      this.setVolume(parseFloat(e.target.value) / 100);
     });
-
     this.elements.seekSlider.addEventListener('input', (e) => {
-      const percentage = parseFloat(e.target.value);
-      const time = (percentage / 100) * this.state.audio.duration;
-      this.seekTo(time);
+      this.seekTo((parseFloat(e.target.value) / 100) * this.state.audio.duration);
     });
-
     this.elements.loopButton.addEventListener('click', () => {
       this.toggleLoop();
     });
-
     this.elements.resetButton.addEventListener('click', () => {
       this.resetSettings();
     });
-
-
-    // Phase 5.4: File management (to be uncommented in Part 5.4)
-
     this.elements.sourceSelect.addEventListener('change', (e) => {
-      const source = e.target.value;
-      this.changeSource(source);
+      this.changeSource(e.target.value);
     });
-
     this.elements.refreshButton.addEventListener('click', () => {
       this.loadFileList();
     });
-
-    // Phase 5.5: Download (to be uncommented in Part 5.5)
-    /*
-    this.elements.downloadButton.addEventListener('click', () => {
-      this.downloadCurrentFile();
-    });
-    */
-
-
-    // PDF Navigation
     this.elements.nextPageButton.addEventListener('click', () => {
       this.nextPage();
     });
-
     this.elements.prevPageButton.addEventListener('click', () => {
       this.previousPage();
     });
-
-    // PDF zoom controls
     this.elements.zoomInButton.addEventListener('click', () => {
       this.zoomIn();
     });
-
     this.elements.zoomOutButton.addEventListener('click', () => {
       this.zoomOut();
     });
-
     this.elements.zoomFitWidthButton.addEventListener('click', () => {
       this.zoomFitWidth();
     });
-
     this.elements.zoomFitHeightButton.addEventListener('click', () => {
       this.zoomFitHeight();
     });
 
-    // Page jump input (on Enter key)
+    // 3.3 FIX: Bind reset zoom button
+    if (this.elements.zoomResetButton) {
+      this.elements.zoomResetButton.addEventListener('click', () => {
+        this.resetZoom();
+      });
+    }
+
     this.elements.pageJumpInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         this.jumpToPage(e.target.value);
       }
     });
 
-    // Click-to-seek toggle
     this.elements.clickSeekToggle.addEventListener('click', () => {
       this.toggleClickSeekMode();
     });
 
-    // PDF canvas click handler
     this.elements.pdfCanvas.addEventListener('click', (e) => {
       this.handlePdfClick(e);
     });
@@ -866,7 +897,8 @@ class TTSAudioPlayer {
     try {
       this.clearError();
 
-      let url = `/api/audio/${this.sanitizeFilename(filename)}?source=${source}`;
+      // point to the file-server on port 8003
+      let url = `http://localhost:8003/${this.sanitizeFilename(filename)}?source=${source}`;
 
       if (source === 'audiobooks') {
         console.warn('loadFile running for an audiobook. This is temporary.');
@@ -931,49 +963,78 @@ class TTSAudioPlayer {
     try {
       this.clearError();
 
-      // Set mode
+      // Clear old state
+      this.state.audiobook.coordinateData = null;
+      this.coordIndex = null;
+      this.state.audiobook.hasCoordinateIndex = false;
+      this.state.audiobook.chunks = null; // Clear out old chunks
+
       this.state.audiobook.mode = 'audiobook';
       this.state.audiobook.bookId = bookId;
 
-      // Fetch manifest from status endpoint (Contract 4)
-      console.log(`Loading audiobook: ${bookId}`);
-      const response = await fetch(`/api/audiobook/${bookId}/status`);
+      console.log(`Loading audiobook and fetching contract data for: ${bookId}`);
 
-      if (!response.ok) {
-        throw new Error(`Failed to load audiobook manifest: ${response.status}`);
+      // Fetch status (lightweight) and full chunk data (heavy)
+      const [statusResponse, coordResponse, fullChunksResponse] = await Promise.all([
+        fetch(`/api/audiobook/${bookId}/status`),
+        fetch(`/api/audiobook/${bookId}/coordinates`),
+        fetch(`/api/audiobook/${bookId}/chunks`) // Full objects (with sentences)
+      ]);
+
+      if (!statusResponse.ok) {
+        throw new Error(`Failed to load audiobook status: ${statusResponse.status}`);
       }
 
-      const data = await response.json();
-
-      // Store manifest
-      this.state.audiobook.manifest = data;
-      this.state.audiobook.totalChunks = data.total_chunks || 0;
-      this.state.audiobook.readyChunks = data.ready_chunks || [];
+      const statusData = await statusResponse.json();
+      this.state.audiobook.manifest = statusData;
+      this.state.audiobook.totalChunks = statusData.total_chunks || 0;
+      this.state.audiobook.readyChunks = statusData.ready_chunks || [];
       this.state.audiobook.currentChunkIndex = 0;
 
-      // Update UI
-      this.elements.currentFileDisplay.textContent = data.metadata?.title || bookId;
+      let sentenceChunks = [];
+      if (fullChunksResponse.ok) {
+        sentenceChunks = await fullChunksResponse.json().then(d => d.chunks);
+      }
 
-      console.log(`Audiobook loaded: ${this.state.audiobook.totalChunks} total chunks.`);
+      // ✅ CRITICAL FIX: Merge filename (from status/readyChunks) with sentence data (from fullChunksResponse)
+      const finalChunks = this.state.audiobook.readyChunks.map(readyChunk => {
+        // Find the matching sentence chunk (they share chunk_id)
+        const sentenceChunk = sentenceChunks.find(sc => sc.chunk_id === readyChunk.chunk_id);
 
-      // --- ADD THIS (Phase 2B / E2's Step 7) ---
-      // Load the corresponding PDF
-      // The source_filename is in the metadata
-      const pdfFilename = data.metadata?.source_filename;
+        if (sentenceChunk) {
+          // Merge the required properties from sentenceChunk (sentences, end_time, etc.)
+          return {
+            ...readyChunk, // Base properties: chunk_id, filename, start_time, duration_seconds
+            sentences: sentenceChunk.sentences, // Add sentence data
+            // Ensure end_time is present for the find function
+            end_time: sentenceChunk.end_time || (readyChunk.start_time + readyChunk.duration_seconds)
+          };
+        }
+        return readyChunk; // Keep lightweight chunk if no sentence data is available
+      });
+
+      this.state.audiobook.chunks = finalChunks; // This is the new, merged list used by playChunk and indexing.
+
+      // Load PDF coordinates and build the index (if we have coordinate data)
+      if (coordResponse.ok) {
+        const coordData = await coordResponse.json();
+        this.state.audiobook.coordinateData = coordData.content;
+
+        // buildCoordinateIndex now uses the merged this.state.audiobook.chunks
+        this.buildCoordinateIndex();
+      } else {
+        console.warn(`Coordinate data fetch failed (${coordResponse.status}). Highlighting disabled.`);
+        this.state.audiobook.coordinateData = null;
+      }
+
+      this.elements.currentFileDisplay.textContent = statusData.metadata?.title || bookId;
+
+      const pdfFilename = statusData.metadata?.source_filename;
       if (pdfFilename) {
         await this.loadPdf(pdfFilename);
-      } else {
-        console.warn('No source_filename found in manifest. PDF will not be loaded.');
-        if (this.elements.pdfViewerComponent) {
-          this.elements.pdfViewerComponent.style.display = 'none'; // Hide if no PDF
-        }
       }
-      // --- END ADDITION ---
 
-      // Start playing first chunk
       await this.playChunk(0);
-
-      // Tell the backend to play the chunk it just loaded.
       await this.play();
 
     } catch (error) {
@@ -1010,8 +1071,9 @@ class TTSAudioPlayer {
    */
   async playChunk(chunkIndex) {
     try {
-      // Get ready chunks from state
-      const chunks = this.state.audiobook.readyChunks || [];
+      // ✅ FIX A: Use the definitive 'chunks' list (full objects) for reliability.
+      // This list is populated from the new /chunks endpoint and contains all metadata.
+      const chunks = this.state.audiobook.chunks || [];
 
       // Validate chunk index
       if (chunkIndex < 0 || chunkIndex >= chunks.length) {
@@ -1027,6 +1089,7 @@ class TTSAudioPlayer {
 
       // Construct URL
       const bookId = this.state.audiobook.bookId;
+      // FIX A: chunk.filename is now reliably available from the full chunk object
       const chunkFilename = chunk.filename;
       const url = `/api/audiobook/${bookId}/play/${chunkFilename}`;
 
@@ -1069,6 +1132,7 @@ class TTSAudioPlayer {
 
     if (newScale <= maxScale) {
       this.state.pdf.scale = newScale;
+      this.clearHighlights();
       this.renderPage(this.state.pdf.currentPageNum);
       this.updateZoomDisplay();
     }
@@ -1086,6 +1150,7 @@ class TTSAudioPlayer {
 
     if (newScale >= minScale) {
       this.state.pdf.scale = newScale;
+      this.clearHighlights();
       this.renderPage(this.state.pdf.currentPageNum);
       this.updateZoomDisplay();
     }
@@ -1100,6 +1165,7 @@ class TTSAudioPlayer {
     // Set scale to null to trigger width calculation
     this.state.pdf.fitMode = 'width';  // Track fit mode
     this.state.pdf.scale = null;
+    this.clearHighlights();
     this.renderPage(this.state.pdf.currentPageNum);
 
     console.log('Fit to width');
@@ -1112,10 +1178,23 @@ class TTSAudioPlayer {
     if (!this.state.pdf.pdfDocument) return;
 
     this.state.pdf.fitMode = 'height';  // Track fit mode
+    this.clearHighlights();
 
     // Calculate fit-to-height scale
     // Need to get page first to know its dimensions
     this._calculateFitHeight(this.state.pdf.currentPageNum);
+  }
+
+  resetZoom() {
+    if (!this.state.pdf.pdfDocument) return;
+
+    // Reset to default scale and fit mode
+    this.state.pdf.scale = 1.0;
+    this.state.pdf.fitMode = 'height';
+
+    this.clearHighlights();
+    this.renderPage(this.state.pdf.currentPageNum);
+    this.updateZoomDisplay();
   }
 
   /**
@@ -1127,20 +1206,15 @@ class TTSAudioPlayer {
     try {
       const page = await this.state.pdf.pdfDocument.getPage(pageNum);
 
-      // Get desired height (container height minus padding)
-      const desiredHeight = this.elements.pdfViewerContainer.clientHeight - 40;
+      // CRITICAL FIX: The padding compensation must be removed.
+      // const desiredHeight = this.elements.pdfViewerContainer.clientHeight - 40; // <-- OLD LINE
+      const desiredHeight = this.elements.pdfViewerContainer.clientHeight; // <-- CORRECTED LINE
 
-      // Get page viewport at scale 1.0 to know natural dimensions
       const viewportDefault = page.getViewport({scale: 1.0});
-
-      // Calculate scale to fit height
       const scale = desiredHeight / viewportDefault.height;
 
-      // Store and render
       this.state.pdf.scale = scale;
       await this.renderPage(pageNum);
-
-      console.log(`Fit to height: ${Math.round(scale * 100)}%`);
 
     } catch (error) {
       console.error('Failed to calculate fit-to-height:', error);
@@ -1188,14 +1262,22 @@ class TTSAudioPlayer {
   toggleClickSeekMode() {
     this.state.pdf.clickSeekEnabled = !this.state.pdf.clickSeekEnabled;
 
-    // Update button appearance
+    // Update button appearance (per e2)
     if (this.elements.clickSeekToggle) {
       if (this.state.pdf.clickSeekEnabled) {
         this.elements.clickSeekToggle.classList.add('active');
-        this.elements.clickSeekToggle.textContent = '🎯 Seek: ON';
+        this.elements.clickSeekToggle.textContent = 'Seek: ON';
+        // Update cursor for PDF canvas
+        if (this.elements.pdfCanvas) {
+          this.elements.pdfCanvas.style.cursor = 'pointer';
+        }
       } else {
         this.elements.clickSeekToggle.classList.remove('active');
-        this.elements.clickSeekToggle.textContent = '🎯 Seek Mode';
+        this.elements.clickSeekToggle.textContent = 'Seek Mode';
+        // Reset cursor
+        if (this.elements.pdfCanvas) {
+          this.elements.pdfCanvas.style.cursor = 'default';
+        }
       }
     }
 
@@ -1206,32 +1288,78 @@ class TTSAudioPlayer {
    * Handle click on PDF canvas to seek audio
    * @param {MouseEvent} event - Click event
    */
+  /**
+   * MILESTONE 3: Handle click on PDF canvas to seek audio
+   * @param {MouseEvent} event - Click event
+   */
   async handlePdfClick(event) {
-    if (!this.state.pdf.clickSeekEnabled) return;
-    if (!this.state.audiobook.manifest) return;
+    if (!this.state.pdf.clickSeekEnabled || !this.state.audiobook.hasCoordinateIndex) return;
 
-    // Get current page
-    const currentPage = this.state.pdf.currentPageNum;
+    const canvas = this.elements.pdfCanvas;
+    const rect = canvas.getBoundingClientRect();
+    const clickX = event.clientX - rect.left;
+    const clickY = event.clientY - rect.top;
 
-    // Find chunk for this page
-    const chunk = this.state.audiobook.readyChunks.find(c => c.page === currentPage);
-
-    if (!chunk) {
-      console.warn(`No audio chunk found for page ${currentPage}`);
-      this.logError(`Page ${currentPage} has no associated audio`);
+    const pdfCoords = this.screenToPdfCoordinates(clickX, clickY);
+    if (!pdfCoords) {
       return;
     }
 
-    // Seek to start of this chunk
-    const seekTime = chunk.start_time || 0;
+    // Find the sentence using the spatial index
+    const sentence = this.findSentenceAtCoordinates(pdfCoords.x, pdfCoords.y);
 
-    console.log(`Seeking to page ${currentPage} at ${seekTime}s`);
-    this.seekTo(seekTime);
+    if (sentence && sentence.chunk) {
+      const seekTime = sentence.chunk.start_time;
+      this.seekTo(seekTime);
 
-    // Optional: Auto-play if paused
-    if (!this.state.audio.isPlaying) {
-      await this.play();
+      if (!this.state.audio.isPlaying) {
+        await this.play();
+      }
     }
+  }
+
+  findSentenceAtCoordinates(pdfX, pdfY) {
+    const currentPage = this.state.pdf.currentPageNum;
+    const pageData = this.state.audiobook.coordinateData?.find(p => p.page_number === currentPage);
+
+    // This check is now redundant due to hasCoordinateIndex guard in handlePdfClick, but kept for function integrity.
+    if (!pageData || !this.coordIndex?.byPage[currentPage]) return null;
+
+    // 1. Find the coordinate block that contains the click (spatial search)
+    const allBlocks = pageData.coordinate_blocks;
+    const clickedBlock = allBlocks.find(block => {
+      const bbox = block.bbox;
+      return pdfX >= bbox.x &&
+          pdfX <= bbox.x + bbox.width &&
+          pdfY >= bbox.y &&
+          pdfY <= bbox.y + bbox.height;
+    });
+
+    if (!clickedBlock) return null;
+
+    // 2. Find the index of the clicked span
+    const clickedSpanIndex = allBlocks.indexOf(clickedBlock);
+
+    // ✅ FIX 5: The index now contains full chunk objects.
+    const chunks = this.coordIndex.byPage[currentPage];
+
+    // 3. Search the index for the chunk/sentence that owns this span index.
+    for (const chunk of chunks) {
+      // chunk is now the full chunk object (containing .sentences)
+      if (chunk.sentences) {
+        for (const sentence of chunk.sentences) {
+          if (clickedSpanIndex >= sentence.span_start_index && clickedSpanIndex <= sentence.span_end_index) {
+            return {
+              chunk: chunk,
+              page: currentPage,
+              sentence: sentence
+            };
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -1283,6 +1411,9 @@ class TTSAudioPlayer {
         if (this.state.audiobook.mode === 'audiobook') {
           if (this.elements.clickSeekToggle) {
             this.elements.clickSeekToggle.disabled = false;
+            // MILESTONE 3: Make button visible (per e2)
+            this.elements.clickSeekToggle.style.opacity = '1';
+            this.elements.clickSeekToggle.style.cursor = 'pointer';
           }
         }
 
@@ -1302,16 +1433,19 @@ class TTSAudioPlayer {
      * @returns {Promise<void>}
      */
     async renderPage(pageNum) {
-      // Validate
       if (!this.state.pdf.pdfDocument) {
         console.warn('No PDF loaded');
         return;
       }
+      this.clearHighlights();
 
       if (pageNum < 1 || pageNum > this.state.pdf.totalPages) {
         console.warn(`Invalid page number: ${pageNum}`);
         return;
       }
+
+      // ACTION 2.4: Clear highlights immediately after validation
+      this.clearHighlights();
 
       // Set render lock (prevents simultaneous renders)
       if (this.state.pdf.isPageRendering) {
@@ -1327,39 +1461,32 @@ class TTSAudioPlayer {
       if (this.elements.nextPageButton) this.elements.nextPageButton.disabled = true;
 
       try {
-        // Get page
         const page = await this.state.pdf.pdfDocument.getPage(pageNum);
-
-        // Calculate viewport with HiDPI support
         const outputScale = window.devicePixelRatio || 1;
 
-        // ZOOM LOGIC: Use existing scale or calculate based on fit mode
+        // ZOOM LOGIC
         let scale = this.state.pdf.scale;
 
-        // If scale is null/undefined, calculate based on fit mode
         if (scale === null || scale === undefined) {
-          const fitMode = this.state.pdf.fitMode || 'width';  // Default to width
+          const fitMode = this.state.pdf.fitMode || 'width';
+          const viewportDefault = page.getViewport({scale: 1.0});
 
           if (fitMode === 'height') {
-            // Calculate fit-to-height scale
-            const desiredHeight = this.elements.pdfViewerContainer.clientHeight - 40;
-            const viewportDefault = page.getViewport({scale: 1.0});
+            // Removed padding compensation (CSS fix handles padding externally)
+            const desiredHeight = this.elements.pdfViewerContainer.clientHeight;
             scale = desiredHeight / viewportDefault.height;
           } else {
-            // Calculate fit-to-width scale (default)
-            const desiredWidth = this.elements.pdfViewerContainer.clientWidth - 40;
-            const viewportDefault = page.getViewport({scale: 1.0});
+            // Removed padding compensation (CSS fix handles padding externally)
+            const desiredWidth = this.elements.pdfViewerContainer.clientWidth;
             scale = desiredWidth / viewportDefault.width;
           }
 
           this.state.pdf.scale = scale;
         }
-        // Otherwise, use the existing zoom scale (from zoom in/out)
 
         const viewport = page.getViewport({scale: scale});
         this.state.pdf.viewport = viewport;
 
-        // Setup canvas
         const canvas = this.elements.pdfCanvas;
         const context = canvas.getContext('2d');
 
@@ -1370,6 +1497,22 @@ class TTSAudioPlayer {
         // Set display size (layout)
         canvas.style.width = Math.floor(viewport.width) + 'px';
         canvas.style.height = Math.floor(viewport.height) + 'px';
+
+        // 4.3 Highlight Scroll Fix: Set container size to match canvas
+        this.elements.highlightContainer.style.width = canvas.style.width;
+        this.elements.highlightContainer.style.height = canvas.style.height;
+
+        // CRITICAL: Calculate the offset caused by the flexbox centering the canvas
+        const canvasRect = canvas.getBoundingClientRect();
+        const containerRect = this.elements.pdfViewerContainer.getBoundingClientRect();
+
+        // Calculate the offset (distance from container's edge to canvas's edge)
+        const offsetLeft = canvasRect.left - containerRect.left;
+        const offsetTop = canvasRect.top - containerRect.top;
+
+        // Position highlight container to match canvas's offset from the parent container
+        this.elements.highlightContainer.style.left = `${offsetLeft}px`;
+        this.elements.highlightContainer.style.top = `${offsetTop}px`;
 
         // Render with transform for HiDPI
         const transform = outputScale !== 1
@@ -1382,25 +1525,20 @@ class TTSAudioPlayer {
           transform: transform
         };
 
-        const renderTask = page.render(renderContext);
-        await renderTask.promise;
+        await page.render(renderContext).promise;
 
         // Update UI
         this.elements.pageIndicator.textContent =
             `Page: ${pageNum} / ${this.state.pdf.totalPages}`;
 
-        // Update zoom display (if zoom controls exist)
         if (this.elements.zoomLevel) {
           this.updateZoomDisplay();
         }
-
-        console.log(`Rendered page ${pageNum}`);
 
       } catch (error) {
         console.error('Page render error:', error);
         this.logError('Failed to render page: ' + error.message);
       } finally {
-        // Release lock
         this.state.pdf.isPageRendering = false;
 
         // Re-enable buttons based on page number
@@ -1465,32 +1603,186 @@ class TTSAudioPlayer {
    * @returns {number|null} Page number or null if not found
    */
   getPageForTimestamp(timestamp) {
-    if (!this.state.audiobook.manifest || !this.state.audiobook.readyChunks) {
+    // FIX: Use the definitive 'chunks' list (populated with full objects from API)
+    const chunks = this.state.audiobook.chunks || [];
+
+    if (chunks.length === 0) {
       return null;
     }
 
-    const chunks = this.state.audiobook.readyChunks;
-
     // Find the chunk where the current time falls within its start/end
-    // We use the global 'start_time' and 'duration_seconds' from the manifest
     const chunk = chunks.find(c =>
-      timestamp >= c.start_time && timestamp < (c.start_time + c.duration_seconds)
+        // Use the end_time property now correctly enforced by process.py
+        timestamp >= c.start_time && timestamp < c.end_time
     );
 
     if (chunk) {
-      return chunk.page || null; // 'page' is the correct field from the manifest
+      return chunk.page || null; // 'page' is the correct field from the manifest/chunk data
     }
 
     // Fallback for edge cases (e.g., end of book)
-    if (chunks.length > 0 && timestamp >= chunks[chunks.length - 1].start_time) {
-        return chunks[chunks.length - 1].page;
+    // Use the last chunk's page if time exceeds the known end time
+    if (chunks.length > 0 && timestamp >= chunks[chunks.length - 1].end_time) {
+      return chunks[chunks.length - 1].page;
     }
 
     return null;
   }
 
-  async highlightAtTimestamp(timestamp) {
-    console.warn('highlightAtTimestamp() not yet implemented.');
+  calculateCanvasCoordinates(pdfCoords) {
+    const viewport = this.state.pdf.viewport;
+
+    if (!viewport) {
+      return null;
+    }
+
+    // ✅ FINAL SPATIAL FIX (Simple Fix): Bypass the full pdfjsLib.Util.applyTransform
+    // The backend coordinates are already in Y-DOWN page space (top-left origin).
+    // We only need to scale them to screen pixels using viewport.scale.
+    const scale = viewport.scale;
+
+    // NOTE: This assumes no page rotation/skew, which is true for standard documents.
+    return {
+      x: pdfCoords.x * scale,
+      y: pdfCoords.y * scale,
+      width: pdfCoords.width * scale,
+      height: pdfCoords.height * scale
+    };
+  }
+
+  _aggregateSpanBounds(spans) {
+    if (spans.length === 0) return [];
+
+    // FIX B: Determine the minimum X-offset to normalize the coordinates
+    // This value represents the fixed left margin of the PDF page body (368.16 in your test)
+    const minXOffset = spans.reduce((min, span) => Math.min(min, span.bbox.x), Infinity);
+
+    const lineBoxes = [];
+    let currentLine = null;
+
+    // Calculate tolerance dynamically based on average font size
+    const avgFontSize = spans.reduce((sum, s) => sum + s.font_size, 0) / spans.length;
+    const yTolerance = Math.max(3, avgFontSize * 0.4);
+
+    spans.forEach(span => {
+      const bbox = span.bbox;
+
+      // Calculate normalized X-coordinate for this span
+      const normalizedX = bbox.x - minXOffset; // Apply normalization
+
+      const span_top = bbox.y;
+      const span_bottom = bbox.y + bbox.height;
+
+      if (!currentLine) {
+        // Initialize line using normalized X
+        currentLine = {
+          x0: normalizedX,
+          y0: span_top,
+          x1: normalizedX + bbox.width, // Use normalized X + original width
+          y_top: span_top,
+          y_bottom: span_bottom,
+          count: 1
+        };
+      } else {
+        // Check vertical proximity using the line's top edge (y_top) for stability
+        if (Math.abs(span_top - currentLine.y_top) < yTolerance) {
+          // Merge horizontally
+          currentLine.x0 = Math.min(currentLine.x0, normalizedX);
+          currentLine.x1 = Math.max(currentLine.x1, normalizedX + bbox.width);
+          currentLine.y_top = Math.min(currentLine.y_top, span_top);
+          currentLine.y_bottom = Math.max(currentLine.y_bottom, span_bottom);
+          currentLine.count++;
+        } else {
+          // Span is on a new line, finalize the old one
+          lineBoxes.push({
+            x: currentLine.x0,
+            y: currentLine.y_top,
+            width: currentLine.x1 - currentLine.x0,
+            height: currentLine.y_bottom - currentLine.y_top,
+          });
+
+          // Start new line with normalized X
+          currentLine = {
+            x0: normalizedX,
+            y0: span_top,
+            x1: normalizedX + bbox.width,
+            y_top: span_top,
+            y_bottom: span_bottom,
+            count: 1
+          };
+        }
+      }
+    });
+
+    if (currentLine) {
+      lineBoxes.push({
+        x: currentLine.x0,
+        y: currentLine.y_top,
+        width: currentLine.x1 - currentLine.x0,
+        height: currentLine.y_bottom - currentLine.y_top,
+      });
+    }
+
+    return lineBoxes;
+  }
+
+  screenToPdfCoordinates(screenX, screenY) {
+    const viewport = this.state.pdf.viewport;
+    if (!viewport) return null;
+
+    const inverseTransform = viewport.getInverseTransform();
+    const [pdfX, pdfY] = pdfjsLib.Util.applyTransform([screenX, screenY], inverseTransform);
+
+    return {x: pdfX, y: pdfY};
+  }
+
+  /**
+   * MILESTONE 3: Find chunk that contains the given PDF coordinates
+   * (Correct, high-performance version - uses local index)
+   * @param {number} pdfX - X coordinate in PDF space
+   * @param {number} pdfY - Y coordinate in PDF space
+   * @returns {object|null} Chunk data or null if not found
+   */
+  findChunkAtCoordinates(pdfX, pdfY) {
+    const currentPage = this.state.pdf.currentPageNum;
+    const manifest = this.state.audiobook.manifest;
+
+    if (!manifest || !manifest.content) return null;
+
+    const pageIdx = currentPage - 1;
+    if (pageIdx < 0 || pageIdx >= manifest.content.length) return null;
+
+    // Get all coordinates for the current page
+    const coordinate_blocks = manifest.content[pageIdx].coordinate_blocks || [];
+
+    // Find the first block that contains the click
+    const clickedBlock = coordinate_blocks.find(block => {
+      const bbox = block.bbox;
+      return pdfX >= bbox.x &&
+          pdfX <= bbox.x + bbox.width &&
+          pdfY >= bbox.y &&
+          pdfY <= bbox.y + bbox.height;
+    });
+
+    if (!clickedBlock) {
+      return null; // No block found at this location
+    }
+
+    // Now, find which audio chunk this block's text belongs to.
+    // (This is a simpler, good-enough approximation for now)
+    const chunks = this.state.audiobook.chunks || [];
+    const clickedText = clickedBlock.text.trim().toLowerCase();
+
+    for (const chunk of chunks) {
+      if (chunk.page !== currentPage) continue;
+
+      const chunkText = chunk.text.trim().toLowerCase();
+      if (chunkText.includes(clickedText)) {
+        return chunk; // Found the matching chunk
+      }
+    }
+
+    return null; // No chunk contained that text
   }
 
   // ===========================================
@@ -1502,7 +1794,156 @@ class TTSAudioPlayer {
   }
 
   async fetchCitation(bookId, timestamp) {
-    console.warn('fetchCitation() not yet implemented.');
+    // Check cache first
+    const cacheKey = `${bookId}_${Math.floor(timestamp / 3)}`;
+    if (this.state.ui.lastCitation?.cacheKey === cacheKey) {
+      return this.state.ui.lastCitation.data; // Return the cached data payload
+    }
+
+    try {
+      // FIX: Corrected syntax for fetch URL construction
+      const response = await fetch(`/api/audiobook/${bookId}/citation?timestamp=${timestamp}`);
+
+      if (!response.ok) {
+        throw new Error(`Citation fetch failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      // Store latest citation for caching
+      this.state.ui.lastCitation = {
+        data: data, // Store the API payload
+        cacheKey: cacheKey // Store the timestamp key
+      };
+
+      return data;
+
+    } catch (error) {
+      console.warn('Citation fetch error:', error);
+      return null; // Graceful degradation
+    }
+  }
+
+  buildCoordinateIndex() {
+    // Initialize structure
+    this.coordIndex = {
+      byPage: {},     // Page -> chunks mapping (stores full chunk objects)
+      byTime: [],     // Sorted array of {startTime, endTime, chunkId}
+      spatial: {}     // Page -> coordinate_blocks for click lookup
+    };
+
+    // ✅ FIX 5: Use this.state.audiobook.chunks (full objects with sentences)
+    const chunks = this.state.audiobook.chunks || [];
+    let hasSentences = false;
+
+    chunks.forEach(chunk => {
+      const pageNum = chunk.page;
+
+      // Time-based index
+      this.coordIndex.byTime.push({
+        startTime: chunk.start_time,
+        endTime: chunk.end_time || (chunk.start_time + chunk.duration_seconds), // Fallback for safety
+        chunkId: chunk.chunk_id,
+        page: pageNum
+      });
+
+      // ✅ FIX 5: Page-based index: Store the full chunk object reference.
+      if (!this.coordIndex.byPage[pageNum]) {
+        this.coordIndex.byPage[pageNum] = [];
+      }
+      this.coordIndex.byPage[pageNum].push(chunk); // Store full chunk object with sentences
+
+      if (chunk.sentences && chunk.sentences.length > 0) {
+        hasSentences = true;
+      }
+    });
+
+    // Sort byTime for efficient binary search
+    this.coordIndex.byTime.sort((a, b) => a.startTime - b.startTime);
+
+    // Populate spatial index from coordinateData
+    const coordData = this.state.audiobook.coordinateData || [];
+    coordData.forEach(pageData => {
+      const pageNum = pageData.page_number;
+      this.coordIndex.spatial[pageNum] = pageData.coordinate_blocks || [];
+    });
+
+    // ✅ FIX 5: CRITICAL: Set the flag now that the index is built and data is available.
+    this.state.audiobook.hasCoordinateIndex = (coordData.length > 0 && hasSentences);
+
+    console.log(`Index built: ${chunks.length} chunks, ${Object.keys(this.coordIndex.spatial).length} pages with coordinates. Index ready: ${this.state.audiobook.hasCoordinateIndex}`);
+  }
+
+  /**
+   * Clear all highlight rectangles from the PDF overlay.
+   * Called before rendering new highlights or changing pages/zoom.
+   */
+  clearHighlights() {
+    const container = this.elements.highlightContainer;
+    if (!container) {
+      console.warn('Highlight container not found');
+      return;
+    }
+
+    // Remove all child divs (highlight rectangles)
+    while (container.firstChild) {
+      container.removeChild(container.firstChild);
+    }
+  }
+
+  /**
+   * MILESTONE 2: Throttle function to limit update frequency
+   * Preserves 'this' context and handles async functions
+   */
+  throttle(func, delay) {
+    let timeoutId;
+    let lastExecTime = 0;
+
+    return (...args) => {  // ← CHANGE: Arrow function preserves context
+      const currentTime = Date.now();
+
+      // Execute immediately if enough time has passed
+      if (currentTime - lastExecTime > delay) {
+        lastExecTime = currentTime;
+        func.apply(this, args);  // 'this' now correctly refers to TTSAudioPlayer
+      } else {
+        // Schedule for later
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          lastExecTime = Date.now();
+          func.apply(this, args);
+        }, delay - (currentTime - lastExecTime));
+      }
+    };
+  }
+
+  // Find chunk by timestamp using binary search
+  findChunkByTime(timestamp) {
+    if (!this.coordIndex || !this.coordIndex.byTime) return null;
+
+    const times = this.coordIndex.byTime;
+    let left = 0, right = times.length - 1;
+
+    while (left <= right) {
+      const mid = Math.floor((left + right) / 2);
+      const chunk = times[mid];
+
+      if (timestamp >= chunk.startTime && timestamp < chunk.endTime) {
+        return chunk;
+      } else if (timestamp < chunk.startTime) {
+        right = mid - 1;
+      } else {
+        left = mid + 1;
+      }
+    }
+
+    return null;
+  }
+
+  // Find chunks on current page
+  getChunksForPage(pageNum) {
+    if (!this.coordIndex || !this.coordIndex.byPage) return [];
+    return this.coordIndex.byPage[pageNum] || [];
   }
 
   displayCitation(citation) {

@@ -1,5 +1,5 @@
 /**
- * NATIVE AUDIO BACKEND
+ * native-audio-backend.js
  *
  * Wraps HTML5 <audio> element with AudioBackend contract.
  * Uses standard browser audio APIs.

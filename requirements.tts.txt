@@ -1,0 +1,6 @@
+# requirements.tts.txt
+
+# Audio processing libraries needed by coqui-tts
+librosa
+soundfile
+scipy

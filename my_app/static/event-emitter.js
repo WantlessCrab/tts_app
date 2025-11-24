@@ -1,5 +1,5 @@
 /**
- * EVENT EMITTER
+ * event-emitter.js
  *
  * Lightweight observer pattern implementation.
  * Provides event subscription mechanism for AudioBackend classes.

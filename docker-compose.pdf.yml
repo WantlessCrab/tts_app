@@ -1,15 +1,13 @@
-# docker-compose.pdf_only.yml
+# docker-compose.pdf.yml
 
-# ===================================================================
+# ================================================================
 # 1. DEFINE the "Immutable" GPU Fixes (YAML Anchor)
-# ===================================================================
-# This anchor defines our "Gold Standard" GPU runtime configuration.
+# ================================================================
 x-gpu-service-config: &gpu-service-config
   devices:
     - /dev/dxg:/dev/dxg
   group_add:
     - video
-  # --- "volumes:" REMOVED FROM ANCHOR ---
   cap_add:
     - SYS_PTRACE
   security_opt:
@@ -23,55 +21,42 @@ x-gpu-service-config: &gpu-service-config
     - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/rocm/lib
 
 # ===================================================================
-# 2. DEFINE the Services
+# 2. SINGLE SERVICE - PDF Processor Only
 # ===================================================================
 services:
-  # === Service 1: API Gateway (CPU-Only) ===
-  api-gateway:
-    build:
-      context: .
-      dockerfile: dockerfile.gateway
-    container_name: project-rebuild-gateway
-    ports:
-      - "8000:8000"
-    volumes:
-      # Mount shared volumes as read-only for this service
-      - ./pdf_input:/workspace/pdf_input:ro
-      - ./outputs:/workspace/outputs:ro
-      - ./obsidian_audio:/workspace/obsidian_audio:ro
-      - ./pdf_cache:/workspace/pdf_cache:ro
-    # This service needs to know the URL of the PDF processor
-    environment:
-      - PDF_SERVICE_URL=http://pdf-processor-service:8000
-    depends_on:
-      - pdf-processor-service
-
-  # === Service 2: PDF Processor (GPU-Enabled) ===
   pdf-processor-service:
     build:
       context: .
       dockerfile: dockerfile.pdf_processor
     container_name: project-rebuild-pdf-processor
-    # Apply all the "Immutable" GPU fixes using the anchor
     <<: *gpu-service-config
-    # --- "volumes:" IS NOW A MERGED LIST ---
+
+    # ADD PORT MAPPING for direct testing
+    ports:
+      - "8001:8000"  # Access PDF processor directly on port 8001
+
     volumes:
-      # "Surgical Mounts" (from the anchor)
+      # Surgical Mounts
       - /usr/lib/wsl/lib/libdxcore.so:/usr/lib/wsl/lib/libdxcore.so:ro
       - /opt/rocm-6.4.2/lib/libhsa-runtime64.so.1:/opt/rocm/lib/libhsa-runtime64.so.1:ro
-
-      # "Data Mounts" (from the service)
+      # Data Mounts
       - ./pdf_input:/workspace/pdf_input
       - ./outputs:/workspace/outputs
       - ./pdf_cache:/workspace/pdf_cache
+      - ./my_app:/app
 
-    # --- This is the clean, working command block ---
+    environment:
+      - ROCR_VISIBLE_DEVICES=0
+      - HIP_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+      - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/rocm/lib
+      # point to the TTS service on our host at port 8002
+      - TTS_SERVICE_URL=http://host.docker.internal:8002/api/tts
+
     command: >
       bash -c "
-        # === Part 1: The "Checkmate Fix" (from base.yml) ===
         TORCH_LIB_PATH=$$(python3 -c 'import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))');
         rm -f \"$$TORCH_LIB_PATH/libhsa-runtime64.so\"*;
         echo \"--- [PDF-PROC] Patch complete. Bundled libhsa removed.\";
-        # === Part 2: The Service Command ===
-        exec uvicorn process:app --host 0.0.0.0 --port 8000
+        exec uvicorn pdf_processor.process:app --host 0.0.0.0 --port 8000
       "

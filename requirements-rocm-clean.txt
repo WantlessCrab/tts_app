@@ -1,3 +1,4 @@
+# requirements-rocm-clean.txt
 # ========================================
 # KEEP: CORE & LOW-RISK DEPENDENCIES
 # ========================================
@@ -35,11 +36,11 @@ requests           # Utility (Often needed by other libs)
 flask>=2.0.1
 pandas>=1.4,<2.0
 matplotlib>=3.7.0
+PyMuPDF
 bangla
 bnnumerizer
 bnunicodenormalizer
 gruut==2.2.3
-PyMuPDF
 
 # ========================================
 # KEEP (Problematic - Handle Separately in Dockerfile)
@@ -49,6 +50,7 @@ PyMuPDF
 # Action: Install these individually in Dockerfile, often using --no-deps initially.
 
 transformers>=4.33.0
+
 # encodec>=0.1.1 # Needed for Bark model (Keep commented for initial build)
 # trainer>=0.0.36 # Needed ONLY for training (Keep commented for initial build)
 

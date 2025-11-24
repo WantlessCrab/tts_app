@@ -5,7 +5,7 @@ services:
   tts-service:
     build:
       context: ..
-      dockerfile: ../Dockerfile.rocm
+      dockerfile: ../dockerfile.base.rocm
     image: coqui-tts-rocm:dev
     container_name: coqui-tts-service
     devices:
@@ -40,7 +40,7 @@ services:
   audio-service:
     build:
       context: ..
-      dockerfile: ../Dockerfile.rocm
+      dockerfile: ../dockerfile.base.rocm
     depends_on:
       - pdf-service
     image: coqui-tts-rocm:dev
@@ -67,7 +67,7 @@ services:
   pdf-service:
       build:
         context: ..
-        dockerfile: ../Dockerfile.pdf-service
+        dockerfile: ../dockerfile.base.pdf-service
       depends_on:
         - tts-service
       container_name: coqui-pdf-service

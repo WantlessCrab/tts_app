@@ -14,418 +14,463 @@
 
     <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
     <script>
-      // Configure PDF.js worker (CRITICAL)
-      if (typeof pdfjsLib !== 'undefined') {
-        pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-      } else {
-        console.error('PDF.js library failed to load from unpkg');
-      }
+        // Configure PDF.js worker (CRITICAL)
+        if (typeof pdfjsLib !== 'undefined') {
+            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+        } else {
+            console.error('PDF.js library failed to load from unpkg');
+        }
     </script>
 
     <script src="/static/player.js"></script>
+<style>
+    /* --- Base Styles --- */
+    body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #ffeaa7 0%, #dfe6e9 100%);
+    padding: 20px;
+    margin: 0;
+    min-height: 100vh;
+    }
 
-    <style>
-		/* --- Base Styles --- */
-		body {
-			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-			background: linear-gradient(135deg, #ffeaa7 0%, #dfe6e9 100%);
-			padding: 20px;
-			margin: 0;
-			min-height: 100vh;
-		}
+    .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 20px;
+    padding: 30px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+    }
 
-		.container {
-			max-width: 1200px; /* INCREASED from 800px for more space */
-			margin: 0 auto;
-			background: rgba(255, 255, 255, 0.95);
-			border-radius: 20px;
-			padding: 30px;
-			box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-		}
+    h1 {
+    color: #74b9ff;
+    text-align: center;
+    margin-bottom: 30px;
+    font-weight: 300;
+    }
 
-		h1 {
-			color: #74b9ff;
-			text-align: center;
-			margin-bottom: 30px;
-			font-weight: 300;
-		}
+    .player-section {
+    background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
+    padding: 20px;
+    border-radius: 15px;
+    margin-bottom: 20px;
+    }
 
-		.player-section {
-			background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
-			padding: 20px;
-			border-radius: 15px;
-			margin-bottom: 20px;
-		}
+    .control-group {
+    background: rgba(255, 255, 255, 0.7);
+    padding: 15px;
+    border-radius: 10px;
+    }
 
-		.control-group {
-			background: rgba(255, 255, 255, 0.7);
-			padding: 15px;
-			border-radius: 10px;
-		}
+    label {
+    display: block;
+    color: #6c5ce7;
+    margin-bottom: 5px;
+    font-size: 14px;
+    }
 
-		label {
-			display: block;
-			color: #6c5ce7;
-			margin-bottom: 5px;
-			font-size: 14px;
-		}
+    input[type="range"] {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: #ffd3e1;
+    outline: none;
+    -webkit-appearance: none;
+    }
 
-		input[type="range"] {
-			width: 100%;
-			height: 6px;
-			border-radius: 3px;
-			background: #ffd3e1;
-			outline: none;
-			-webkit-appearance: none;
-		}
+    input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #74b9ff;
+    cursor: pointer;
+    }
 
-		input[type="range"]::-webkit-slider-thumb {
-			-webkit-appearance: none;
-			appearance: none;
-			width: 18px;
-			height: 18px;
-			border-radius: 50%;
-			background: #74b9ff;
-			cursor: pointer;
-		}
+    button {
+    background: linear-gradient(135deg, #ffd3e1 0%, #ffb6c1 100%);
+    border: none;
+    padding: 10px 20px;
+    border-radius: 25px;
+    color: #6c5ce7;
+    cursor: pointer;
+    font-size: 14px;
+    transition: transform 0.2s;
+    }
 
-		button {
-			background: linear-gradient(135deg, #ffd3e1 0%, #ffb6c1 100%);
-			border: none;
-			padding: 10px 20px;
-			border-radius: 25px;
-			color: #6c5ce7;
-			cursor: pointer;
-			font-size: 14px;
-			transition: transform 0.2s;
-		}
+    button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+    }
 
-		button:hover {
-			transform: translateY(-2px);
-			box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-		}
+    .file-list {
+    background: #f0f3ff;
+    padding: 20px;
+    border-radius: 15px;
+    max-height: 300px;
+    overflow-y: auto;
+    }
 
-		.file-list {
-			background: #f0f3ff;
-			padding: 20px;
-			border-radius: 15px;
-			max-height: 300px;
-			overflow-y: auto;
-		}
+    .file-item {
+    background: white;
+    padding: 12px;
+    margin: 8px 0;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    transition: background 0.2s;
+    }
 
-		.file-item {
-			background: white;
-			padding: 12px;
-			margin: 8px 0;
-			border-radius: 8px;
-			cursor: pointer;
-			display: flex;
-			justify-content: space-between;
-			transition: background 0.2s;
-		}
+    .file-item:hover {
+    background: #dfe6e9;
+    }
 
-		.file-item:hover {
-			background: #dfe6e9;
-		}
+    .file-item.active {
+    background: #a8e6cf;
+    color: #2d3436;
+    }
 
-		.file-item.active {
-			background: #a8e6cf;
-			color: #2d3436;
-		}
+    .value-display {
+    color: #00b894;
+    font-weight: bold;
+    }
 
-		.value-display {
-			color: #00b894;
-			font-weight: bold;
-		}
+    #now-playing {
+    text-align: center;
+    color: #74b9ff;
+    margin-bottom: 10px;
+    }
 
-		#now-playing {
-			text-align: center;
-			color: #74b9ff;
-			margin-bottom: 10px;
-		}
+    /* ========================================
+    AUDIO PLAYER COMPONENT (Integrated Layout)
+    ======================================== */
+    #audio-player-component {
+    background: #2a2a2a;
+    border-radius: 8px;
+    padding: 20px;
+    margin: 20px 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    color: #e0e0e0;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    }
 
-		/* ========================================
-           AUDIO PLAYER COMPONENT (Integrated Layout)
-           ======================================== */
-		#audio-player-component {
-			background: #2a2a2a;
-			border-radius: 8px;
-			padding: 20px;
-			margin: 20px 0;
-			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-			color: #e0e0e0;
-			display: flex;
-			flex-direction: column;
-			gap: 15px;
-		}
+    /* Player Bar - Top Controls */
+    #player-bar {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-rows: auto auto;
+    gap: 10px;
+    padding: 10px;
+    margin-bottom: 0;
+    align-items: center;
+    }
 
-		/* Player Bar - Top Controls */
-		#player-bar {
-			display: grid;
-			grid-template-columns: auto 1fr auto;
-			grid-template-rows: auto auto;
-			gap: 10px;
-			padding: 10px;
-			margin-bottom: 0;
-			align-items: center;
-		}
+    /* Row 1: Play + Seek + Time */
+    #play-pause-button {
+    grid-column: 1;
+    grid-row: 1;
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    font-size: 18px;
+    padding: 0;
+    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%) !important;
+    color: white !important;
+    border: none;
+    cursor: pointer;
+    display: block;
+    z-index: 1;
+    }
 
-		/* Row 1: Play + Seek + Time */
-		#play-pause-button {
-			grid-column: 1;
-			grid-row: 1;
-			width: 50px;
-			height: 50px;
-			border-radius: 50%;
-			font-size: 18px;
-			padding: 0;
-			background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%) !important;
-			color: white !important;
-			border: none;
-			cursor: pointer;
-			display: block;
-			z-index: 1;
-		}
+    #seek {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    width: 100%;
+    }
 
-		#seek {
-			grid-column: 2;
-			grid-row: 1;
-			min-width: 0;
-			width: 100%;
-		}
+    #time-display {
+    grid-column: 3;
+    grid-row: 1;
+    font-size: 14px;
+    color: #a0a0a0;
+    min-width: 90px;
+    text-align: center;
+    white-space: nowrap;
+    }
 
-		#time-display {
-			grid-column: 3;
-			grid-row: 1;
-			font-size: 14px;
-			color: #a0a0a0;
-			min-width: 90px;
-			text-align: center;
-			white-space: nowrap;
-		}
+    /* Row 2: Volume + Speed + Loop */
+    #volume-control {
+    grid-column: 1;
+    grid-row: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-self: start;
+    }
 
-		/* Row 2: Volume + Speed + Loop */
-		#volume-control {
-			grid-column: 1;
-			grid-row: 2;
-			display: flex;
-			align-items: center;
-			gap: 6px;
-			justify-self: start;
-		}
+    #volume-control span {
+    display: inline-block;
+    }
 
-		#volume-control span {
-			display: inline-block;
-		}
+    #volume-value {
+    min-width: 40px;
+    text-align: right;
+    color: #00b894;
+    font-weight: bold;
+    }
 
-		#volume-value {
-			min-width: 40px;
-			text-align: right;
-			color: #00b894;
-			font-weight: bold;
-		}
+    /* 3.1 FIX: Speed Control CSS */
+    #speed-control {
+    grid-column: 2;
+    grid-row: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-self: center;
+    }
 
-		#speed-control {
-			grid-column: 2;
-			grid-row: 2;
-			display: flex;
-			align-items: center;
-			gap: 6px;
-			justify-self: center;
-		}
+    .control-label {
+    color: #ff69b4; /* Hot pink */
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 2px;
+    }
 
-		#speed-control span {
-			display: inline-block;
-		}
+    #speed-value {
+    min-width: 35px;
+    text-align: right;
+    color: #00b894;
+    font-weight: bold;
+    }
 
-		#speed-control::before {
-			content: "Speed:";
-			color: #ff69b4;
-			font-size: 12px;
-			font-weight: 600;
-			margin-right: 2px;
-		}
+    #loop-button {
+    grid-column: 3;
+    grid-row: 2;
+    white-space: nowrap;
+    justify-self: end;
+    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
+    color: white;
+    padding: 8px 15px;
+    border-radius: 20px;
+    border: none;
+    cursor: pointer;
+    }
 
-		#speed-value {
-			min-width: 35px;
-			text-align: right;
-			color: #00b894;
-			font-weight: bold;
-		}
+    #volume, #speed {
+    width: 80px;
+    }
 
-		#loop-button {
-			grid-column: 3;
-			grid-row: 2;
-			white-space: nowrap;
-			justify-self: end;
-			background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
-			color: white;
-			padding: 8px 15px;
-			border-radius: 20px;
-			border: none;
-			cursor: pointer;
-		}
+    /* PDF VIEWER - Replaces Waveform Position */
+    #pdf-viewer-container {
+	    position: relative;
+	    background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
+	    border: 2px solid #3a3a3a;
+	    border-radius: 8px;
+	    padding: 20px; /* ✅ FIX 1: Changed from 0 to 20px (moves spacing to parent) */
+	    display: none;
+	    justify-content: center;
+	    align-items: center;
+	    min-height: 450px;
+	    max-height: 70vh;
+	    overflow: auto;
+    }
 
-		#volume, #speed {
-			width: 80px;
-		}
+    /* 1.2 FIX: Add margin to the canvas for visual spacing */
+    #pdf-canvas {
+	    max-width: 100%;
+	    height: auto;
+	    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+	    background: white;
+	    border-radius: 4px;
+	    display: none;
+	    margin: 0 auto; /* ✅ FIX 1: Changed from 20px auto to 0 auto (removes offset) */
+    }
 
-		/* PDF VIEWER - Replaces Waveform Position */
-		#pdf-viewer-container {
-			background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
-			border: 2px solid #3a3a3a;
-			border-radius: 8px;
-			padding: 20px;
-			display: none; /* Hidden until PDF loads */
-			justify-content: center;
-			align-items: center;
-			min-height: 450px;
-			max-height: 70vh;
-			overflow: auto;
-		}
+    #pdf-page-controls {
+    display: none;
+    justify-content: space-between;
+    align-items: center;
+    gap: 15px;
+    padding: 10px 15px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
+    }
 
-		#pdf-canvas {
-			max-width: 100%;
-			height: auto;
-			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-			background: white;
-			border-radius: 4px;
-			display: none; /* Hidden until PDF loads */
-		}
+    #pdf-page-controls button {
+    color: #ff69b4;
+    }
 
-		#pdf-page-controls {
-			display: none;
-			justify-content: space-between;
-			align-items: center;
-			gap: 15px;
-			padding: 10px 15px;
-			background: rgba(0, 0, 0, 0.2);
-			border-radius: 8px;
-		}
+    .pdf-control-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    }
 
-		#pdf-page-controls button {
-			color: #ff69b4; /* Hot pink - matches speed label */
-		}
+    #page-jump-input {
+    width: 60px;
+    padding: 6px;
+    border: 1px solid #5a5a5a;
+    border-radius: 4px;
+    background: #3a3a3a;
+    color: #e0e0e0;
+    text-align: center;
+    font-size: 13px;
+    }
 
-		.pdf-control-group {
-			display: flex;
-			align-items: center;
-			gap: 8px;
-		}
+    #page-jump-input:focus {
+    outline: none;
+    border-color: #74b9ff;
+    }
 
-		#page-jump-input {
-			width: 60px;
-			padding: 6px;
-			border: 1px solid #5a5a5a;
-			border-radius: 4px;
-			background: #3a3a3a;
-			color: #e0e0e0;
-			text-align: center;
-			font-size: 13px;
-		}
+    #zoom-level {
+    color: #a0a0a0;
+    font-size: 13px;
+    font-weight: 600;
+    min-width: 50px;
+    text-align: center;
+    }
 
-		#page-jump-input:focus {
-			outline: none;
-			border-color: #74b9ff;
-		}
+    #zoom-in-button,
+    #zoom-out-button,
+    #zoom-reset-button {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    font-size: 18px;
+    line-height: 1;
+    color: #ff69b4;
+    background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
+    }
 
-		#zoom-level {
-			color: #a0a0a0;
-			font-size: 13px;
-			font-weight: 600;
-			min-width: 50px;
-			text-align: center;
-		}
+    #click-seek-toggle {
+    font-size: 12px;
+    padding: 6px 12px;
+    color: #ff69b4;
+    }
 
-		#zoom-in-button,
-		#zoom-out-button,
-		#zoom-reset-button {
-			width: 32px;
-			height: 32px;
-			padding: 0;
-			font-size: 18px;
-			line-height: 1;
-			color: #ff69b4;
-			background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
-		}
+    #click-seek-toggle:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    }
 
-		#click-seek-toggle {
-			font-size: 12px;
-			padding: 6px 12px;
-			color: #ff69b4;
-		}
+    #click-seek-toggle.active {
+    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
+    color: #ff69b4;
+    }
 
-		#click-seek-toggle:disabled {
-			opacity: 0.3;
-			cursor: not-allowed;
-		}
-
-		#click-seek-toggle.active {
-			background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
-			color: #ff69b4;
-		}
-
-		#page-indicator {
-			color: #a0a0a0;
-			font-size: 14px;
-			font-weight: 600;
-			min-width: 120px;
-			text-align: center;
-		}
+    #page-indicator {
+    color: #a0a0a0;
+    font-size: 14px;
+    font-weight: 600;
+    min-width: 120px;
+    text-align: center;
+    }
 
 
+    #prev-page-button,
+    #next-page-button {
+    background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
+    color: #ff69b4;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+    }
 
-		#prev-page-button,
-		#next-page-button {
-			background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
-			color: #ff69b4;
-			border: none;
-			padding: 8px 16px;
-			border-radius: 20px;
-			cursor: pointer;
-			font-size: 13px;
-			transition: all 0.2s;
-		}
+    #prev-page-button:hover,
+    #next-page-button:hover {
+    background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
+    transform: translateY(-1px);
+    }
 
-		#prev-page-button:hover,
-		#next-page-button:hover {
-			background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
-			transform: translateY(-1px);
-		}
+    #prev-page-button:disabled,
+    #next-page-button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+    }
 
-		#prev-page-button:disabled,
-		#next-page-button:disabled {
-			opacity: 0.4;
-			cursor: not-allowed;
-			transform: none;
-		}
+    /* Secondary Controls - Bottom Controls */
+    #secondary-controls {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    padding-top: 5px;
+    flex-wrap: wrap;
+    }
 
-		/* Secondary Controls - Bottom Controls */
-		#secondary-controls {
-			display: flex;
-			gap: 10px;
-			justify-content: center;
-			padding-top: 5px;
-			flex-wrap: wrap;
-		}
+    #secondary-controls button {
+    background: #4a4a4a;
+    color: #ff69b4;
+    padding: 8px 15px;
+    }
 
-		#secondary-controls button {
-			background: #4a4a4a;
-			color: #ff69b4;
-			padding: 8px 15px;
-		}
+    /* Waveform - Hidden but present for wavesurfer backend */
+    #waveform {
+    visibility: hidden;
+    position: absolute;
+    width: 1px; /* Must have dimensions */
+    height: 1px; /* Must have dimensions */
+    overflow: hidden;
+    top: -9999px; /* Move off-screen */
+    left: -9999px;
+    }
 
-		/* Waveform - Hidden but present for wavesurfer backend */
-		#waveform {
-			visibility: hidden;
-			position: absolute;
-			width: 1px; /* Must have dimensions */
-			height: 1px; /* Must have dimensions */
-			overflow: hidden;
-			top: -9999px; /* Move off-screen */
-			left: -9999px;
-		}
+    #highlight-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none; /* Allow clicks to pass through */
+    z-index: 10; /* Above canvas but below controls */
+    }
+
+    /* Final Highlight CSS Contract (Action 3.2: Required Classes) */
+    .highlight-rect {
+    position: absolute;
+    border-radius: 2px;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+    background-color: rgba(255, 235, 59, 0.1); /* Base styling for structural integrity */
+    z-index: 1;
+    }
+
+    .highlight-rect.sentence {
+    background-color: rgba(100, 200, 255, 0.4); /* Blue for sentences */
+    }
+
+    .highlight-rect.current {
+    background-color: rgba(255, 235, 59, 0.6); /* Yellow for active sentence */
+    animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+    0%, 100% {
+    opacity: 0.6;
+    }
+    50% {
+    opacity: 0.8;
+    }
+    }
+
+    #pdf-canvas.seek-enabled {
+    cursor: pointer !important;
+    }
+
+    #click-seek-toggle.active {
+    background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
+    color: white;
+    font-weight: bold;
+    }
     </style>
 </head>
 <body>
@@ -435,50 +480,46 @@
         <div id="now-playing">Now Playing: <span id="current-file">None</span></div>
         <audio id="audio-element" controls style="display: none;"></audio>
 
-        <!-- INTEGRATED AUDIO PLAYER WITH PDF VIEWER -->
         <div id="audio-player-component">
-            <!-- Top: Playback Controls -->
             <div id="player-bar">
                 <button id="play-pause-button">Play</button>
                 <input type="range" id="seek" min="0" max="100" value="0" step="0.1">
                 <span id="time-display">0:00 / 0:00</span>
                 <div id="volume-control">
-                    <span>🔊</span>
+                    <span>&#128266;</span>
                     <span id="volume-value" class="value-display">100%</span>
                     <input type="range" id="volume" min="0" max="100" value="100" step="5">
                 </div>
                 <div id="speed-control">
-                    <span class="value-display" id="speed-value">1.0x</span>
+                    <span class="control-label">Speed:</span>
+                    <span id="speed-value" class="value-display">1.0x</span>
                     <input type="range" id="speed" min="0.5" max="2.0" value="1.0" step="0.05">
                 </div>
                 <button id="loop-button">Loop: <span id="loop-status">Off</span></button>
             </div>
 
-            <!-- Middle: PDF Viewer (replaces waveform) -->
             <div id="pdf-viewer-container">
                 <canvas id="pdf-canvas"></canvas>
+                <div id="highlight-container"></div>
             </div>
 
-            <!-- PDF Page Controls (compact bar) -->
             <div id="pdf-page-controls">
-                <!-- Navigation -->
                 <div class="pdf-control-group">
-                    <button id="prev-page-button" title="Previous Page">◀</button>
+                    <button id="prev-page-button" title="Previous Page">&lt;</button>
                     <input type="number" id="page-jump-input" min="1" placeholder="Page" title="Jump to page">
-                    <button id="next-page-button" title="Next Page">▶</button>
+                    <button id="next-page-button" title="Next Page">&gt;</button>
                     <span id="page-indicator">- / -</span>
                 </div>
 
-                <!-- Zoom Controls -->
                 <div class="pdf-control-group">
-                    <button id="zoom-out-button" title="Zoom Out">−</button>
+                    <button id="zoom-out-button" title="Zoom Out">-</button>
                     <span id="zoom-level">100%</span>
                     <button id="zoom-in-button" title="Zoom In">+</button>
+                    <button id="zoom-reset-button" title="Reset Zoom">Z</button>
                     <button id="zoom-fit-width-button" title="Fit to Width">⬌</button>
                     <button id="zoom-fit-height-button" title="Fit to Height">⬍</button>
                 </div>
 
-                <!-- Right: Future (Click-to-Seek toggle) -->
                 <div class="pdf-control-group">
                     <button id="click-seek-toggle" title="Click PDF to Seek Audio" disabled>
                         Seek Mode
@@ -486,7 +527,6 @@
                 </div>
             </div>
 
-            <!-- Bottom: Secondary Controls -->
             <div id="secondary-controls">
                 <button id="skip-back-10">Back 10s</button>
                 <button id="skip-back-5">Back 5s</button>
@@ -497,7 +537,6 @@
             </div>
         </div>
 
-        <!-- Waveform (hidden but present for backend) -->
         <div id="waveform"></div>
 
         <div class="control-group">
@@ -517,4 +556,3 @@
     <div id="error-log" style="color: #d63031; margin-top: 10px;"></div>
 </div>
 </body>
-</html>

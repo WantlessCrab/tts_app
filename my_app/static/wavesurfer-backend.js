@@ -1,5 +1,5 @@
 /**
- * WAVESURFER AUDIO BACKEND
+ * wavesurfer-backend.js
  *
  * Wraps Wavesurfer.js library with AudioBackend contract.
  * Provides high-precision timing (60Hz) and waveform visualization.

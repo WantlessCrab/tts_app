@@ -1,0 +1,196 @@
+{
+  "metadata": {
+    "title": "Anatomy of the Somatosensory System",
+    "author": "",
+    "source_filename": "somatosensory.pdf",
+    "total_pages": 4
+  },
+  "book_id": "somatosensory",
+  "total_chunks": 23,
+  "ready_chunks": [
+    {
+      "chunk_id": 0,
+      "filename": "chunk_0000_p1.wav",
+      "page": 1,
+      "text_snippet": "This is a sample document toshowcase page-based fo...",
+      "start_time": 0.0,
+      "duration_seconds": 25.642857142857142
+    },
+    {
+      "chunk_id": 1,
+      "filename": "chunk_0001_p1.wav",
+      "page": 1,
+      "text_snippet": "The re-ceptors in the skin, the so called cutaneou...",
+      "start_time": 25.642857142857142,
+      "duration_seconds": 31.5
+    },
+    {
+      "chunk_id": 2,
+      "filename": "chunk_0002_p1.wav",
+      "page": 1,
+      "text_snippet": "These afferents respond with a briefburst of actio...",
+      "start_time": 57.14285714285714,
+      "duration_seconds": 22.357142857142858
+    },
+    {
+      "chunk_id": 3,
+      "filename": "chunk_0003_p1.wav",
+      "page": 1,
+      "text_snippet": "Encapsulated receptors arethe Pacinian corpuscles ...",
+      "start_time": 79.5,
+      "duration_seconds": 30.928571428571427
+    },
+    {
+      "chunk_id": 4,
+      "filename": "chunk_0004_p2.wav",
+      "page": 2,
+      "text_snippet": "Figure 2:Mammalian musclespindle showing typical p...",
+      "start_time": 110.42857142857143,
+      "duration_seconds": 18.642857142857142
+    },
+    {
+      "chunk_id": 5,
+      "filename": "chunk_0005_p2.wav",
+      "page": 2,
+      "text_snippet": "The sensory endings ofa primary (group Ia) afferen...",
+      "start_time": 129.07142857142858,
+      "duration_seconds": 19.214285714285715
+    },
+    {
+      "chunk_id": 6,
+      "filename": "chunk_0006_p2.wav",
+      "page": 2,
+      "text_snippet": "Sucha rapid response to a tactile stimulus is a cl...",
+      "start_time": 148.2857142857143,
+      "duration_seconds": 15.214285714285714
+    },
+    {
+      "chunk_id": 7,
+      "filename": "chunk_0007_p2.wav",
+      "page": 2,
+      "text_snippet": "As would be expected forreceptors mediating form p...",
+      "start_time": 163.50000000000003,
+      "duration_seconds": 28.5
+    },
+    {
+      "chunk_id": 8,
+      "filename": "chunk_0008_p2.wav",
+      "page": 2,
+      "text_snippet": "Unlike rapidly adaptingaxons, slowly adapting fibe...",
+      "start_time": 192.00000000000003,
+      "duration_seconds": 28.714285714285715
+    },
+    {
+      "chunk_id": 9,
+      "filename": "chunk_0009_p2.wav",
+      "page": 2,
+      "text_snippet": "Functionally, skinnociceptors are either high-thre...",
+      "start_time": 220.71428571428575,
+      "duration_seconds": 10.142857142857142
+    },
+    {
+      "chunk_id": 10,
+      "filename": "chunk_0010_p3.wav",
+      "page": 3,
+      "text_snippet": "Rapidly adaptingSlowly adaptingSurface receptor /s...",
+      "start_time": 230.8571428571429,
+      "duration_seconds": 25.0
+    },
+    {
+      "chunk_id": 11,
+      "filename": "chunk_0011_p3.wav",
+      "page": 3,
+      "text_snippet": "tapping with a pencil.Ruffini\u2019s corpuscle: \u201cA skin...",
+      "start_time": 255.8571428571429,
+      "duration_seconds": 21.285714285714285
+    },
+    {
+      "chunk_id": 12,
+      "filename": "chunk_0012_p3.wav",
+      "page": 3,
+      "text_snippet": "Wide content, likethe table and Figure 3, intrude ...",
+      "start_time": 277.14285714285717,
+      "duration_seconds": 20.571428571428573
+    },
+    {
+      "chunk_id": 13,
+      "filename": "chunk_0013_p3.wav",
+      "page": 3,
+      "text_snippet": "They al-so respond to temperatures in the range of...",
+      "start_time": 297.7142857142857,
+      "duration_seconds": 26.571428571428573
+    },
+    {
+      "chunk_id": 14,
+      "filename": "chunk_0014_p3.wav",
+      "page": 3,
+      "text_snippet": "The rapidly transmit-ted signal, which often has h...",
+      "start_time": 324.2857142857143,
+      "duration_seconds": 20.928571428571427
+    },
+    {
+      "chunk_id": 15,
+      "filename": "chunk_0015_p3.wav",
+      "page": 3,
+      "text_snippet": "The third or deeppain, arising from viscera, muscu...",
+      "start_time": 345.2142857142857,
+      "duration_seconds": 20.571428571428573
+    },
+    {
+      "chunk_id": 16,
+      "filename": "chunk_0016_p3.wav",
+      "page": 3,
+      "text_snippet": "They are quite simple in principle, consisting of ...",
+      "start_time": 365.7857142857143,
+      "duration_seconds": 26.285714285714285
+    },
+    {
+      "chunk_id": 17,
+      "filename": "chunk_0017_p3.wav",
+      "page": 3,
+      "text_snippet": "The central region of each intrafusal fiber hasAna...",
+      "start_time": 392.07142857142856,
+      "duration_seconds": 5.928571428571429
+    },
+    {
+      "chunk_id": 18,
+      "filename": "chunk_0018_p4.wav",
+      "page": 4,
+      "text_snippet": "ForcecontrolsignalDrivingsignalLengthcontrolsignal...",
+      "start_time": 398.0,
+      "duration_seconds": 31.428571428571427
+    },
+    {
+      "chunk_id": 19,
+      "filename": "chunk_0019_p4.wav",
+      "page": 4,
+      "text_snippet": "Arrows indicate excitatory connections; filled cir...",
+      "start_time": 429.42857142857144,
+      "duration_seconds": 18.642857142857142
+    },
+    {
+      "chunk_id": 20,
+      "filename": "chunk_0020_p4.wav",
+      "page": 4,
+      "text_snippet": "When the mus-cle is stretched, the central part of...",
+      "start_time": 448.0714285714286,
+      "duration_seconds": 26.285714285714285
+    },
+    {
+      "chunk_id": 21,
+      "filename": "chunk_0021_p4.wav",
+      "page": 4,
+      "text_snippet": "Gamma motor neurons can regu-late the sensitivity ...",
+      "start_time": 474.3571428571429,
+      "duration_seconds": 26.0
+    },
+    {
+      "chunk_id": 22,
+      "filename": "chunk_0022_p4.wav",
+      "page": 4,
+      "text_snippet": "The free receptors ortype 4 joint receptors are no...",
+      "start_time": 500.3571428571429,
+      "duration_seconds": 5.357142857142857
+    }
+  ]
+}

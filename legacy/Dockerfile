@@ -1,4 +1,4 @@
-# Dockerfile.rocm (Final v8 - Integrated Best Practices)
+# dockerfile.base.rocm (Final v8 - Integrated Best Practices)
 FROM rocm/dev-ubuntu-22.04:6.4.2-complete
 
 # Use /workspace consistently
@@ -33,7 +33,7 @@ RUN rm $(python3 -m pip show torch | grep Location | awk '{print $2}')/torch/lib
 
 # --- Careful Dependency Installation ---
 # Copy clean requirements (excludes torch, torchaudio, transformers, trainer, encodec)
-COPY requirements-rocm-clean.txt .
+COPY ../requirements-rocm-clean.txt .
 
 # Install "safe" dependencies first (using simplified logic from v7)
 RUN python3 -m pip install -r requirements-rocm-clean.txt

@@ -24,7 +24,7 @@ class CodeProjectExporter:
 
         self.load_config()
 
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + ''.join(
+        self.timestamp = datetime.now().strftime("%m_%d_%y_%H:%M:%S") + "_" + ''.join(
             random.choices(string.ascii_lowercase + string.digits, k=8))
         self.exported_files: List[Dict] = []
 
@@ -66,39 +66,7 @@ class CodeProjectExporter:
     # --- v1.8 Change ---
     def create_export_summary(self, results):
         """Create a summary file for all exports, including trees"""
-        summary_path = self.obsidian_base / f"EXPORT_SUMMARY_{self.timestamp}.md"
-
-        try:
-            with open(summary_path, 'w', encoding='utf-8') as f:
-                f.write(f"# Code Export Summary\n\n")
-                f.write(f"**Timestamp**: {self.timestamp}\n")
-                f.write(f"**Total Projects**: {len(results)}\n\n")
-
-                f.write("## Export Results\n\n")
-                for result in results:
-                    status = "✓" if result['success'] else "✗"
-                    f.write(f"- {status} **{result['name']}**\n")
-                    f.write(f"  - Source: `{result['path']}`\n")
-                    if result['output']:
-                        link_path = f"{result['output'].name}/00_PROJECT_INDEX"
-                        f.write(f"  - Output: [[{link_path}|{result['name']} Project Index]]\n")
-                    else:
-                        f.write(f"  - Output: Failed to export (No files found or error)\n")
-                    f.write("\n")
-
-                # --- v1.8 New Section ---
-                f.write("---\n")
-                f.write("## Aggregated Project File Trees\n\n")
-                for result in results:
-                    if result['success']:
-                        f.write(f"### {result['name']}\n\n")
-                        f.write("```\n")
-                        f.write(result['tree_content'])
-                        f.write("\n```\n\n")
-
-            print(f"\nSummary saved to: {summary_path}")
-        except Exception as e:
-            print(f"Could not create summary: {e}")
+        pass  # Placeholder: function body removed/made empty
 
     def collect_matching_files(self, root_path: Path,
                                patterns: List[re.Pattern],
@@ -224,10 +192,21 @@ class CodeProjectExporter:
             print(f"Error writing {output_path}: {e}")
 
     def export_all_projects(self):
-        """Export all projects defined in config"""
+        """Export all projects defined in config into a single, unified directory."""
         if not self.projects:
             print("No projects defined in config.")
             return
+
+        # --- NEW UNIFIED OUTPUT DIR ---
+        # Create a single output directory using the current timestamp
+        unified_output_dir = self.obsidian_base / f"FINAL_EXPORT_{self.timestamp}"
+        try:
+            unified_output_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Created unified output directory: {unified_output_dir}")
+        except Exception as e:
+            print(f"Error creating unified output directory: {e}")
+            return
+        # --- END NEW ---
 
         results = []
         for project in self.projects:
@@ -235,7 +214,7 @@ class CodeProjectExporter:
             print(f"Exporting: {project.get('name', 'Unknown')}")
             print(f"{'=' * 60}")
 
-            # --- Select Patterns ---
+            # --- Select Patterns/Dirs (unchanged logic) ---
             project_patterns = project.get("include_patterns")
             if project_patterns:
                 print(f"  Using per-project include patterns...")
@@ -247,7 +226,6 @@ class CodeProjectExporter:
                 print(f"  Using global include patterns...")
                 compiled_patterns = self._global_compiled_patterns
 
-            # --- Select Skip Dirs ---
             project_skip_dirs = project.get("skip_dirs")
             if project_skip_dirs is not None:
                 print(f"  Using per-project skip dirs...")
@@ -256,7 +234,6 @@ class CodeProjectExporter:
                 print(f"  Using global skip dirs...")
                 skip_dirs_set = self.global_skip_dirs
 
-            # --- Select Exclude Patterns ---
             project_exclude_patterns = project.get("exclude_patterns")
             if project_exclude_patterns:
                 print(f"  Using per-project exclude patterns...")
@@ -268,31 +245,34 @@ class CodeProjectExporter:
                 print(f"  Using global exclude patterns...")
                 compiled_exclude_patterns = self._global_compiled_exclude_patterns
 
+            # Call export_directory, passing the UNIFIED output directory
             result = self.export_directory(
                 project.get('path'),
                 project.get('name'),
                 compiled_patterns,
                 skip_dirs_set,
-                compiled_exclude_patterns
+                compiled_exclude_patterns,
+                unified_output_dir  # PASS NEW UNIFIED DIR HERE
             )
 
-            # --- v1.8 Change ---
             results.append({
                 'name': project.get('name'),
                 'path': project.get('path'),
-                'output': result.get("output_dir") if result else None,
-                'tree_content': result.get("tree_content") if result else "No files found or error.",
+                'output': unified_output_dir,  # OUTPUT IS THE UNIFIED DIR
+                'tree_content': result.get(
+                    "tree_content") if result else "No files found or error.",
                 'success': result is not None
             })
 
-        self.create_export_summary(results)
+        # self.create_export_summary(results) # DELETED: No summary needed
         return results
 
     def export_directory(self, source_dir: str, project_name: str,
                          patterns: List[re.Pattern],
                          skip_dirs_set: Set[str],
-                         exclude_patterns: List[re.Pattern]):
-        """Export entire directory structure to Obsidian"""
+                         exclude_patterns: List[re.Pattern],
+                         unified_output_dir: Path):  # ADDED: Unified Output Dir
+        """Export directory structure, writing directly to the unified folder."""
         if not source_dir:
             print("Error: Project path is empty in config.")
             return None
@@ -303,40 +283,32 @@ class CodeProjectExporter:
             print(f"Error: Directory not found: {source_dir}")
             return None
 
-        if project_name is None:
-            project_name = source_path.name
-
-        output_dir = self.obsidian_base / f"{project_name}_{self.timestamp}"
-
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            print(f"Error creating output directory: {e}")
-            return None
+        # --- MODIFIED OUTPUT DIR LOGIC ---
+        # The output directory is the pre-created unified folder. No creation needed here.
+        output_dir = unified_output_dir
+        # --- END MODIFIED ---
 
         self.collect_matching_files(source_path, patterns, skip_dirs_set, exclude_patterns)
 
         if not self.exported_files:
             print("  No matching files found. Aborting export for this project.")
-            try:
-                output_dir.rmdir()
-            except OSError as e:
-                print(f"Warning: Could not remove empty dir {output_dir}: {e}")
             return None
 
         self.exported_files.sort(key=lambda x: str(x['relative_path']).lower())
 
+        # Generate a filtered file tree showing ONLY the files being exported
         tree_content = self.generate_filtered_tree(source_path)
 
+        # Write the project index file
         self.write_index_file(output_dir, project_name, source_path, tree_content)
-        self.create_directory_structure(source_path, output_dir)
 
         exported_count = 0
         for file_info in self.exported_files:
             try:
                 self.export_file_with_context(
                     file_info['full_path'],
-                    file_info['relative_path'],
+                    # Prepend project name to relative path for unified tree clarity
+                    Path(project_name) / file_info['relative_path'],
                     output_dir
                 )
                 exported_count += 1
@@ -345,7 +317,6 @@ class CodeProjectExporter:
 
         print(f"✓ Exported {exported_count}/{len(self.exported_files)} files to: {output_dir}")
 
-        # --- v1.8 Change ---
         return {
             "output_dir": output_dir,
             "tree_content": tree_content
@@ -374,8 +345,8 @@ class CodeProjectExporter:
         return tree
 
     def write_index_file(self, output_dir, project_name, source_path, tree_content):
-        """Write the main index file"""
-        index_path = output_dir / "00_PROJECT_INDEX.md"
+        """Write the main index file, modified to be unique per project in unified dir."""
+        index_path = output_dir / f"00_{project_name}_INDEX.md"  # Unique index name
         try:
             with open(index_path, 'w', encoding='utf-8') as f:
                 f.write(f"# {project_name} Export\n\n")
@@ -396,40 +367,20 @@ class CodeProjectExporter:
 
                     if file_dir != current_dir:
                         current_dir = file_dir
+                        # Use the actual directory path as the heading
                         f.write(f"\n### {file_dir if str(file_dir) != '.' else 'Root'}\n\n")
 
+                    # Link path must be the full relative path with underscores (Action 658)
                     safe_link = str(rel_path).replace(os.sep, '_')
-                    f.write(f"- [[{safe_link}.md|{rel_path.name}]]\n")
+                    f.write(
+                        f"- [[{project_name}_{safe_link}.md|{rel_path.name}]]\n")  # ADD PROJECT NAME TO LINK
         except Exception as e:
             print(f"Error writing index file: {e}")
             traceback.print_exc()
 
     def create_directory_structure(self, source_path, output_dir):
-        """Create directory README stubs to preserve structure in Obsidian"""
-        dirs_created = set()
-
-        for file_info in self.exported_files:
-            rel_path = file_info['relative_path']
-            dir_path = rel_path.parent
-
-            if str(dir_path) != '.' and dir_path not in dirs_created:
-                readme_name = f"_DIR_{str(dir_path).replace(os.sep, '_')}_README.md"
-                readme_path = output_dir / readme_name
-
-                try:
-                    with open(readme_path, 'w', encoding='utf-8') as f:
-                        f.write(f"# Directory: {dir_path}\n\n")
-                        f.write(f"This directory contains files from `{source_path / dir_path}`\n\n")
-                        f.write("## Files in this directory\n\n")
-
-                        for fi in self.exported_files:
-                            if fi['relative_path'].parent == dir_path:
-                                safe_link = str(fi['relative_path']).replace(os.sep, '_')
-                                f.write(f"- [[{safe_link}.md|{fi['relative_path'].name}]]\n")
-
-                        dirs_created.add(dir_path)
-                except Exception as e:
-                    print(f"Warning: Could not create README for {dir_path}: {e}")
+        """DELETED: Do not create directory README stubs."""
+        pass  # Functionality removed
 
 
 # Usage
@@ -449,7 +400,7 @@ if __name__ == "__main__":
                 }
             ],
             "global_include_patterns": [
-                "*.py", "*.yml", "*.yaml", "*.json", "Dockerfile*", "*.md"
+                "*.py", "*.yml", "*.yaml", "*.json", "dockerfile.base*", "*.md"
             ],
             "global_skip_dirs": ["__pycache__", ".git", ".idea", "venv", ".venv"],
             "global_exclude_patterns": ["README.md"],

@@ -1,3 +1,4 @@
+# dockerfile.base
 # 1. THE BASE IMAGE
 
 FROM rocm/pytorch:rocm6.4.2_ubuntu24.04_py3.12_pytorch_release_2.6.0
@@ -18,14 +19,13 @@ RUN apt-get update && apt-get install -y \
 # 1. Downgrade numpy, per dev guidance for this stack
 RUN pip3 install --no-cache-dir numpy==1.26.4
 
-# 2. Install PyTorch using 'rocm6.4' wheel URL.
-RUN pip3 install --no-cache-dir \
-    torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/rocm6.4 \
-    --break-system-packages
+# 2. "Checkmate Fix" (Build-Time)
+RUN TORCH_LIB_PATH=$(python3 -c 'import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), "lib"))') && \
+    rm -f "${TORCH_LIB_PATH}/libhsa-runtime64.so"*
 
 # ----------------------------------------------------------------------
 # 3. BASE LAYER CONFIG
 # ----------------------------------------------------------------------
 
+# Use our standard project workdir
 WORKDIR /app

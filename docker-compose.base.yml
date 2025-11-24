@@ -1,8 +1,9 @@
+# docker-compose.base.yml
 services:
   rebuild-gpu-service:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: dockerfile.base
     image: project-rebuild-gold-standard:latest
     container_name: project-rebuild-gpu-service
 

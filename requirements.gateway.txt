@@ -1,0 +1,12 @@
+# requirements.gateway.txt
+
+# 1. The Web Server Framework
+fastapi
+
+# 2. The ASGI Server to run FastAPI
+uvicorn[standard]
+
+# 3. The HTTP client to call other services
+httpx
+
+# past reqs had flask - watch for need, but currently removed to start with clean env

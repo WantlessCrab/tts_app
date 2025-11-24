@@ -1,0 +1,22 @@
+# dockerfile.fileserver
+
+# ========================================
+# 1. THE BASE IMAGE (CPU-Only)
+# ========================================
+# Use a minimal, official Python 3.12 image
+FROM python:3.12-slim
+
+# ========================================
+# 2. THE "APPLICATION LAYER"
+# ========================================
+
+# 1. Set the working directory to the folder we want to serve
+# This is where our 'outputs' volume will be mounted.
+WORKDIR /workspace/outputs
+
+# 2. Expose the default port for the python http server
+EXPOSE 8000
+
+# 3. Run the simple Python http server
+# This will serve all files in the WORKDIR
+CMD ["python3", "-m", "http.server", "8000"]

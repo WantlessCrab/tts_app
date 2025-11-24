@@ -12,33 +12,42 @@ import re
 import httpx
 from fastapi import Query
 from typing import Optional
+from datetime import datetime
 
 # ========================================
 # Configuration & Setup
 # ========================================
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AudioServer")
 
 app = FastAPI(title="TTS Audio Server")
 
-APP_DIR = Path(__file__).parent.resolve()
-STATIC_DIR = APP_DIR / "static"
-TEMPLATES_DIR = APP_DIR / "templates"
-OUTPUT_DIR = APP_DIR.parent / "outputs"
-OBSIDIAN_DIR = APP_DIR.parent / "obsidian_audio"
+# --- Standardized Container Paths ---
+STATIC_DIR = Path("/app/static")
+TEMPLATES_DIR = Path("/app/templates")
+
+# --- Standardized Shared Workspace Paths ---
+WORKSPACE_DIR = Path("/workspace")
+OUTPUT_DIR = WORKSPACE_DIR / "outputs"
+OBSIDIAN_DIR = WORKSPACE_DIR / "obsidian_audio"
 AUDIOBOOKS_DIR = OUTPUT_DIR / "audiobooks"
-PDF_CACHE_DIR = Path("/workspace/pdf_cache")
+PDF_CACHE_DIR = WORKSPACE_DIR / "pdf_cache"  # Read-only access to cache directory
+
+# --- PDF Service URL (Update port) ---
+PDF_SERVICE_URL = os.getenv("PDF_SERVICE_URL", "http://pdf-processor-service:8000")
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 AUDIO_SOURCES = {
-    "audiobooks": AUDIOBOOKS_DIR,        # /workspace/outputs/audiobooks
-    "obsidian": OBSIDIAN_DIR,          # /workspace/obsidian_audio
-    "standalone": OUTPUT_DIR           # /workspace/outputs (for non-audiobook files)
+    "audiobooks": AUDIOBOOKS_DIR,  # /workspace/outputs/audiobooks
+    "obsidian": OBSIDIAN_DIR,  # /workspace/obsidian_audio
+    "standalone": OUTPUT_DIR  # /workspace/outputs (for non-audiobook files)
 }
 # Use lowercase default consistent with keys
 DEFAULT_AUDIO_SOURCE_NAME = "audiobooks"
+STALE_JOB_THRESHOLD_MINUTES = int(os.getenv('STALE_JOB_THRESHOLD_MINUTES', '30'))
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,31 +57,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Add client for pdf-service ---
+# Create the HTTP client for calling other services
 client = httpx.AsyncClient(timeout=30.0)
-PDF_SERVICE_URL = "http://pdf-service:8001"
+
 
 @app.on_event("startup")
 async def startup_event():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    OBSIDIAN_DIR.mkdir(parents=True, exist_ok=True) # Ensure Obsidian dir exists
-    AUDIOBOOKS_DIR.mkdir(parents=True, exist_ok=True)
-    STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
-
     try:
+        # Check PDF Service connectivity (uses existing HTTP client timeout of 30.0s)
         await client.get(f"{PDF_SERVICE_URL}/docs")
         logger.info(f"Successfully connected to PDF service at {PDF_SERVICE_URL}")
     except Exception as e:
         logger.error(f"Failed to connect to PDF service at {PDF_SERVICE_URL}: {e}")
 
-    logger.info(f"Serving audio from defined sources: {list(AUDIO_SOURCES.keys())}") # Updated log message
+    logger.info(f"Serving audio from defined sources: {list(AUDIO_SOURCES.keys())}")
     logger.info("Audio server started successfully.")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     await client.aclose()
     logger.info("HTTP client closed.")
+
 
 # ========================================
 # Frontend Endpoints
@@ -86,6 +92,7 @@ async def get_player_interface():
         raise HTTPException(status_code=500, detail="Player interface file missing")
     return FileResponse(player_html_path)
 
+
 # ========================================
 # API Endpoints
 # ========================================
@@ -98,7 +105,8 @@ async def list_audio_files(source: Optional[str] = Query(DEFAULT_AUDIO_SOURCE_NA
     # Validate the source name
     if source not in AUDIO_SOURCES:
         logger.warning(f"Invalid source requested in list_audio: {source}")
-        raise HTTPException(status_code=400, detail=f"Invalid audio source specified. Valid sources: {list(AUDIO_SOURCES.keys())}")
+        raise HTTPException(status_code=400,
+                            detail=f"Invalid audio source specified. Valid sources: {list(AUDIO_SOURCES.keys())}")
 
     target_directory = AUDIO_SOURCES[source]
     logger.info(f"Listing audio files from source '{source}' at path: {target_directory}")
@@ -111,57 +119,31 @@ async def list_audio_files(source: Optional[str] = Query(DEFAULT_AUDIO_SOURCE_NA
                 if f.is_file():
                     files.append({
                         "name": f.name,
-                        "path": str(f), # Internal path, might not be needed by frontend
+                        "path": str(f),
                         "size_bytes": f.stat().st_size,
-                        "type": source # Return the source type
+                        "type": source
                     })
         except Exception as e:
             logger.error(f"Error scanning directory {target_directory}: {e}")
             # Don't raise HTTPException here, just return empty list or partial results
 
-    return {"files": files, "source": source} # Also return the source used
+    return {"files": files, "source": source}
 
-# --- Step 1.5: Modified Endpoint to Handle Source Parameter ---
-
-@app.get("/api/audio/{filename}")
-async def serve_audio_file(filename: str, source: Optional[str] = Query(DEFAULT_AUDIO_SOURCE_NAME)):
-    """Serves a specific audio file from the specified source directory."""
-
-    if ".." in filename or filename.startswith("/"):
-        logger.warning(f"Blocked invalid filename request: {filename}")
-        raise HTTPException(status_code=400, detail="Invalid filename")
-
-    # Validate the source name
-    if source not in AUDIO_SOURCES:
-        logger.warning(f"Invalid source requested in serve_audio: {source}")
-        raise HTTPException(status_code=400, detail=f"Invalid audio source specified. Valid sources: {list(AUDIO_SOURCES.keys())}")
-
-    target_directory = AUDIO_SOURCES[source]
-    file_path = target_directory / filename
-
-    logger.info(f"Request received for file '{filename}' from source '{source}' at path: {file_path}")
-
-    if file_path.exists() and filename.lower().endswith('.wav'):
-        logger.info(f"Serving file: {file_path}")
-        return FileResponse(
-            path=file_path,
-            media_type="audio/wav",
-            headers={"Accept-Ranges": "bytes"}
-        )
-
-    logger.warning(f"File not found: {file_path}")
-    raise HTTPException(status_code=404, detail="Audio file not found in the specified source")
 
 @app.websocket("/stream")
 async def websocket_endpoint(websocket: WebSocket):
-    """Placeholder for future live-streaming playback."""
+    """
+    Milestone 4: Placeholder for future real-time streaming updates.
+    (2.3 Future-Proofing: Removed unnecessary send_json/sleep calls)
+    """
     await websocket.accept()
     logger.info("WebSocket connection established (placeholder)")
     try:
-        await websocket.send_json({"status": "ready", "note": "Streaming endpoint placeholder - not yet functional"})
-        await asyncio.sleep(1)
+        # Await future client messages or simply block
+        await websocket.receive_text()  # Block until client sends something or closes
     except Exception as e:
-        logger.warning(f"WebSocket error: {e}")
+        # Expected exception when connection closes
+        logger.debug(f"WebSocket client disconnected: {e}")
     finally:
         await websocket.close()
         logger.info("WebSocket connection closed")
@@ -172,18 +154,22 @@ async def websocket_endpoint(websocket: WebSocket):
 async def get_citation_for_timestamp(book_id: str, timestamp: float = 0.0):
     """
     Get citation information by proxying the request to the pdf-service.
+    (1.3 Citation Proxy Update: Improved error handling for timeouts)
     """
     safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
 
     try:
-        # Forward the request to the pdf-service
         api_url = f"{PDF_SERVICE_URL}/api/v1/citation/{safe_book_id}"
+        # Forward the request to the pdf-service
         response = await client.get(api_url, params={"timestamp": timestamp})
 
-        # Pass the response (success or error) back to the client
         response.raise_for_status()
         return response.json()
 
+    except httpx.TimeoutError:  # <-- CORRECTED
+        # 2.2 Error Handling: Specific handling for timeouts
+        logger.error(f"Error getting citation: Proxy connection timed out to {PDF_SERVICE_URL}")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
     except httpx.HTTPStatusError as e:
         logger.error(f"Error getting citation from pdf-service: {e.response.status_code}")
         # Pass the error detail from the downstream service
@@ -203,13 +189,21 @@ async def list_audiobooks():
 
     for book_dir in AUDIOBOOKS_DIR.iterdir():
         if book_dir.is_dir():
+            # 1.4 Sanitization Consistency: book_dir.name is already sanitized by process.py
             manifest_path = book_dir / "manifest.json"
             if manifest_path.exists():
                 try:
+                    # NOTE: We do not merge citation data here (1.1 Response Simplification)
                     with open(manifest_path, 'r') as f:
                         manifest = json.load(f)
                         total_chunks = manifest.get('total_chunks', 0)
                         ready_chunks = len(manifest.get('ready_chunks', []))
+
+                        # Use citation_ready.json file existence as proxy for highlighting availability
+                        safe_book_id = book_dir.name
+                        citation_filename = safe_book_id + '_citation_ready.json'
+                        highlighting_ready = (PDF_CACHE_DIR / citation_filename).exists()
+
                         books.append({
                             "book_id": book_dir.name,
                             "title": manifest['metadata'].get('title', book_dir.name),
@@ -217,7 +211,8 @@ async def list_audiobooks():
                             "source_file": manifest['metadata'].get('source_filename', ''),
                             "total_chunks": total_chunks,
                             "ready_chunks": ready_chunks,
-                            "is_complete": ready_chunks == total_chunks and total_chunks > 0
+                            "is_complete": ready_chunks == total_chunks and total_chunks > 0,
+                            "highlighting_ready": highlighting_ready  # New status field
                         })
                 except Exception as e:
                     logger.error(f"Failed to read manifest for {book_dir.name}: {e}")
@@ -226,39 +221,155 @@ async def list_audiobooks():
 
 @app.get("/api/audiobook/{book_id}/status")
 async def get_audiobook_status(book_id: str):
-    """Get detailed status and chunk list for a specific audiobook"""
-    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
-    manifest_path = AUDIOBOOKS_DIR / safe_book_id / "manifest.json"
+    """
+    Get detailed status with stale job detection.
+    """
+    safe_book_id = book_id
+    live_manifest_path = AUDIOBOOKS_DIR / safe_book_id / "manifest.json"
 
-    if not manifest_path.exists():
-        raise HTTPException(status_code=404, detail=f"Audiobook '{book_id}' not found")
+    if not live_manifest_path.exists():
+        logger.error(f"Live manifest not found at {live_manifest_path}")
+        raise HTTPException(status_code=404,
+                            detail=f"Audiobook '{book_id}' (live manifest) not found")
 
     try:
-        with open(manifest_path, 'r') as f:
-            manifest = json.load(f)
+        # Load manifest
+        with open(live_manifest_path, 'r') as f:
+            live_manifest = json.load(f)
 
-        total_chunks = manifest.get('total_chunks', 1)
-        ready_chunks_list = manifest.get('ready_chunks', [])
+        # SOA-COMPLIANT: Graceful Degradation (Dict Validation)
+        response_data = live_manifest
+
+        # Infer missing fields
+        total = response_data.get('total_chunks', 0)
+        ready = len(response_data.get('ready_chunks', []))
+
+        if 'processing_status' not in response_data or response_data['processing_status'] is None:
+            if total == 0:
+                response_data['processing_status'] = 'processing_started'
+            elif ready == total and total > 0:
+                response_data['processing_status'] = 'stage_3_complete'
+            elif ready > 0:
+                response_data['processing_status'] = 'stage_3_partial'
+            else:
+                response_data['processing_status'] = 'unknown'
+
+        # Ensure defaults
+        response_data.setdefault('trace_id', 'N/A')
+        response_data.setdefault('metadata', {})
+
+        # Calculate progress
+        total_chunks = response_data.get('total_chunks', 0)
+        ready_chunks_list = response_data.get('ready_chunks', [])
         progress = (len(ready_chunks_list) / total_chunks) * 100 if total_chunks > 0 else 0
 
-        return {
-            "book_id": safe_book_id,
-            "metadata": manifest['metadata'],
-            "total_chunks": manifest.get('total_chunks', 0),
-            "ready_chunks": ready_chunks_list,
-            "progress_percentage": round(progress, 1),
-            "is_complete": len(ready_chunks_list) == total_chunks and total_chunks > 0
-        }
+        response_data['progress_percentage'] = round(progress, 1)
+        response_data['is_complete'] = len(ready_chunks_list) == total_chunks and total_chunks > 0
+
+        # ✅ NEW: Stale job detection (Task 3)
+        is_stale = False
+        if response_data.get('processing_status') in ['processing_started', 'stage_1_complete',
+                                                      'stage_2_complete', 'stage_3_started',
+                                                      'stage_3_partial']:
+            try:
+                manifest_mtime = live_manifest_path.stat().st_mtime
+                current_time = datetime.now().timestamp()
+                minutes_since_update = (current_time - manifest_mtime) / 60
+
+                if minutes_since_update > STALE_JOB_THRESHOLD_MINUTES:
+                    is_stale = True
+                    logger.warning(
+                        f"Stale job detected for {book_id}: {minutes_since_update:.1f} minutes since last update")
+
+            except Exception as e:
+                logger.warning(f"Failed to check staleness for {book_id}: {e}")
+
+        response_data['is_stale'] = is_stale
+        response_data['stale_threshold_minutes'] = STALE_JOB_THRESHOLD_MINUTES
+
+        # Check citation file
+        citation_filename = safe_book_id + '_citation_ready.json'
+        citation_path = PDF_CACHE_DIR / citation_filename
+        response_data['highlighting_ready'] = citation_path.exists()
+
+        return response_data
+
     except Exception as e:
-        logger.error(f"Error reading manifest for {book_id}: {e}")
+        logger.error(f"Error reading live manifest for {book_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to read audiobook data")
 
+
+@app.get("/api/audiobook/{book_id}/coordinates")
+async def get_audiobook_coordinates(book_id: str):
+    """
+    (1.2 New Coordinate Endpoint): Serves the heavy coordinate data from _raw.json cache.
+    This replaces merging coordinates in /status. (Option A implementation)
+    """
+    # 1.4 Sanitization Consistency: book_id is trusted to be sanitized
+    safe_book_id = book_id
+
+    # Coordinates are stored in the _raw.json file generated by process.py Stage 1
+    # 2.1 File Path Robustness: Constructs path to _raw.json
+    raw_cache_filename = safe_book_id + '_raw.json'
+    raw_cache_path = PDF_CACHE_DIR / raw_cache_filename
+
+    if not raw_cache_path.exists():
+        logger.error(f"Raw coordinate file not found at {raw_cache_path}")
+        raise HTTPException(status_code=404,
+                            detail="Raw coordinate data not available for this book.")
+
+    # Serve the raw file containing coordinate_blocks (Option A)
+    logger.info(f"Serving coordinate data from: {raw_cache_path}")
+    return FileResponse(
+        path=raw_cache_path,
+        media_type="application/json",
+        headers={
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
+
+
+@app.get("/api/audiobook/{book_id}/chunks")
+async def get_audiobook_chunks(book_id: str):
+    """
+    Serves full chunk data with sentence indices from citation_ready.json
+    This data is required by the frontend for M3 (Click-to-Seek) index.
+    """
+    safe_book_id = book_id
+    citation_filename = safe_book_id + '_citation_ready.json'
+    citation_path = PDF_CACHE_DIR / citation_filename
+
+    if not citation_path.exists():
+        logger.warning(f"Citation data not found for chunks endpoint: {citation_path}")
+        raise HTTPException(status_code=404, detail="Citation data not available")
+
+    try:
+        # Load data within helper scope
+        with open(citation_path, 'r', encoding='utf-8') as f:
+            citation_data = json.load(f)
+
+        # Apply Optional Enhancement: Return explicit Response with cache headers
+        response_content = {
+            "chunks": citation_data.get('chunks', []),
+            "highlighting_enabled": citation_data.get('highlighting_enabled', False)
+        }
+
+        return Response(
+            content=json.dumps(response_content),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "public, max-age=3600"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error reading citation file for chunks: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve citation chunks")
 
 @app.get("/api/pdf/{pdf_filename}")
 async def proxy_serve_pdf(pdf_filename: str):
     """
     Proxies request for source PDF document to the pdf-service.
-    FIXED: Uses client.get() for small files to avoid stream closure bugs.
+    (2.2 Error Handling: Added Timeout Error handling)
     """
     safe_filename = re.sub(r'[^\w\-\.]', '', pdf_filename).strip()
 
@@ -269,16 +380,11 @@ async def proxy_serve_pdf(pdf_filename: str):
         api_url = f"{PDF_SERVICE_URL}/api/v1/document/{safe_filename}"
         logger.info(f"Proxying PDF request via GET: {api_url}")
 
-        # --- THE FIX ---
-        # 1. Use client.get() to download the entire file (it's small)
         response = await client.get(api_url, timeout=30.0)
-
-        # Propagate error from pdf-service if it occurs
         response.raise_for_status()
 
-        # 2. Return a standard Response with the full content
         return Response(
-            content=response.content,  # Send all content at once
+            content=response.content,
             status_code=response.status_code,
             media_type=response.headers.get("content-type", "application/pdf"),
             headers={
@@ -289,8 +395,11 @@ async def proxy_serve_pdf(pdf_filename: str):
                 ]
             }
         )
-        # --- END FIX ---
 
+    except httpx.TimeoutError:  # <-- CORRECTED
+        logger.error(
+            f"Error proxying PDF document: Proxy connection timed out to {PDF_SERVICE_URL}")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
     except httpx.HTTPStatusError as e:
         logger.error(f"Error proxying PDF from pdf-service: {e.response.status_code}")
         try:
@@ -302,9 +411,39 @@ async def proxy_serve_pdf(pdf_filename: str):
         logger.error(f"Error proxying PDF: {e}")
         raise HTTPException(status_code=500, detail="PDF service not available")
 
+
+@app.post("/api/retry/{book_id}")
+async def retry_processing(book_id: str, force_rebuild: bool = False):
+    """
+    Proxy retry request to pdf-processor service.
+    """
+    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
+
+    try:
+        api_url = f"{PDF_SERVICE_URL}/api/v1/retry/{safe_book_id}"
+
+        # Pass force_rebuild flag as a query parameter
+        response = await client.post(api_url, params={"force_rebuild": force_rebuild})
+        response.raise_for_status()
+
+        return response.json()
+
+    except httpx.TimeoutError:
+        logger.error(f"Retry request timed out for {safe_book_id}")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Retry request failed: {e.response.status_code}")
+        detail = e.response.json().get("detail", "Retry failed")
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+
+    except Exception as e:
+        logger.error(f"Retry request error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate retry")
+
 @app.get("/api/audiobook/{book_id}/play/{chunk_filename}")
 async def serve_audiobook_chunk(book_id: str, chunk_filename: str):
-    """Serve a specific audio chunk from an audiobook"""
+    """Serve a specific audio chunk from an audiobook (Functionality retained from baseline)"""
     safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
     safe_filename = re.sub(r'[^\w\-\.]', '', chunk_filename).strip()
 
@@ -329,7 +468,7 @@ async def serve_audiobook_chunk(book_id: str, chunk_filename: str):
 
 @app.get("/api/available_pdfs")
 async def list_available_pdfs():
-    """List PDFs available for processing"""
+    """List PDFs available for processing (Functionality retained from baseline)"""
     pdf_input_dir = Path("/workspace/pdf_input")
     pdfs = []
     if pdf_input_dir.exists():
@@ -343,35 +482,54 @@ async def list_available_pdfs():
 
 
 # --- Replaced subprocess with API call ---
-@app.post("/api/process_pdf")
-async def start_pdf_processing(filename: str):
+@app.post("/api/v1/process/{pdf_filename}")
+async def start_pdf_processing(pdf_filename: str, background_tasks: BackgroundTasks):
     """
-    Trigger PDF processing pipeline by proxying the request to pdf-service.
+    Triggers the full PDF-to-Audio pipeline in the background.
     """
-    safe_filename = re.sub(r'[^\w\-\.]', '', filename).strip()
+    safe_filename = re.sub(r'[^\w\s\-\.]', '', pdf_filename).strip()
     if not safe_filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
 
+    pdf_path = INPUT_DIR / safe_filename
+    if not pdf_path.exists():
+        logger.warning(f"Process request failed: File not found at {pdf_path}")
+        raise HTTPException(status_code=404, detail="PDF not found in input directory")
+
+    # --- NEW: 1. Generate IDs and Paths ---
+    book_id = derive_book_id(pdf_path.stem)
+    trace_id = str(uuid.uuid4())
+    audio_dir = OUTPUT_DIR / book_id
+    manifest_path = audio_dir / "manifest.json"
+
+    # 2. Create directory and initial manifest stub
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    stub_manifest = {
+        "metadata": {"source_filename": safe_filename},
+        "book_id": book_id,
+        "trace_id": trace_id,  # NEW: Observability
+        "processing_status": "processing_started",  # NEW: State Machine
+        "total_chunks": 0,  # NEW: Placeholder for race condition fix
+        "ready_chunks": []
+    }
+
     try:
-        # Forward the request to the pdf-service
-        api_url = f"{PDF_SERVICE_URL}/api/v1/process/{safe_filename}"
-        response = await client.post(api_url)
-
-        # Pass the response (success or error) back to the client
-        response.raise_for_status()
-        return response.json()
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Error triggering processing: {e.response.status_code}")
-        detail = e.response.json().get("detail", "Failed to start processing")
-        raise HTTPException(status_code=e.response.status_code, detail=detail)
+        atomic_write_manifest(manifest_path, stub_manifest, logger)
+        logger.info(f"[{trace_id}] Manifest stub created for {book_id}. Job accepted.")
     except Exception as e:
-        logger.error(f"Failed to start processing: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start processing")
+        logger.error(f"[{trace_id}] CRITICAL: Failed to create manifest stub: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initialize processing state.")
+
+    # 3. Add task with trace_id
+    background_tasks.add_task(run_full_pipeline, safe_filename, book_id, trace_id)
+
+    logger.info(f"[{trace_id}] Accepted job for {safe_filename}. Processing started in background.")
+    return {"status": "processing_started", "book_id": book_id, "trace_id": trace_id}
+
 
 # --- Step 1.2: New Endpoint to List Sources ---
 @app.get("/api/audio_sources")
 async def list_audio_sources():
     """Returns a list of available audio source names."""
     return {"sources": list(AUDIO_SOURCES.keys())}
-
