@@ -2,11 +2,30 @@
   "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
   "target_files": [
     {
-      "file": "../my_app/pdf_processor/process.py",
+      "file": "../feature_llm_bridge/frontend/manifest.json",
+      "mode": "full"
+    },
+    {
+      "file": "../feature_llm_bridge/frontend/background.js",
+      "mode": "full"
+    },
+    {
+      "file": "../feature_llm_bridge/frontend/popup.js",
+      "mode": "header"
+    },
+    {
+      "file": "../feature_llm_bridge/frontend/content.js",
+      "mode": "methods",
       "methods": [
-        "run_full_pipeline",
-        "generate_audio_streaming"
+        "pollServer",
+        "scrapeAndReport",
+        "simulateUserInput",
+        "handleInstruction"
       ]
+    },
+    {
+      "file": "../feature_llm_bridge/frontend/content.js",
+      "mode": "header"
     }
   ],
   "max_file_size_mb": 10

@@ -13,7 +13,7 @@ const SELECTORS = {
         sendBtn: "button[aria-label='Send message']"
     },
     "Gemini": {
-        lastMessage: ".message-content",
+        lastMessage: ".model-response-text, .message-content:not(.user-query)",
         input: "div[role='textbox']",
         sendBtn: "button[aria-label='Send message']"
     },
@@ -25,12 +25,13 @@ const SELECTORS = {
 };
 
 // --- UI OVERLAY ---
-
 function injectOverlay() {
+    // 1. Check if already exists
     if (document.getElementById('llm-bridge-overlay')) return;
 
+    // 2. Safety: If body is missing, wait for it
     if (!document.body) {
-        console.warn("[Bridge] ⏳ Body not ready. Retrying injection in 500ms...");
+        console.warn("[Bridge] ⏳ Body not ready. Retrying injection...");
         setTimeout(injectOverlay, 500);
         return;
     }
@@ -38,35 +39,27 @@ function injectOverlay() {
     const div = document.createElement('div');
     div.id = 'llm-bridge-overlay';
     div.innerHTML = `
-    <div class="bridge-agent-name">${AGENT_ID}</div>
+    <div class="bridge-agent-name">${AGENT_ID || "Bridge"}</div>
     <div class="bridge-status-container">
         <div id="bridge-status-dot" class="online"></div>
         <span id="llm-bridge-status-text">Connected</span>
-    </div>
-  `;
+    </div>`;
 
-    // Append to documentElement to survive React root wipes
-    document.documentElement.appendChild(div);
-    console.log("[Bridge] ✅ UI Injected successfully.");
+    // FIX: Attach to body so it sits on top of the page content
+    document.body.appendChild(div);
+    console.log("[Bridge] ✅ UI Injected into Body.");
 }
 
 function updateOverlayStatus(status) {
     const dot = document.getElementById('bridge-status-dot');
     const text = document.getElementById('llm-bridge-status-text');
-
     if (dot && text) {
-        if (status === 'online') {
-            dot.className = 'online';
-            text.innerText = 'Online';
-        } else {
-            dot.className = 'offline';
-            text.innerText = 'Offline';
-        }
+        dot.className = status === 'online' ? 'online' : 'offline';
+        text.innerText = status === 'online' ? 'Online' : 'Offline';
     }
 }
 
 // --- CORE LOOPS ---
-
 function startBridge(agentId) {
     if (POLL_INTERVAL) clearInterval(POLL_INTERVAL);
     if (UI_WATCHDOG) clearInterval(UI_WATCHDOG);
@@ -74,14 +67,23 @@ function startBridge(agentId) {
     AGENT_ID = agentId;
     console.log(`[Bridge] Starting as agent: ${AGENT_ID}`);
 
+    // NEW: Snapshot existing content to prevent "Past Message" routing
+    const selector = SELECTORS[AGENT_ID];
+    if (selector) {
+        // We use querySelectorAll because Gemini/Claude often have multiple blocks
+        const msgs = document.querySelectorAll(selector.lastMessage);
+        if (msgs.length > 0) {
+            // Set the baseline to the current text so we don't re-send it
+            lastScrapedText = msgs[msgs.length - 1].innerText;
+            console.log(`[Bridge] Baseline set. Ignoring ${lastScrapedText.length} chars.`);
+        }
+    }
+
     injectOverlay();
     POLL_INTERVAL = setInterval(pollServer, 2000);
 
     UI_WATCHDOG = setInterval(() => {
-        if (!document.getElementById('llm-bridge-overlay')) {
-            console.log("[Bridge] 🛡️ Watchdog: UI was removed. Re-injecting...");
-            injectOverlay();
-        }
+        if (!document.getElementById('llm-bridge-overlay')) injectOverlay();
     }, 1000);
 }
 
@@ -90,7 +92,6 @@ function stopBridge() {
     if (UI_WATCHDOG) clearInterval(UI_WATCHDOG);
     POLL_INTERVAL = null;
     UI_WATCHDOG = null;
-
     const overlay = document.getElementById('llm-bridge-overlay');
     if (overlay) overlay.remove();
     console.log("[Bridge] Stopped.");
@@ -99,72 +100,96 @@ function stopBridge() {
 async function pollServer() {
     if (!AGENT_ID) return;
 
-    try {
-        const response = await fetch(`${SERVER_URL}/status`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                agent_id: AGENT_ID,
-                state: "idle",
-                active_url: window.location.href,
-                tab_id: 0
-            })
-        });
-
-        const instruction = await response.json();
-        handleInstruction(instruction);
-        scrapeAndReport();
-
-    } catch (err) {
-        updateOverlayStatus("offline");
-    }
+    // FIX: Use Proxy instead of direct fetch
+    chrome.runtime.sendMessage({
+        action: "PROXY_STATUS",
+        payload: {
+            agent_id: AGENT_ID,
+            state: "idle",
+            active_url: window.location.href,
+            tab_id: 0
+        }
+    }, (response) => {
+        if (response && response.success) {
+            handleInstruction(response.data);
+            scrapeAndReport();
+        } else {
+            // updateOverlayStatus("offline");
+        }
+    });
 }
 
 // --- INSTRUCTION HANDLER ---
-
 async function handleInstruction(instr) {
     updateOverlayStatus("online");
-
     if (instr.command === "inject_content" && instr.content_payload) {
         console.log("[Bridge] 💉 Injecting content...");
-
         const selector = SELECTORS[AGENT_ID];
         const inputBox = document.querySelector(selector.input);
 
         if (inputBox) {
             inputBox.focus();
             const success = document.execCommand('insertText', false, instr.content_payload);
-            if (!success || inputBox.innerText.trim() === "") {
+
+            // FIX: Always run simulation for Gemini to unlock button
+            if (!success || inputBox.innerText.trim() === "" || AGENT_ID === "Gemini") {
                 simulateUserInput(inputBox, instr.content_payload);
             }
-            console.log("[Bridge] ✅ Injection complete. Sending...");
+
+            console.log("[Bridge] ✅ Injection complete. Waiting for UI...");
 
             setTimeout(() => {
                 const sendBtn = document.querySelector(selector.sendBtn);
                 if (sendBtn) {
+                    // Try to force enable
                     sendBtn.disabled = false;
-                    sendBtn.click();
-                } else {
-                    console.error("[Bridge] ❌ Send button not found");
-                }
-            }, 800);
+                    sendBtn.setAttribute('aria-disabled', 'false');
 
-        } else {
-            console.error("[Bridge] ❌ Input box not found");
+                    if (!sendBtn.disabled) {
+                        sendBtn.click();
+                    } else {
+                        console.log("[Bridge] ⚠️ Button disabled. Using Nuclear Enter.");
+                        pressEnter(inputBox);
+                    }
+                } else {
+                    console.log("[Bridge] ☢️ Button not found. Using Nuclear Enter.");
+                    pressEnter(inputBox);
+                }
+            }, 1500);
         }
     }
 }
 
+// FIX: "Heavy Duty" Simulator for Google Frameworks
 function simulateUserInput(element, text) {
+    element.focus();
     element.innerHTML = '';
+
     if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
         element.value = text;
     } else {
         element.textContent = text;
     }
+
+    // 1. Standard Events
     element.dispatchEvent(new Event('input', {bubbles: true}));
     element.dispatchEvent(new Event('change', {bubbles: true}));
-    element.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
+
+    // 2. Legacy/Framework Events (Critical for Gemini)
+    const textInputEvent = document.createEvent('TextEvent');
+    textInputEvent.initTextEvent('textInput', true, true, null, text, 9, "en-US");
+    element.dispatchEvent(textInputEvent);
+}
+
+function pressEnter(element) {
+    const event = new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13
+    });
+    element.dispatchEvent(event);
 }
 
 let lastScrapedText = "";
@@ -180,56 +205,51 @@ async function scrapeAndReport() {
     const text = lastMsg.innerText;
 
     if (text && text !== lastScrapedText && text.length > 5) {
-        console.log(`[Bridge] ⚡ New content (${text.length} chars). Payload prepared.`);
+        console.log(`[Bridge] ⚡ New content (${text.length} chars). Sending...`);
         lastScrapedText = text;
 
-        try {
-            await fetch(`${SERVER_URL}/capture`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    agent_id: AGENT_ID,
-                    content: text
-                })
-            });
-        } catch (err) {
-            console.error("[Bridge] 💥 NETWORK ERROR in scrapeAndReport:", err);
-        }
+        // FIX: Use Proxy
+        chrome.runtime.sendMessage({
+            action: "PROXY_CAPTURE",
+            payload: {agent_id: AGENT_ID, content: text}
+        });
     }
 }
 
-// --- MESSAGING ---
+// --- MESSAGING & STATE ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "START_BRIDGE") {
         startBridge(request.agentId);
-        chrome.storage.local.set({agentId: request.agentId, isConnected: true});
+        const key = `bridge_state_${request.agentId}`;
+        chrome.storage.local.set({[key]: true});
     } else if (request.action === "STOP_BRIDGE") {
         stopBridge();
-        chrome.storage.local.set({isConnected: false});
+        const key = `bridge_state_${AGENT_ID}`;
+        chrome.storage.local.set({[key]: false});
+    } else if (request.action === "CHECK_HEARTBEAT") {
+        const isAlive = (AGENT_ID === request.expectedAgent);
+        sendResponse({isConnected: isAlive});
     }
 });
 
-// --- INITIALIZATION (Self-Correcting Auto-Resume) ---
+// --- AUTO-RESUME ---
 function initAutoResume() {
-    chrome.storage.local.get(['agentId', 'isConnected'], (result) => {
-        // 1. Check if we SHOULD be connected
-        if (result.isConnected && result.agentId) {
-            const url = window.location.href;
-            const id = result.agentId;
+    const agents = ["Claude", "Gemini", "ChatGPT"];
+    const keys = agents.map(id => `bridge_state_${id}`);
 
-            // 2. Verify we are on the right site
-            const isClaude = id === "Claude" && url.includes("claude");
-            const isGemini = id === "Gemini" && url.includes("google.com");
-            const isGPT = id === "ChatGPT" && url.includes("chatgpt.com");
+    chrome.storage.local.get(keys, (result) => {
+        const url = window.location.href;
+        let detectedId = null;
 
-            if (isClaude || isGemini || isGPT) {
-                console.log(`[Bridge] 🔄 Refresh detected. Resuming ${id}...`);
-                startBridge(id);
-            } else {
-                // 3. FAILSAFE: We are on the wrong site (or a blank tab).
-                // We must disconnect to prevent the "Zombie UI" in the popup.
-                console.log(`[Bridge] 🛑 State mismatch. Resetting connection state.`);
-                chrome.storage.local.set({isConnected: false});
+        if (url.includes("claude")) detectedId = "Claude";
+        else if (url.includes("google")) detectedId = "Gemini";
+        else if (url.includes("chatgpt")) detectedId = "ChatGPT";
+
+        if (detectedId) {
+            const stateKey = `bridge_state_${detectedId}`;
+            if (result[stateKey] === true) {
+                console.log(`[Bridge] 🔄 Auto-resuming ${detectedId}...`);
+                startBridge(detectedId);
             }
         }
     });

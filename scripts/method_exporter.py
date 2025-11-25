@@ -6,14 +6,13 @@ import random
 import string
 from pathlib import Path
 from datetime import datetime
-from typing import Set, Dict, List, Optional
+from typing import Set, Dict, List, Optional, Union
 
 
 class MethodExtractor:
     def __init__(self, config_path="method_export_config.json"):
         self.config_path = config_path
         self.obsidian_base: Optional[Path] = None
-        # ✅ CHANGE: Store array of file configs
         self.target_files: List[Dict] = []
         self.max_file_size: int = 0
         self.load_config()
@@ -30,11 +29,9 @@ class MethodExtractor:
                 config = json.load(f)
 
             self.obsidian_base = Path(config.get("export_base"))
-            # ✅ CHANGE: Load array instead of single file
             self.target_files = config.get("target_files", [])
             self.max_file_size = config.get("max_file_size_mb", 10) * 1024 * 1024
 
-            # ✅ CHANGE: Validate array not empty
             if not self.obsidian_base or not self.target_files:
                 raise KeyError("Config missing 'export_base' or 'target_files'")
 
@@ -48,20 +45,25 @@ class MethodExtractor:
             print(f"Error: Config file missing required key: {e}. Stopping.")
             exit()
 
-    def extract_method(self, content: str, method_name: str) -> Optional[Dict]:
-        """Extract a complete method from JavaScript OR Python content"""
+    # --- EXTRACTION LOGIC ---
 
+    def extract_method(self, content: str, method_name: str) -> Optional[Dict]:
+        """Legacy: Extract a complete method from JavaScript OR Python content"""
         patterns = [
-            # Python function: def method_name(...):
+            # Python function
             rf'^\s*def\s+{re.escape(method_name)}\s*\([^)]*\)\s*:',
-            # Python async: async def method_name(...):
+            # Python async
             rf'^\s*async\s+def\s+{re.escape(method_name)}\s*\([^)]*\)\s*:',
-            # JavaScript regular method
+            # JS: Class method (e.g. render() {})
             rf'^\s*{re.escape(method_name)}\s*\([^)]*\)\s*\{{',
-            # JavaScript arrow function
-            rf'^\s*{re.escape(method_name)}\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{{',
-            # JavaScript async method
-            rf'^\s*async\s+{re.escape(method_name)}\s*\([^)]*\)\s*\{{'
+            # JS: Arrow function (e.g. const render = () => {})
+            rf'^\s*(?:const|let|var)?\s*{re.escape(method_name)}\s*=\s*(?:async\s*)?\(?[^)]*\)?\s*=>\s*\{{',
+            # JS: Async Class method
+            rf'^\s*async\s+{re.escape(method_name)}\s*\([^)]*\)\s*\{{',
+            # JS: Standard Function (CRITICAL ADDITION for content.js)
+            rf'^\s*function\s+{re.escape(method_name)}\s*\([^)]*\)\s*\{{',
+            # JS: Async Function (CRITICAL ADDITION for content.js)
+            rf'^\s*async\s+function\s+{re.escape(method_name)}\s*\([^)]*\)\s*\{{'
         ]
 
         for pattern in patterns:
@@ -71,10 +73,8 @@ class MethodExtractor:
             if match:
                 start_pos = match.start()
 
-                is_python = (
-                        pattern.startswith(r'^\s*def') or
-                        pattern.startswith(r'^\s*async\s+def')
-                )
+                # Determine language based on pattern signature
+                is_python = 'def ' in pattern
 
                 if is_python:
                     end_pos = self._find_python_method_block(content, start_pos)
@@ -86,56 +86,100 @@ class MethodExtractor:
 
                 return {
                     'name': method_name,
+                    'type': 'method',  # Ensures compatibility with new export_all
                     'content': method_content,
                     'line_number': line_number,
                     'char_count': len(method_content)
                 }
-
         return None
 
+    def _extract_header(self, content: str) -> Dict:
+        """Extracts imports and constants (top of file until first function/class)"""
+        # Regex to find the first definition of a class or function
+        patterns = [
+            r'^\s*def\s+', r'^\s*async\s+def\s+', r'^\s*class\s+',  # Python
+            r'^\s*function\s+', r'^\s*class\s+', r'^\s*const\s+\w+\s*=\s*\(.*=>',  # JS
+        ]
+
+        first_def_pos = len(content)
+
+        for pattern in patterns:
+            match = re.search(pattern, content, re.MULTILINE)
+            if match and match.start() < first_def_pos:
+                first_def_pos = match.start()
+
+        header_content = content[:first_def_pos].strip()
+
+        return {
+            'name': 'FILE_HEADER (Imports/Consts)',
+            'type': 'header',
+            'content': header_content,
+            'line_number': 1,
+            'char_count': len(header_content)
+        }
+
+    def _extract_full_file(self, content: str, filename: str) -> Dict:
+        """Extracts the entire file content"""
+        return {
+            'name': f'FULL_FILE: {filename}',
+            'type': 'full_file',
+            'content': content,
+            'line_number': 1,
+            'char_count': len(content)
+        }
+
+    def _extract_lines(self, content: str, lines_range: List[int]) -> Dict:
+        """Extracts specific lines (1-based index). Format: [start, end]"""
+        all_lines = content.split('\n')
+        start, end = lines_range[0], lines_range[1]
+
+        # Clamp to valid range
+        start = max(1, start)
+        end = min(len(all_lines), end)
+
+        selected_lines = all_lines[start - 1:end]
+        snippet = '\n'.join(selected_lines)
+
+        return {
+            'name': f'LINES {start}-{end}',
+            'type': 'snippet',
+            'content': snippet,
+            'line_number': start,
+            'char_count': len(snippet)
+        }
+
+    # --- HELPER LOGIC (Preserved from original) ---
+
     def _find_js_method_end(self, content: str, start_pos: int) -> int:
-        """Find end of JavaScript method by counting braces"""
         brace_count = 0
         in_method = False
         in_string = False
-        in_regex = False
         escape_next = False
         string_char = None
-
         i = start_pos
         while i < len(content):
             char = content[i]
-
-            # Handle escape sequences
             if escape_next:
                 escape_next = False
                 i += 1
                 continue
-
             if char == '\\':
                 escape_next = True
                 i += 1
                 continue
-
-            # Handle strings (avoid counting braces inside strings)
-            if not in_regex:
-                if char in ('"', "'", '`') and not in_string:
-                    in_string = True
-                    string_char = char
-                    i += 1
-                    continue
-                elif in_string and char == string_char:
-                    in_string = False
-                    string_char = None
-                    i += 1
-                    continue
-
-            # If we're in a string, skip brace counting
+            if char in ('"', "'", '`') and not in_string:
+                in_string = True
+                string_char = char
+                i += 1
+                continue
+            elif in_string and char == string_char:
+                in_string = False
+                string_char = None
+                i += 1
+                continue
             if in_string:
                 i += 1
                 continue
-
-            # Count braces
             if char == '{':
                 brace_count += 1
                 in_method = True
@@ -143,20 +187,15 @@ class MethodExtractor:
                 brace_count -= 1
                 if in_method and brace_count == 0:
                     return i + 1
-
             i += 1
-
-        # EOF reached
         return len(content)
 
     def _find_python_method_block(self, content: str, start_pos: int) -> int:
-        """Find Python method end by locating next top-level definition"""
         lines = content.split("\n")
         start_line_idx = content[:start_pos].count("\n")
         total_lines = len(lines)
-
-        # CRITICAL FIX: Find the ACTUAL def line (might have decorators/blanks before start_pos)
         actual_def_line = None
+
         for i in range(start_line_idx, min(start_line_idx + 10, total_lines)):
             line = lines[i]
             stripped = line.lstrip()
@@ -164,67 +203,36 @@ class MethodExtractor:
                 actual_def_line = i
                 break
 
-        if actual_def_line is None:
-            # Couldn't find def line - fallback
-            print(f"    [WARNING] Could not find def line near {start_line_idx}")
-            return len(content)
+        if actual_def_line is None: return len(content)
 
-        # Get base indentation from the ACTUAL def line
         def_line = lines[actual_def_line]
         base_indent = len(def_line) - len(def_line.lstrip(" \t"))
 
-        print(f"    [DEBUG] Found actual def at line {actual_def_line}: '{def_line[:60]}'")
-        print(f"    [DEBUG] base_indent={base_indent}")
-
-        # Scan from AFTER the actual def line
         for i in range(actual_def_line + 1, total_lines):
             line = lines[i]
             stripped = line.lstrip()
-
-            # Skip blank lines
-            if not stripped:
-                continue
-
+            if not stripped: continue
             indent = len(line) - len(line.lstrip(" \t"))
-
-            # Found next top-level block?
             if indent <= base_indent:
-                if (stripped.startswith("def ") or
-                        stripped.startswith("async def ") or
-                        stripped.startswith("class ") or
-                        stripped.startswith("@")):
+                if (stripped.startswith("def ") or stripped.startswith("async def ") or
+                        stripped.startswith("class ") or stripped.startswith("@")):
                     end_pos = sum(len(lines[j]) + 1 for j in range(i))
-                    print(f"    [DEBUG] FOUND BOUNDARY at line {i}: {stripped[:60]}")
-                    print(f"    [DEBUG] Method length: {end_pos - start_pos} chars")
-
                     return end_pos
+        return len(content)
 
-        # No boundary found - EOF
-        end_pos = len(content)
-        print(f"    [DEBUG] NO BOUNDARY (EOF), method length: {end_pos - start_pos} chars")
-        return end_pos
+    # --- MAIN EXECUTION ---
 
     def extract_all_methods(self):
-        """Extract all target methods from multiple source files"""
+        """Main loop processing target files based on 'mode'"""
         self.extracted_methods = []
 
-        # ✅ CHANGE: Loop through each file config
         for file_config in self.target_files:
             source_path = Path(file_config['file'])
-            target_methods = file_config['methods']
+            # Default to 'methods' mode if not specified
+            mode = file_config.get('mode', 'methods')
 
             if not source_path.exists():
                 print(f"Error: Target file not found: {source_path}")
-                continue
-
-            try:
-                file_stat = source_path.stat()
-                if file_stat.st_size > self.max_file_size:
-                    print(
-                        f"Error: File too large ({file_stat.st_size / 1024 / 1024:.1f}MB): {source_path}")
-                    continue
-            except (OSError, PermissionError) as e:
-                print(f"Cannot access {source_path}: {e}")
                 continue
 
             try:
@@ -234,108 +242,102 @@ class MethodExtractor:
                 print(f"Error reading {source_path}: {e}")
                 continue
 
-            print(f"\nExtracting from: {source_path}")
-            print(f"Target methods: {len(target_methods)}")
+            print(f"\nProcessing: {source_path.name} [Mode: {mode}]")
 
-            # Extract methods from this file
-            for method_name in target_methods:
-                print(f"  Extracting: {method_name}...", end=' ')
-                method_data = self.extract_method(content, method_name)
+            # MODE SWITCHING LOGIC
+            if mode == 'full':
+                data = self._extract_full_file(content, source_path.name)
+                data['source_file'] = str(source_path)
+                self.extracted_methods.append(data)
+                print(f"  ✓ Full file extracted ({data['char_count']} chars)")
 
-                if method_data:
-                    # ✅ CHANGE: Add source file to metadata
-                    method_data['source_file'] = str(source_path)
-                    self.extracted_methods.append(method_data)
-                    print(
-                        f"✓ (line {method_data['line_number']}, {method_data['char_count']} chars)")
+            elif mode == 'header':
+                data = self._extract_header(content)
+                data['source_file'] = str(source_path)
+                self.extracted_methods.append(data)
+                print(f"  ✓ Header extracted ({data['char_count']} chars)")
+
+            elif mode == 'lines':
+                # Expecting "lines": [1, 50]
+                ranges = file_config.get('lines', [])
+                if ranges and len(ranges) == 2:
+                    data = self._extract_lines(content, ranges)
+                    data['source_file'] = str(source_path)
+                    self.extracted_methods.append(data)
+                    print(f"  ✓ Lines {ranges[0]}-{ranges[1]} extracted")
                 else:
-                    print("✗ NOT FOUND")
+                    print("  ✗ Error: 'lines' mode requires a [start, end] array.")
+
+            else:  # Default 'methods' mode
+                target_methods = file_config.get('methods', [])
+                for method_name in target_methods:
+                    print(f"  Extracting: {method_name}...", end=' ')
+                    method_data = self.extract_method(content, method_name)
+                    if method_data:
+                        method_data['source_file'] = str(source_path)
+                        self.extracted_methods.append(method_data)
+                        print(f"✓ (line {method_data['line_number']})")
+                    else:
+                        print("✗ NOT FOUND")
 
         print(f"\n{'=' * 60}")
-        print(f"Total methods extracted: {len(self.extracted_methods)}")
+        print(f"Total items extracted: {len(self.extracted_methods)}")
         print(f"{'=' * 60}")
 
     def export_all(self):
-        """Main export function - outputs single file"""
         if not self.extracted_methods:
-            print("No methods to export. Run extract_all_methods() first.")
+            print("No content to export.")
             return
 
-        # Create single output file (not directory)
-        output_filename = f"METHOD_SANDBOX_{self.timestamp}.md"
+        output_filename = f"SIMULATION_{self.timestamp}.md"
         output_path = self.obsidian_base / output_filename
 
         try:
             self.obsidian_base.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            print(f"Error creating output directory: {e}")
-            return
-
-        try:
             with open(output_path, 'w', encoding='utf-8') as f:
-                # Write header
-                f.write(f"# Method Extraction Sandbox\n\n")
-                f.write(f"**Extracted**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"**Total Methods**: {len(self.extracted_methods)}\n")
-                f.write(f"**Source Files**: {len(self.target_files)}\n\n")
+                f.write(f"# Simulation Output\n\n")
+                f.write(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("---\n\n")
 
-                # Write each method (grouped by file)
                 current_file = None
-                for i, method_data in enumerate(self.extracted_methods):
-                    # ✅ CHANGE: Add file header when source changes
-                    if method_data['source_file'] != current_file:
-                        current_file = method_data['source_file']
+                for item in self.extracted_methods:
+                    if item['source_file'] != current_file:
+                        current_file = item['source_file']
                         f.write(f"## Source: `{current_file}`\n\n")
 
-                    f.write(f"### Method: `{method_data['name']}()`\n\n")
-                    f.write(f"**Line Number**: {method_data['line_number']}\n")
-                    f.write(f"**Size**: {method_data['char_count']:,} characters\n\n")
+                    # Header Formatting
+                    if item['type'] == 'method':
+                        f.write(f"### Method: `{item['name']}()`\n")
+                    elif item['type'] == 'header':
+                        f.write(f"### Header (Imports & Constants)\n")
+                    elif item['type'] == 'full_file':
+                        f.write(f"### Full File Content\n")
+                    elif item['type'] == 'snippet':
+                        f.write(f"### {item['name']}\n")
 
-                    # ✅ CHANGE: Auto-detect language from file extension
+                    f.write(
+                        f"**Line**: {item['line_number']} | **Size**: {item['char_count']:,} chars\n\n")
+
                     ext = Path(current_file).suffix.lower()
                     lang = 'python' if ext == '.py' else 'javascript' if ext == '.js' else 'text'
+                    if ext == '.css': lang = 'css'
+                    if ext == '.json': lang = 'json'
 
                     f.write(f"```{lang}\n")
-                    f.write(method_data['content'])
+                    f.write(item['content'])
                     f.write("\n```\n\n")
                     f.write("---\n\n")
 
-            print(f"\n{'=' * 60}")
-            print(f"✓ Export complete: {len(self.extracted_methods)} methods")
-            print(f"✓ Output file: {output_path}")
-            print(f"{'=' * 60}")
+            print(f"✓ Export saved to: {output_path}")
 
         except Exception as e:
-            print(f"Error writing output file: {e}")
+            print(f"Error writing file: {e}")
 
 
-# Usage
 if __name__ == "__main__":
-    config_path = "method_export_config.json"
-
-    if Path(config_path).exists():
-        extractor = MethodExtractor(config_path)
+    if Path("method_export_config.json").exists():
+        extractor = MethodExtractor()
         extractor.extract_all_methods()
         extractor.export_all()
     else:
-        sample_config = {
-            "export_base": "C:/Users/wantl/Documents/Obsidian Vault/code_exports",
-            "target_files": [
-                {
-                    "file": "./my_app/static/player.js",
-                    "methods": ["calculateCanvasCoordinates", "renderPage"]
-                },
-                {
-                    "file": "./my_app/pdf_processor/process.py",
-                    "methods": ["get_citation_at_timestamp"]
-                }
-            ],
-            "max_file_size_mb": 10
-        }
-
-        with open(config_path, 'w') as f:
-            json.dump(sample_config, f, indent=4)
-
-        print(f"No config found. Created sample at: {config_path}")
-        print("Please edit the config file and run again.")
+        print("Config not found.")
