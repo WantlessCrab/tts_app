@@ -2,6 +2,11 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Literal, Dict
 
 
+# --- NEW: Ingestion Contract ---
+class CaptureRequest(BaseModel):
+    agent_id: str
+    content: str
+
 # --- API Contracts ---
 
 class ClientStatus(BaseModel):

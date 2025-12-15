@@ -5,7 +5,7 @@
     <style>
 		/* --- Base Styles matching TTS App --- */
 		body {
-			width: 300px;
+			width: 320px;
 			padding: 20px;
 			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 			background: linear-gradient(135deg, #ffeaa7 0%, #dfe6e9 100%);
@@ -44,15 +44,15 @@
 		label {
 			display: block;
 			color: #6c5ce7;
-			margin-bottom: 8px;
-			font-size: 13px;
+			margin-bottom: 5px;
+			font-size: 12px;
 			font-weight: 600;
 		}
 
-		select, input {
+		select, input[type="text"], input[type="number"] {
 			width: 100%;
-			padding: 10px;
-			margin-bottom: 15px;
+			padding: 8px;
+			margin-bottom: 10px;
 			background: white;
 			border: 2px solid #dfe6e9;
 			border-radius: 8px;
@@ -84,34 +84,30 @@
 			color: white;
 		}
 
-		button.active-mode {
-			border: 2px solid #6c5ce7;
-		}
-
 		/* Control Panel Styles */
 		#control-panel {
 			margin-top: 15px;
 			padding-top: 15px;
 			border-top: 2px dashed #dfe6e9;
-			display: none; /* Hidden until connected */
+			display: none;
 		}
 
-		.mode-group {
+		/* Target Grid (Checkboxes) */
+		.target-grid {
 			display: flex;
+			flex-direction: column;
 			gap: 5px;
-			margin-bottom: 10px;
-		}
-
-		.mode-btn {
-			font-size: 11px;
+			margin-bottom: 15px;
+			background: #f1f2f6;
 			padding: 8px;
-			background: #dfe6e9;
-			color: #636e72;
+			border-radius: 8px;
 		}
 
-		.mode-btn.selected {
-			background: #74b9ff;
-			color: white;
+		.target-item {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			font-size: 12px;
 		}
 
 		/* Toggle Switch CSS */
@@ -119,7 +115,7 @@
 			display: flex;
 			align-items: center;
 			gap: 10px;
-			margin-bottom: 10px;
+			margin-bottom: 8px;
 			background: #f1f2f6;
 			padding: 8px;
 			border-radius: 8px;
@@ -170,6 +166,14 @@
 			transform: translateX(14px);
 		}
 
+		/* Wrapper Section */
+		.section-header {
+			font-size: 11px;
+			color: #b2bec3;
+			text-transform: uppercase;
+			letter-spacing: 1px;
+			margin: 10px 0 5px 0;
+		}
     </style>
 </head>
 <body>
@@ -193,34 +197,43 @@
     </div>
 
     <div id="control-panel">
-        <label>Target Agent (Receiver)</label>
-        <select id="target-select">
-            <option value="None">Select Target...</option>
-        </select>
 
-        <div class="toggle-row">
-            <label class="switch">
-                <input type="checkbox" id="toggle-next">
-                <span class="slider round"></span>
-            </label>
-            <span>Send Next Message Only</span>
+        <div class="section-header">Routing Targets</div>
+        <div id="target-grid" class="target-grid">
+            <span style="color:#aaa; font-style:italic;">Scanning for peers...</span>
         </div>
 
-        <div class="toggle-row">
-            <label class="switch">
-                <input type="checkbox" id="toggle-stream">
-                <span class="slider round"></span>
-            </label>
-            <span>One-Way Stream (Auto)</span>
-        </div>
+        <div class="section-header">Modes</div>
 
         <div class="toggle-row">
-            <label class="switch">
-                <input type="checkbox" id="toggle-loop">
-                <span class="slider round"></span>
-            </label>
+            <label class="switch"><input type="checkbox" id="toggle-next"><span class="slider round"></span></label>
+            <span>Send Next Only</span>
+        </div>
+
+        <div class="toggle-row" style="display:none; opacity: 0.5;">
+            <label class="switch"><input type="checkbox" id="toggle-stream"><span class="slider round"></span></label>
+            <span>One-Way Stream</span>
+        </div>
+        <div class="toggle-row" style="display:none; opacity: 0.5;">
+            <label class="switch"><input type="checkbox" id="toggle-loop"><span class="slider round"></span></label>
             <span>Two-Way Loop</span>
         </div>
+
+        <div class="section-header">Protocol (Wrappers)</div>
+        <div class="toggle-row">
+            <label class="switch"><input type="checkbox" id="toggle-wrapper"><span class="slider round"></span></label>
+            <span>Enable Wrappers</span>
+        </div>
+
+        <label>My Role / Persona</label>
+        <input type="text" id="persona-input" placeholder="e.g. Lead Architect">
+
+        <label>Wrapper Style</label>
+        <select id="wrapper-style">
+            <option value="Standard">Standard (---)</option>
+            <option value="Minimal">Minimal (**)</option>
+            <option value="XML">XML Tags</option>
+        </select>
 
         <div id="status-msg" style="font-size:10px; color:#aaa; margin-top:5px; text-align:center;"></div>
     </div>

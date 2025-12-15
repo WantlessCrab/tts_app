@@ -471,12 +471,178 @@
     color: white;
     font-weight: bold;
     }
+
+    /* Status/Error Banner */
+    .status-banner {
+	    border-radius: 15px;
+	    padding: 15px;
+	    margin-bottom: 20px;
+	    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+	    animation: slideDown 0.3s ease-out;
+    }
+
+    @keyframes slideDown {
+	    from {
+		    opacity: 0;
+		    transform: translateY(-20px);
+	    }
+	    to {
+		    opacity: 1;
+		    transform: translateY(0);
+	    }
+    }
+
+    .banner-content {
+	    display: flex;
+	    align-items: center;
+	    gap: 12px;
+    }
+
+    .banner-icon {
+	    font-size: 24px;
+	    flex-shrink: 0;
+    }
+
+    .banner-text {
+	    flex: 1;
+    }
+
+    .banner-message {
+	    font-weight: 600;
+	    font-size: 14px;
+	    margin-bottom: 4px;
+    }
+
+    .banner-details {
+	    font-size: 12px;
+	    opacity: 0.8;
+    }
+
+    .banner-actions {
+	    display: flex;
+	    gap: 8px;
+	    flex-shrink: 0;
+    }
+
+    /* Banner States */
+    .status-banner.error {
+	    background: linear-gradient(135deg, #fab1a0 0%, #e17055 100%);
+	    color: white;
+    }
+
+    .status-banner.warning {
+	    background: linear-gradient(135deg, #ffeaa7 0%, #fdcb6e 100%);
+	    color: #2d3436;
+    }
+
+    .status-banner.processing {
+	    background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
+	    color: #2d3436;
+    }
+
+    .status-banner.info {
+	    background: linear-gradient(135deg, #74b9ff 0%, #a29bfe 100%);
+	    color: white;
+    }
+
+    .status-banner.success {
+	    background: linear-gradient(135deg, #55efc4 0%, #00b894 100%);
+	    color: white;
+    }
+
+    /* ✅ NEW: Success state */
+
+    /* Banner Action Buttons */
+    .banner-btn {
+	    padding: 8px 16px;
+	    border: none;
+	    border-radius: 20px;
+	    font-size: 12px;
+	    font-weight: bold;
+	    cursor: pointer;
+	    transition: transform 0.2s;
+    }
+
+    .banner-btn:hover {
+	    transform: translateY(-2px);
+    }
+
+    .banner-btn.primary {
+	    background: white;
+	    color: #6c5ce7;
+    }
+
+    .banner-btn.secondary {
+	    background: rgba(255, 255, 255, 0.3);
+	    color: white;
+    }
+
+    .status-banner.error .banner-btn.primary {
+	    color: #e17055;
+    }
+
+    .status-banner.warning .banner-btn.primary {
+	    color: #fdcb6e;
+    }
+
+    .status-banner.success .banner-btn.primary {
+	    color: #00b894;
+    }
+
+    /* ✅ NEW: Success button color */
+
+    /* ✅ NEW: Card Body and Detail Classes (Used by updateStatusBanner) */
+    .card-body {
+	    padding: 15px;
+	    background: rgba(255, 255, 255, 0.95);
+	    border-radius: 10px;
+	    margin-top: 10px;
+    }
+
+    .card-body h3 {
+	    margin: 0 0 10px 0;
+	    font-size: 16px;
+	    color: #2d3436;
+    }
+
+    .card-body p {
+	    margin: 5px 0;
+	    font-size: 13px;
+	    color: #636e72;
+    }
+
+    .error-detail {
+	    color: #d63031 !important;
+	    font-weight: 600;
+	    padding: 8px 12px;
+	    background: rgba(214, 48, 49, 0.1);
+	    border-radius: 8px;
+	    border-left: 3px solid #d63031;
+    }
+
+    .warning-detail {
+	    color: #e17055 !important;
+	    font-weight: 600;
+	    padding: 8px 12px;
+	    background: rgba(225, 112, 85, 0.1);
+	    border-radius: 8px;
+	    border-left: 3px solid #e17055;
+    }
+
+    .trace-info {
+	    font-family: 'Courier New', monospace;
+	    font-size: 11px;
+	    color: #b2bec3 !important;
+	    word-break: break-all;
+    }
+
     </style>
 </head>
 <body>
 <div class="container">
     <h1>Garden TTS Audio Player</h1>
-    <div class="player-section">
+    <div id="status-container" style="display: none;"></div>
+    <div id="player-container" class="player-section">
         <div id="now-playing">Now Playing: <span id="current-file">None</span></div>
         <audio id="audio-element" controls style="display: none;"></audio>
 

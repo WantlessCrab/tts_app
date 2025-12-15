@@ -1,5 +1,5 @@
 # ~/TTS/my_app/audio_server.py
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +31,7 @@ TEMPLATES_DIR = Path("/app/templates")
 # --- Standardized Shared Workspace Paths ---
 WORKSPACE_DIR = Path("/workspace")
 OUTPUT_DIR = WORKSPACE_DIR / "outputs"
+INPUT_DIR = WORKSPACE_DIR / "pdf_input"
 OBSIDIAN_DIR = WORKSPACE_DIR / "obsidian_audio"
 AUDIOBOOKS_DIR = OUTPUT_DIR / "audiobooks"
 PDF_CACHE_DIR = WORKSPACE_DIR / "pdf_cache"  # Read-only access to cache directory
@@ -166,7 +167,7 @@ async def get_citation_for_timestamp(book_id: str, timestamp: float = 0.0):
         response.raise_for_status()
         return response.json()
 
-    except httpx.TimeoutError:  # <-- CORRECTED
+    except httpx.TimeoutException:  # <-- CORRECTED
         # 2.2 Error Handling: Specific handling for timeouts
         logger.error(f"Error getting citation: Proxy connection timed out to {PDF_SERVICE_URL}")
         raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
@@ -396,7 +397,7 @@ async def proxy_serve_pdf(pdf_filename: str):
             }
         )
 
-    except httpx.TimeoutError:  # <-- CORRECTED
+    except httpx.TimeoutException:  # <-- CORRECTED
         logger.error(
             f"Error proxying PDF document: Proxy connection timed out to {PDF_SERVICE_URL}")
         raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
@@ -428,7 +429,7 @@ async def retry_processing(book_id: str, force_rebuild: bool = False):
 
         return response.json()
 
-    except httpx.TimeoutError:
+    except httpx.TimeoutException:
         logger.error(f"Retry request timed out for {safe_book_id}")
         raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
 
@@ -481,51 +482,42 @@ async def list_available_pdfs():
     return {"available_pdfs": pdfs}
 
 
-# --- Replaced subprocess with API call ---
+# --- Proxy to PDF Processor Service ---
 @app.post("/api/v1/process/{pdf_filename}")
-async def start_pdf_processing(pdf_filename: str, background_tasks: BackgroundTasks):
+async def start_pdf_processing(pdf_filename: str):
     """
-    Triggers the full PDF-to-Audio pipeline in the background.
+    Proxy PDF processing request to pdf-processor service.
+    Delegates full pipeline execution to the processor (SOA compliance).
     """
     safe_filename = re.sub(r'[^\w\s\-\.]', '', pdf_filename).strip()
+
     if not safe_filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
 
-    pdf_path = INPUT_DIR / safe_filename
-    if not pdf_path.exists():
-        logger.warning(f"Process request failed: File not found at {pdf_path}")
-        raise HTTPException(status_code=404, detail="PDF not found in input directory")
-
-    # --- NEW: 1. Generate IDs and Paths ---
-    book_id = derive_book_id(pdf_path.stem)
-    trace_id = str(uuid.uuid4())
-    audio_dir = OUTPUT_DIR / book_id
-    manifest_path = audio_dir / "manifest.json"
-
-    # 2. Create directory and initial manifest stub
-    audio_dir.mkdir(parents=True, exist_ok=True)
-
-    stub_manifest = {
-        "metadata": {"source_filename": safe_filename},
-        "book_id": book_id,
-        "trace_id": trace_id,  # NEW: Observability
-        "processing_status": "processing_started",  # NEW: State Machine
-        "total_chunks": 0,  # NEW: Placeholder for race condition fix
-        "ready_chunks": []
-    }
-
     try:
-        atomic_write_manifest(manifest_path, stub_manifest, logger)
-        logger.info(f"[{trace_id}] Manifest stub created for {book_id}. Job accepted.")
+        api_url = f"{PDF_SERVICE_URL}/api/v1/process/{safe_filename}"
+        logger.info(f"Proxying process request: {api_url}")
+
+        response = await client.post(api_url)
+        response.raise_for_status()
+
+        return response.json()
+
+    except httpx.TimeoutException:
+        logger.error(f"Process request timed out for {safe_filename}")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Process request failed: {e.response.status_code}")
+        try:
+            detail = e.response.json().get("detail", "Processing failed")
+        except Exception:
+            detail = f"Processing failed (HTTP {e.response.status_code})"
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+
     except Exception as e:
-        logger.error(f"[{trace_id}] CRITICAL: Failed to create manifest stub: {e}")
-        raise HTTPException(status_code=500, detail="Failed to initialize processing state.")
-
-    # 3. Add task with trace_id
-    background_tasks.add_task(run_full_pipeline, safe_filename, book_id, trace_id)
-
-    logger.info(f"[{trace_id}] Accepted job for {safe_filename}. Processing started in background.")
-    return {"status": "processing_started", "book_id": book_id, "trace_id": trace_id}
+        logger.error(f"Process request error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate processing")
 
 
 # --- Step 1.2: New Endpoint to List Sources ---

@@ -10,4 +10,11 @@ uvicorn[standard]
 httpx
 
 # 4. The PDF processing library
-PyMuPDF
+PyMuPDF>=1.23.0
+pysbd
+ftfy
+
+# 5. Data Validation & File Handling
+pydantic
+python-multipart
+aiofiles

@@ -1,7 +1,28 @@
 const SERVER_URL = "https://localhost:8005/api/v1";
 let POLL_INTERVAL = null;
-let UI_WATCHDOG = null;
+let UI_OBSERVER = null;
 let AGENT_ID = null;
+let userHasActed = false;
+let lastScrapedText = "";
+
+// IMMORTAL LISTENER: Detects typing even if React redraws the box
+document.body.addEventListener('input', (e) => {
+    if (!AGENT_ID) return;
+    const selector = SELECTORS[AGENT_ID];
+    if (!selector) return;
+
+    // Check if event came from our target input
+    if (e.target.matches(selector.input) || e.target.closest(selector.input)) {
+        if (!userHasActed) {
+            console.log("[Bridge] 👤 User Activity Detected. Arming capture trigger.");
+            userHasActed = true;
+        }
+    }
+}, true);
+
+// NEW: Stability Config
+const STABILITY_THRESHOLD = 2500; // Wait 2.5s of silence
+let captureDebounceTimer = null;
 
 console.log("[Bridge] 🚀 Content Script Loaded.");
 
@@ -45,9 +66,9 @@ function injectOverlay() {
         <span id="llm-bridge-status-text">Connected</span>
     </div>`;
 
-    // FIX: Attach to body so it sits on top of the page content
-    document.body.appendChild(div);
-    console.log("[Bridge] ✅ UI Injected into Body.");
+    // New Code: Inject into <HTML> (The Root) to bypass React's "Body" control
+    document.documentElement.appendChild(div);
+    console.log("[Bridge] ✅ UI Injected into Root (React-Safe Zone).");
 }
 
 function updateOverlayStatus(status) {
@@ -60,139 +81,276 @@ function updateOverlayStatus(status) {
 }
 
 // --- CORE LOOPS ---
+
 function startBridge(agentId) {
-    if (POLL_INTERVAL) clearInterval(POLL_INTERVAL);
-    if (UI_WATCHDOG) clearInterval(UI_WATCHDOG);
+    // 🛑 STOP GAP 5: The Zombie Killer
+    // We forcefully kill any existing process before starting a new one.
+    // This prevents "double-binding" if the user clicks Connect rapidly.
+    stopBridge();
 
     AGENT_ID = agentId;
     console.log(`[Bridge] Starting as agent: ${AGENT_ID}`);
 
-    // NEW: Snapshot existing content to prevent "Past Message" routing
+    // Snapshot existing content
     const selector = SELECTORS[AGENT_ID];
     if (selector) {
-        // We use querySelectorAll because Gemini/Claude often have multiple blocks
         const msgs = document.querySelectorAll(selector.lastMessage);
         if (msgs.length > 0) {
-            // Set the baseline to the current text so we don't re-send it
             lastScrapedText = msgs[msgs.length - 1].innerText;
-            console.log(`[Bridge] Baseline set. Ignoring ${lastScrapedText.length} chars.`);
         }
     }
 
     injectOverlay();
-    POLL_INTERVAL = setInterval(pollServer, 2000);
 
-    UI_WATCHDOG = setInterval(() => {
-        if (!document.getElementById('llm-bridge-overlay')) injectOverlay();
-    }, 1000);
+    // Passive Observer (No Stutter)
+    UI_OBSERVER = new MutationObserver((mutations) => {
+        if (!document.getElementById('llm-bridge-overlay')) {
+            console.log("[Bridge] Overlay lost. Re-injecting...");
+            injectOverlay();
+        }
+    });
+
+    UI_OBSERVER.observe(document.body, {childList: true, subtree: false});
+
+    // Start Polling
+    pollServer();
+    POLL_INTERVAL = setInterval(pollServer, 2000);
 }
 
 function stopBridge() {
     if (POLL_INTERVAL) clearInterval(POLL_INTERVAL);
-    if (UI_WATCHDOG) clearInterval(UI_WATCHDOG);
-    POLL_INTERVAL = null;
-    UI_WATCHDOG = null;
+    if (UI_OBSERVER) {
+        UI_OBSERVER.disconnect();
+        UI_OBSERVER = null;
+    }
     const overlay = document.getElementById('llm-bridge-overlay');
     if (overlay) overlay.remove();
     console.log("[Bridge] Stopped.");
 }
 
+/**
+ * DETECT REAL AGENT STATE
+ * Prevents "Rude Interruptions" by checking if the AI is busy or if the user is typing.
+ */
+function detectAgentState() {
+    // 1. Check for "Stop Generating" indicators (Busy)
+    // ChatGPT/Claude often replace the Send button with a Stop button
+    // or disable the Send button during generation.
+    const selector = SELECTORS[AGENT_ID];
+    if (!selector) return "idle";
+
+    const sendBtn = document.querySelector(selector.sendBtn);
+    const stopBtn = document.querySelector('button[aria-label="Stop generating"]'); // Common pattern
+
+    // A. Is the agent actively writing? (Busy)
+    if (stopBtn || (sendBtn && sendBtn.disabled && !sendBtn.hasAttribute('disabled'))) {
+        // Note: Some UIs disable send when empty, so this is a heuristic.
+        // Better check: Is there a "result-streaming" class?
+        if (document.querySelector('.result-streaming') || document.querySelector('.text-cursor')) {
+            return "processing";
+        }
+    }
+
+    // B. Is the User typing? (Awaiting Input)
+    const inputBox = document.querySelector(selector.input);
+    if (inputBox) {
+        const hasText = (inputBox.value || inputBox.innerText || "").trim().length > 0;
+        if (hasText && !userHasActed) {
+            // Text exists, but WE didn't put it there. The user must be typing.
+            return "awaiting_input";
+        }
+    }
+
+    return "idle";
+}
+
 async function pollServer() {
     if (!AGENT_ID) return;
 
-    // FIX: Use Proxy instead of direct fetch
-    chrome.runtime.sendMessage({
-        action: "PROXY_STATUS",
-        payload: {
-            agent_id: AGENT_ID,
-            state: "idle",
-            active_url: window.location.href,
-            tab_id: 0
-        }
-    }, (response) => {
-        if (response && response.success) {
-            handleInstruction(response.data);
-            scrapeAndReport();
-        } else {
-            // updateOverlayStatus("offline");
-        }
-    });
+    // 1. Get Real State
+    const realState = detectAgentState();
+
+    try {
+        chrome.runtime.sendMessage({
+            action: "PROXY_STATUS",
+            payload: {
+                agent_id: AGENT_ID,
+                state: realState, // <--- No longer hardcoded "idle"
+                active_url: window.location.href,
+                tab_id: 0
+            }
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                // ... (Error handling code remains the same) ...
+                return;
+            }
+
+            // Only process instructions if we successfully reported our state
+            if (response && response.success) {
+                // The backend will now see "processing" and SHOULD return "noop"
+                handleInstruction(response.data);
+                scrapeAndReport();
+            }
+        });
+    } catch (e) {
+        console.warn("[Bridge] Poll skipped.");
+    }
 }
 
 // --- INSTRUCTION HANDLER ---
+// --- INSTRUCTION HANDLER ---
 async function handleInstruction(instr) {
     updateOverlayStatus("online");
+
     if (instr.command === "inject_content" && instr.content_payload) {
-        console.log("[Bridge] 💉 Injecting content...");
+        console.log("[Bridge] 💉 Job Received. Initiating human-like sequence...");
+
         const selector = SELECTORS[AGENT_ID];
         const inputBox = document.querySelector(selector.input);
 
         if (inputBox) {
-            inputBox.focus();
-            const success = document.execCommand('insertText', false, instr.content_payload);
-
-            // FIX: Always run simulation for Gemini to unlock button
-            if (!success || inputBox.innerText.trim() === "" || AGENT_ID === "Gemini") {
-                simulateUserInput(inputBox, instr.content_payload);
-            }
-
-            console.log("[Bridge] ✅ Injection complete. Waiting for UI...");
-
+            // 1. Human Delay (The Anti-Bot Fix)
+            // Wait 1.5s before touching the box. Prevents "Instant Type" detection.
             setTimeout(() => {
-                const sendBtn = document.querySelector(selector.sendBtn);
-                if (sendBtn) {
-                    // Try to force enable
-                    sendBtn.disabled = false;
-                    sendBtn.setAttribute('aria-disabled', 'false');
 
-                    if (!sendBtn.disabled) {
-                        sendBtn.click();
-                    } else {
-                        console.log("[Bridge] ⚠️ Button disabled. Using Nuclear Enter.");
-                        pressEnter(inputBox);
-                    }
+                // 2. Execute the Safe Insertion Strategy
+                // This function (defined below) chooses the correct method for the specific LLM.
+                const success = safelyInsertText(inputBox, instr.content_payload);
+
+                if (success) {
+                    console.log("[Bridge] ✅ Text inserted safely.");
+                    userHasActed = true; // Arm the capture trigger
+
+                    // 3. Send Delay
+                    // Wait another 1s "reaction time" before pressing Enter
+                    setTimeout(() => {
+                        triggerSend(selector, inputBox);
+                    }, 1000);
                 } else {
-                    console.log("[Bridge] ☢️ Button not found. Using Nuclear Enter.");
-                    pressEnter(inputBox);
+                    console.error("[Bridge] ❌ Insertion failed. Input is blocked.");
                 }
+
             }, 1500);
         }
     }
 }
 
-// FIX: "Heavy Duty" Simulator for Google Frameworks
-function simulateUserInput(element, text) {
-    element.focus();
-    element.innerHTML = '';
-
-    if (element.tagName === 'TEXTAREA' || element.tagName === 'INPUT') {
-        element.value = text;
-    } else {
-        element.textContent = text;
+/**
+ * THE SURGICAL INSERTION ENGINE v3
+ */
+/**
+ * THE SURGICAL INSERTION ENGINE v4 (Hardened)
+ * * Strategy:
+ * 1. "Typewriter" (execCommand) - Simulates human typing. Best for React/ProseMirror.
+ * 2. "Native Setter" - Bypasses React state locking on TextAreas.
+ * 3. "Range Injection" - Fallback for older ContentEditable divs.
+ */
+function safelyInsertText(element, text) {
+    // 1. PREPARE: Focus is mandatory for the Typewriter to know "where" to type.
+    try {
+        element.focus();
+    } catch (e) {
+        console.warn("[Bridge] ⚠️ Could not focus element:", e);
     }
 
-    // 1. Standard Events
-    element.dispatchEvent(new Event('input', {bubbles: true}));
-    element.dispatchEvent(new Event('change', {bubbles: true}));
+    // 2. PRIMARY STRATEGY: The Typewriter Protocol
+    // This is the "Solution" we verified in Probe v3.
+    // It automatically triggers 'input' and 'change' events trusted by React.
+    const typeWriterSuccess = document.execCommand('insertText', false, text);
 
-    // 2. Legacy/Framework Events (Critical for Gemini)
-    const textInputEvent = document.createEvent('TextEvent');
-    textInputEvent.initTextEvent('textInput', true, true, null, text, 9, "en-US");
-    element.dispatchEvent(textInputEvent);
+    if (typeWriterSuccess) {
+        console.log("[Bridge] 🟢 Injection Strategy: Typewriter (Success)");
+        return true;
+    }
+
+    // --- FALLBACKS (If browser blocks execCommand) ---
+    console.warn("[Bridge] ⚠️ Typewriter failed. Attempting Fallbacks...");
+
+    const tagName = element.tagName.toUpperCase();
+
+    // FALLBACK A: React Textarea/Input (Native Prototype Setter)
+    if (tagName === 'TEXTAREA' || tagName === 'INPUT') {
+        try {
+            const valueSetter = Object.getOwnPropertyDescriptor(element, 'value').set;
+            const prototype = Object.getPrototypeOf(element);
+            const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+
+            // Call the Setter from the Prototype (bypassing React's overwrite)
+            if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+                prototypeValueSetter.call(element, text);
+            } else {
+                valueSetter.call(element, text);
+            }
+
+            // Manually fire the event chain
+            element.dispatchEvent(new Event('input', {bubbles: true}));
+            return true;
+
+        } catch (e) {
+            console.error("[Bridge] ❌ Fallback A failed:", e);
+            return false;
+        }
+    }
+
+    // FALLBACK B: Rich Text Divs (Range Injection)
+    else {
+        try {
+            // 1. Create a Text Node
+            const textNode = document.createTextNode(text);
+
+            // 2. Wipe & Replace
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            range.deleteContents(); // Clear existing
+            range.insertNode(textNode); // Insert new
+
+            // 3. Move cursor to end
+            range.collapse(false);
+            selection.addRange(range);
+
+            // 4. Fire Events
+            element.dispatchEvent(new Event('input', {bubbles: true}));
+            return true;
+        } catch (e) {
+            console.error("[Bridge] ❌ Fallback B failed:", e);
+            return false;
+        }
+    }
 }
 
-function pressEnter(element) {
-    const event = new KeyboardEvent('keydown', {
-        bubbles: true,
-        cancelable: true,
-        key: 'Enter',
-        code: 'Enter',
-        keyCode: 13
-    });
-    element.dispatchEvent(event);
-}
+function triggerSend(selector, inputBox) {
+    if (AGENT_ID === "Gemini") {
+        // Gemini: Enter Key (Google Framework Requirement)
+        const event = new KeyboardEvent('keydown', {
+            bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13
+        });
+        inputBox.dispatchEvent(event);
+    } else {
+        // ChatGPT & Claude: The "Double-Check" Click Strategy
+        const getBtn = () => document.querySelector(selector.sendBtn);
+        let sendBtn = getBtn();
 
-let lastScrapedText = "";
+        if (sendBtn && !sendBtn.disabled) {
+            console.log("[Bridge] ⏳ Button looks ready... stabilizing (300ms).");
+
+            // STABILITY WAIT: Ensure React hydration is complete
+            setTimeout(() => {
+                sendBtn = getBtn(); // Re-fetch to ensure fresh reference
+                if (sendBtn && !sendBtn.disabled) {
+                    console.log("[Bridge] 🖱️ Click confirmed.");
+                    sendBtn.click();
+                } else {
+                    console.warn("[Bridge] ⚠️ Button disabled after wait. Aborting click.");
+                }
+            }, 300); // 300ms buffer
+        } else {
+            console.warn("[Bridge] Send button not ready.");
+        }
+    }
+}
 
 async function scrapeAndReport() {
     const selector = SELECTORS[AGENT_ID];
@@ -201,19 +359,63 @@ async function scrapeAndReport() {
     const msgElements = document.querySelectorAll(selector.lastMessage);
     if (msgElements.length === 0) return;
 
-    const lastMsg = msgElements[msgElements.length - 1];
-    const text = lastMsg.innerText;
+    const lastMsgElement = msgElements[msgElements.length - 1];
+    const text = lastMsgElement.innerText;
 
-    if (text && text !== lastScrapedText && text.length > 5) {
-        console.log(`[Bridge] ⚡ New content (${text.length} chars). Sending...`);
-        lastScrapedText = text;
-
-        // FIX: Use Proxy
-        chrome.runtime.sendMessage({
-            action: "PROXY_CAPTURE",
-            payload: {agent_id: AGENT_ID, content: text}
-        });
+    // 🛑 STOP GAP 4: The "Thought Pause" Validator
+    // Ensure we are capturing the AI, not the User.
+    if (isUserMessage(lastMsgElement)) {
+        // console.log("[Bridge] Ignored capture (User message detected)");
+        return;
     }
+
+    // LOGIC: Capture if text is new OR if we are waiting for a response to user
+    const isNewText = text && text !== lastScrapedText && text.length > 5;
+    const isResponseToUser = userHasActed && text.length > 5;
+
+    if (isNewText || isResponseToUser) {
+        if (captureDebounceTimer) clearTimeout(captureDebounceTimer);
+
+        captureDebounceTimer = setTimeout(() => {
+            console.log(`[Bridge] ⚡ Text Stable (${text.length} chars). Sending...`);
+            lastScrapedText = text;
+
+            if (userHasActed) {
+                console.log("[Bridge] 🔄 Cycle complete. Resetting User Flag.");
+                userHasActed = false;
+            }
+
+            chrome.runtime.sendMessage({
+                action: "PROXY_CAPTURE",
+                payload: {agent_id: AGENT_ID, content: text}
+            });
+
+            captureDebounceTimer = null;
+        }, STABILITY_THRESHOLD);
+    }
+}
+
+// HELPER: Detects if an element belongs to the User (Platform Specific)
+function isUserMessage(element) {
+    // 1. Generic Heuristic (Parents often hold the class)
+    // We traverse up 3 levels to check containers
+    let parent = element.parentElement;
+    for (let i = 0; i < 3; i++) {
+        if (!parent) break;
+        const classStr = (parent.className || "").toString();
+
+        // Claude User Message Class
+        if (classStr.includes("font-user-message")) return true;
+
+        // ChatGPT User Message (data-message-author-role="user")
+        if (parent.getAttribute && parent.getAttribute("data-message-author-role") === "user") return true;
+
+        // Gemini User Message (often wrapped in .user-query)
+        if (classStr.includes("user-query")) return true;
+
+        parent = parent.parentElement;
+    }
+    return false;
 }
 
 // --- MESSAGING & STATE ---
@@ -255,8 +457,4 @@ function initAutoResume() {
     });
 }
 
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initAutoResume);
-} else {
-    initAutoResume();
-}
+window.addEventListener("load", initAutoResume);
