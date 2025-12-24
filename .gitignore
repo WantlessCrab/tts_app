@@ -1,172 +1,136 @@
-WadaSNR/
-.idea/
-*.pyc
-.DS_Store
-./__init__.py
-# Byte-compiled / optimized / DLL files
+# =========================================================
+# Python
+# =========================================================
 __pycache__/
 *.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+*.pyo
+*.pyd
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-.static_storage/
-.media/
-local_settings.py
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# pyenv
-.python-version
-
-# celery beat schedule file
-celerybeat-schedule
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.venv/
 venv/
 ENV/
+env/
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
+# =========================================================
+# Python tooling
+# =========================================================
+.pytest_cache/
+.coverage
+htmlcov/
 .mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.ipynb_checkpoints/
 
-# vim
-*.swp
-*.swm
-*.swn
-*.swo
+# =========================================================
+# PyCharm / IDEs
+# =========================================================
+.idea/
+*.iml
+.vscode/
+.history/
 
-# pytorch models
-*.pth
-*.pth.tar
-!dummy_speakers.pth
-result/
+# =========================================================
+# OS
+# =========================================================
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# setup.py
-version.py
-
-# jupyter dummy files
-core
-
-# ignore local datasets
-recipes/WIP/*
-recipes/ljspeech/LJSpeech-1.1/*
-recipes/vctk/VCTK/*
-recipes/**/*.npy
-recipes/**/*.json
-VCTK-Corpus-removed-silence/*
-
-# ignore training logs
-trainer_*_log.txt
-
-# files used internally for dev, test etc.
-tests/outputs/*
-tests/train_outputs/*
-TODO.txt
-.vscode/*
-data/*
-notebooks/data/*
-TTS/tts/utils/monotonic_align/core.c
-.vscode-upload.json
-temp_build/*
-events.out*
-old_configs/*
-model_importers/*
-model_profiling/*
-docs/source/TODO/*
-.noseids
-.dccache
-log.txt
-umap.png
+# =========================================================
+# Logs & runtime output
+# =========================================================
+logs/
+*.log
 *.out
-SocialMedia.txt
-output.wav
-tts_output.wav
-deps.json
-speakers.json
-internal/*
-*_pitch.npy
-*_phoneme.npy
-wandb
-depot/*
-coqui_recipes/*
-local_scripts/*
-coqui_demos/*
+*.err
+
+# =========================================================
+# Docker
+# =========================================================
+**/.dockerignore
+docker-compose.override.yml
+*.pid
+
+# =========================================================
+# Large model / data artifacts (CRITICAL for your project)
+# =========================================================
+models/
+checkpoints/
+weights/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# =========================================================
+# Audio / media outputs
+# =========================================================
+outputs/
+audio/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# =========================================================
+# Temporary processing artifacts
+# =========================================================
+cache/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+
+# =========================================================
+# PDFs / source documents (optional – adjust as needed)
+# =========================================================
+# Uncomment if PDFs should NOT be versioned
+# *.pdf
+
+# =========================================================
+# Secrets & credentials
+# =========================================================
+.env
+.env.*
+*.key
+*.pem
+*.crt
+secrets/
+credentials/
+tokens/
+
+# =========================================================
+# Jupyter / experiments
+# =========================================================
+notebooks/.ipynb_checkpoints/
+
+# =========================================================
+# Test artifacts
+# =========================================================
+test_outputs/
+coverage.xml
+
+# =========================================================
+# Git
+# =========================================================
+*.orig
+*.rej
+
+# project files not permanent
+legacy/
+certs/
+obsidian_audio/
+pdf_cache/
+pdf_input/
+scripts/
+tts_models/

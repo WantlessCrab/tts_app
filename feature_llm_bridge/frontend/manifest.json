@@ -13,7 +13,7 @@
     "https://claude.ai/*",
     "https://gemini.google.com/*",
     "https://chatgpt.com/*",
-    "http://localhost:8005/*"
+    "https://localhost:8005/*"
   ],
   "background": {
     "service_worker": "background.js"

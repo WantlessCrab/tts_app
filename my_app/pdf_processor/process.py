@@ -98,7 +98,7 @@ MANIFEST_LOCK = asyncio.Lock()
 
 TTS_MAX_CHUNK_CHARS = 650
 
-EXTRACTOR_VERSION = "2.1"
+EXTRACTOR_VERSION = "2.2"
 
 MAX_CONSECUTIVE_FAILURES = 5
 
@@ -462,8 +462,95 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
 
     try:
         with fitz.open(pdf_path) as doc:
+
+            # ==========================================================
+            # Phase-A Pre-Scan: Global Document Metrics (HARDENED)
+            # ==========================================================
+            global_line_gaps = []
+            global_font_sizes = []
+
+            GLOBAL_MEDIAN_LINE_HEIGHT = None
+            GLOBAL_MEDIAN_FONT_SIZE = None
+
+            # PERFORMANCE HARDENING:
+            # Sample a bounded set of pages to avoid double-parsing entire books.
+            total_pages = doc.page_count
+            sample_pages = set()
+
+            # First pages (skip title page noise by starting at page 1 if possible)
+            start_page = 1 if total_pages > 2 else 0
+            for i in range(start_page, min(20, total_pages)):
+                sample_pages.add(i)
+
+            # Middle slice (captures body text)
+            if total_pages > 40:
+                mid_start = total_pages // 2 - 5
+                for i in range(mid_start, min(mid_start + 10, total_pages)):
+                    sample_pages.add(i)
+
+            # Final pages (indexes / appendices)
+            for i in range(max(0, total_pages - 10), total_pages):
+                sample_pages.add(i)
+
+            for page_num in sorted(sample_pages):
+                page = doc.load_page(page_num)
+                text_dict = page.get_text("dict")
+
+                for block in text_dict.get("blocks", []):
+                    if block.get("type") != 0:
+                        continue
+
+                    lines = block.get("lines", [])
+
+                    # -----------------------------
+                    # FONT SIZE SAMPLING (Span-Level)
+                    # -----------------------------
+                    for line in lines:
+                        for span in line.get("spans", []):
+                            size = span.get("size")
+                            if size:
+                                global_font_sizes.append(float(size))
+
+                    # ----------------------------------
+                    # LINE HEIGHT / LEADING (Line-to-Line)
+                    # ----------------------------------
+                    for i in range(1, len(lines)):
+                        prev_bbox = lines[i - 1].get("bbox")
+                        curr_bbox = lines[i].get("bbox")
+
+                        if not prev_bbox or not curr_bbox:
+                            continue
+
+                        prev_bottom = prev_bbox[3]
+                        curr_top = curr_bbox[1]
+                        gap = curr_top - prev_bottom
+
+                        # Filter implausible values (noise / layout jumps)
+                        if 0 < gap < 200:
+                            global_line_gaps.append(gap)
+
+            GLOBAL_MEDIAN_LINE_HEIGHT = (
+                sorted(global_line_gaps)[len(global_line_gaps) // 2]
+                if global_line_gaps else None
+            )
+
+            GLOBAL_MEDIAN_FONT_SIZE = (
+                sorted(global_font_sizes)[len(global_font_sizes) // 2]
+                if global_font_sizes else None
+            )
+
+            logger.info(
+                f"[{trace_id}] Global Metrics: "
+                f"MedianFont={GLOBAL_MEDIAN_FONT_SIZE if GLOBAL_MEDIAN_FONT_SIZE is not None else 'N/A'}, "
+                f"MedianLineGap={GLOBAL_MEDIAN_LINE_HEIGHT if GLOBAL_MEDIAN_LINE_HEIGHT is not None else 'N/A'} "
+                f"(Sampled {len(sample_pages)} pages)"
+            )
+            # ------------------------------------
+
             # Extract metadata
             metadata = {
+                "global_median_line_height": GLOBAL_MEDIAN_LINE_HEIGHT,
+                "global_median_font_size": GLOBAL_MEDIAN_FONT_SIZE,
                 "title": doc.metadata.get("title", pdf_path.stem),
                 "author": doc.metadata.get("author", "Unknown"),
                 "source_filename": pdf_path.name,
@@ -472,9 +559,18 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
             }
 
             # Stage 1: Extract all pages using extraction_engine
+            # IMPORTANT:
+            # extract_page() returns spans in authoritative visual reading order.
+            # Downstream code MUST NOT re-sort spans or override paragraph_index.
             page_outputs = []
             for page_num in range(doc.page_count):
-                page_data = extraction_engine.extract_page(doc, page_num, trace_id)
+                page_data = extraction_engine.extract_page(
+                    doc,
+                    page_num,
+                    trace_id=trace_id,
+                    global_median_line_height=GLOBAL_MEDIAN_LINE_HEIGHT,
+                    global_median_font_size=GLOBAL_MEDIAN_FONT_SIZE
+                )
                 page_outputs.append(page_data)
 
             # Stage 1.5: Normalize headers/footers across document

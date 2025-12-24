@@ -31,6 +31,7 @@ from enum import Enum, IntEnum
 from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from collections import Counter
+from collections import defaultdict
 from difflib import SequenceMatcher
 
 logger = logging.getLogger("ExtractionEngine")
@@ -328,7 +329,15 @@ VALID_SHORT_WORDS: frozenset = frozenset({
     'now', 'old', 'one', 'our', 'out', 'own', 'per', 'put', 'run', 'say',
     'see', 'set', 'she', 'the', 'too', 'try', 'two', 'use', 'was', 'way',
     'who', 'why', 'yet', 'you',
+
+    'a', 'i', 'an', 'as', 'at', 'be', 'by', 'do', 'go', 'he', 'if', 'in',
+    'is', 'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up', 'us',
+    'we', 'am', 'are', 'and', 'the', 'for', 'but', 'not', 'you', 'all',
+    'can', 'had', 'her', 'was', 'one', 'our', 'out', 'has', 'his', 'how',
+    'its', 'may', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'did',
+    'get', 'let', 'put', 'say', 'she', 'too', 'use', 'own', 'per',
 })
+
 
 # --- Exclusion Reason Strings ---
 
@@ -523,6 +532,7 @@ TTS_SUBSTITUTIONS: Dict[str, str] = {
 
 }
 
+
 # --- Subscript/Superscript Digit Maps ---
 
 SUBSCRIPT_DIGITS: Dict[str, str] = {
@@ -541,6 +551,31 @@ SUPERSCRIPT_DIGITS: Dict[str, str] = {
     "ⁿ": "n", "ⁱ": "i",
 }
 
+# PHASE 1.5: Continuity Override Configuration
+
+# Roles that can be overridden by stream continuity (geometry-based roles only)
+_CONTINUITY_OVERRIDE_CANDIDATES: frozenset = frozenset({
+    TextRole.INSIDE_FIGURE.value,
+    TextRole.FIGURE_LABEL.value,
+})
+
+# Hard semantic veto patterns - spans matching these are NEVER promoted to body
+_CONTINUITY_VETO_PATTERNS: tuple = (
+    "figure", "fig.", "fig ", "table", "chart", "graph", "diagram",
+    "source:", "note:", "©", "http://", "https://", "www.", "doi:",
+    "page ", "p. ", "pp.", "vol.", "chapter", "section", "appendix",
+)
+
+# Maximum Y-gap (points) between spans for adjacency (prevents cross-block contagion)
+_CONTINUITY_MAX_Y_GAP: float = 30.0
+
+# Terminal punctuation that definitively ends a sentence
+# NOTE: Excludes ':' (introduces clauses) and ';' (joins clauses) per lead review
+_CONTINUITY_TERMINAL_CHARS: str = ".!?"
+
+# Number of spans to include from adjacent pages in the window
+_WINDOW_TAIL_SPAN_COUNT: int = 10  # Last N spans from previous page
+_WINDOW_HEAD_SPAN_COUNT: int = 10  # First N spans from next page
 
 # --- TTS Sanitization Thresholds ---
 
@@ -692,6 +727,9 @@ _FRAGMENT_MIDWORD_PREFIXES: frozenset[str] = frozenset({
     "th", "he", "in", "er", "an", "on", "or", "ed", "ng"
 })
 
+# Ragged-Edge Magnet
+MAGNET_GAP_EM = 2.0
+
 # --- Margin Detection (Histogram Analysis) ---
 
 # Histogram bin configuration
@@ -742,6 +780,7 @@ _CHUNK_BOUNDARY_ROLES: frozenset[str] = frozenset({
 _STITCH_MAX_PASSES: int = 3
 _STITCH_MAX_LOOKAHEAD: int = 5
 _STITCH_MAX_Y_GAP_SAME_PAGE: float = 50.0
+_STITCH_MAX_NEGATIVE_Y_GAP = 25.0  # px, defensive threshold
 
 # NEW: Maximum span index gap for stitching
 # Prevents merging sentences from distant content blocks
@@ -995,6 +1034,7 @@ _TABLE_HEADER_THRESHOLD_RATIO: float = 0.15
 _TABLE_STUB_THRESHOLD_PIXELS: float = 80.0
 _TABLE_STUB_THRESHOLD_RATIO: float = 0.20
 
+
 # --- Structural Continuity Detection ---
 
 _CONTINUITY_X_ALIGNMENT_TOLERANCE: float = 15.0
@@ -1009,6 +1049,11 @@ _CONTINUITY_FIGURE_TOP_MARGIN_RATIO: float = 0.10
 _CAPTION_ASSOC_MAX_DISTANCE_RATIO: float = 0.15
 _CAPTION_ASSOC_HORIZ_WEIGHT: float = 0.3
 _CAPTION_ASSOC_ABOVE_BONUS: float = 0.8
+
+# PHASE 1.3 HARDEN: Document-Adaptive Inline Detection
+_HARDEN_GAP_TOLERANCE_MULTIPLIER: float = 1.5
+_HARDEN_SINGLE_PEER_WIDTH_RATIO: float = 0.06
+_HARDEN_MAX_INLINE_WIDTH_RATIO: float = 0.10
 
 # --- Acronyms & Protected Words ---
 
@@ -1211,6 +1256,12 @@ GREEK_WHITELIST: frozenset = frozenset({
     'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'theta', 'lambda',
     'mu', 'sigma', 'omega', 'pi',
 })
+
+_PARA_ABBREVIATIONS = {
+    "dr", "mr", "ms", "mrs", "prof", "fig", "eq",
+    "st", "vs", "etc", "e.g", "i.e", "cf", "al"
+}
+
 # --- Layout Detection ---
 
 _CAPTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -1512,6 +1563,38 @@ def _rects_intersect(r1: BboxTuple, r2: BboxTuple) -> bool:
     return not (r1[2] < r2[0] or r1[0] > r2[2] or r1[3] < r2[1] or r1[1] > r2[3])
 
 
+def _get_intersection_rect(r1: BboxTuple, r2: BboxTuple) -> Optional[BboxTuple]:
+    x0 = max(r1[0], r2[0])
+    y0 = max(r1[1], r2[1])
+    x1 = min(r1[2], r2[2])
+    y1 = min(r1[3], r2[3])
+    if x0 < x1 and y0 < y1:
+        try:
+            x0 = float(x0)
+            y0 = float(y0)
+            x1 = float(x1)
+            y1 = float(y1)
+        except (TypeError, ValueError):
+            return None
+
+            # Reject NaN / Inf
+        if not all(math.isfinite(v) for v in (x0, y0, x1, y1)):
+            return None
+
+            # Normalize inverted boxes
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+
+            # Reject degenerate boxes
+        if x1 == x0 or y1 == y0:
+            return None
+
+        return x0, y0, x1, y1
+    return None
+
+
 def _merge_rects(rects: List[BboxTuple], gap: float) -> List[BboxTuple]:
     """
     Greedy merge of overlapping or nearby rectangles.
@@ -1687,8 +1770,13 @@ def _span_inside_visual_region(
     # Check figures (already normalized to tuples)
     if figure_tuples:
         for fig_rect in figure_tuples:
-            if _rects_intersect(span_rect, fig_rect):
-                return True
+            intersection = _get_intersection_rect(span_rect, fig_rect)
+            if intersection:
+                intersection_area = (intersection[2] - intersection[0]) * (
+                            intersection[3] - intersection[1])
+                span_area = (span_rect[2] - span_rect[0]) * (span_rect[3] - span_rect[1])
+                if span_area > 0 and (intersection_area / span_area) > 0.5:
+                    return True
 
     # Check tables (normalize dict bbox on-the-fly)
     if table_regions:
@@ -1701,8 +1789,14 @@ def _span_inside_visual_region(
             if table_rect is None:
                 continue
 
-            if _rects_intersect(span_rect, table_rect):
-                return True
+            # Hardened: require significant overlap (same rationale as figures)
+            span_area = _rect_area(span_rect)
+            if span_area > 0:
+                inter = _get_intersection_rect(span_rect, table_rect)
+                if inter is not None:
+                    inter_area = _rect_area(inter)
+                    if (inter_area / span_area) >= 0.50:
+                        return True
 
     return False
 
@@ -1774,19 +1868,37 @@ def _detect_columns(
     # =========================================================================
     # Step 1: Exclusion Zones (Figures, Tables)
     # =========================================================================
-    exclusion_rects = list(figure_tuples)
+    exclusion_rects = [r for r in figure_tuples if r and len(r) >= 4]
+
     for table in tables:
         if table.get("bbox"):
-            exclusion_rects.append(_to_bbox_tuple(table["bbox"]))
+            t_rect = _to_bbox_tuple(table["bbox"])
+            if t_rect and len(t_rect) >= 4:
+                exclusion_rects.append(t_rect)
 
     # =========================================================================
     # Step 2: Detect Margin Boundaries
     # =========================================================================
     body_left, body_right = _detect_margin_boundaries(spans, page_width, trace_id=trace_id)
+    # HARDEN: Ensure sane body boundaries
+    if body_left is None or body_right is None:
+        body_left, body_right = 0.0, page_width
+
+    if body_right <= body_left:
+        body_left, body_right = 0.0, page_width
 
     # =========================================================================
     # Step 3: Calculate X-Centroids and Tag Margin Content
     # =========================================================================
+    all_y = [s.get("bbox", [0, 0, 0, 0])[1] for s in spans if s.get("bbox")]
+    all_y += [s.get("bbox", [0, 0, 0, 0])[3] for s in spans if s.get("bbox")]
+
+    if all_y:
+        page_y_min, page_y_max = min(all_y), max(all_y)
+        page_h_est = max(page_y_max - page_y_min, 1.0)
+    else:
+        page_y_min, page_h_est = 0.0, 1000.0
+
     x_centroids = []
     centroid_map = {}
     span_rect_map = {}
@@ -1797,17 +1909,61 @@ def _detect_columns(
             span["column_index"] = 0
             continue
 
-        cx = (span_rect[0] + span_rect[2]) / 2
+        x0, y0, x1, y1 = span_rect
+        cx = (x0 + x1) / 2
         centroid_map[id(span)] = cx
         span_rect_map[id(span)] = span_rect
 
-        # Tag margin content (used in Step 7 for isolation)
-        is_margin = (cx < body_left or cx > body_right)
+        # NOTE: If this ever misclassifies body content as margin,
+        # the bug is in _detect_margin_boundaries, not here.
+        is_margin = (x0 < body_left or x0 > body_right)
         span["is_margin_content"] = is_margin
 
         # Only body content (non-margin, non-excluded) contributes to grid detection
         in_exclusion = any(_rects_intersect(span_rect, ex) for ex in exclusion_rects)
-        if not in_exclusion and not is_margin:
+        span_width = x1 - x0
+        is_structural_banner = span_width > (page_width * 0.80)
+
+        # REVISION (Vertical Safety Zone / "Gutter Pollution" Guard):
+        # _detect_columns() does not receive page_height, so infer vertical bounds
+        # from observed span rects. This prevents header/footer tokens (often centered)
+        # from contributing centroids that "plug" the true gutter.
+        #
+        # NOTE: This guard ONLY affects x_centroids sampling (grid detection),
+        # not downstream column assignment.
+        y0 = span_rect[1]
+        y1 = span_rect[3]
+
+        # Infer page vertical extent from already-seen spans (cheap + stable).
+        # Update inferred page vertical extent (cheap + stable)
+
+        y_center = (y0 + y1) / 2.0
+        norm_y = (y_center - page_y_min) / page_h_est
+
+        # Ignore top/bottom 8% for centroid sampling (headers/footers/live page numbers).
+        is_vertical_extreme = (norm_y < 0.08) or (norm_y > 0.92)
+
+        # =====================================================================
+        # [P2 HARDENING] Figure-annotation exclusion to prevent "ghost columns"
+        #
+        # Even when figure/table bboxes are imperfect, short label-like spans
+        # (e.g., "Force", "Signal", axis ticks) can pollute the centroid
+        # distribution and create phantom boundaries (Page 4 failure mode).
+        # =====================================================================
+        span_text = (span.get("raw_text", "") or span.get("cleaned_text", "") or "").strip()
+        span_role = span.get("role", "body")
+        is_figure_annotation = (
+                span_role in ("figure_label", "caption", "inside_figure", "table_cell") or
+                (0 < len(span_text) < 5 and in_exclusion)
+        )
+
+        if (
+                not in_exclusion
+                and not is_margin
+                and not is_vertical_extreme
+                and not is_structural_banner
+                and not is_figure_annotation
+        ):
             x_centroids.append(cx)
 
     if not x_centroids:
@@ -1823,9 +1979,28 @@ def _detect_columns(
         gaps.append((gap_size, x_centroids[i - 1], x_centroids[i]))
 
     # =========================================================================
-    # Step 5: Threshold Calculation (Geometry Trust)
+    # Step 5: Threshold Calculation (The "Typographic Anchor")
     # =========================================================================
-    base_threshold = max(page_width * 0.05, 20.0)
+    # REPLACED: base_threshold = max(page_width * 0.05, 20.0)
+    #
+    # FIX: Decouple from page width (avoids High-DPI "Resolution Trap").
+    # Anchor to text size: A column gutter is typographically distinct if
+    # it is wider than ~2.0 characters (2.0em).
+
+    font_sizes = [s.get("font_size", 10.0) for s in spans if s.get("font_size", 0) > 0]
+
+    if font_sizes:
+        # Quick median calculation (surgical inline sort)
+        font_sizes.sort()
+        median_fs = font_sizes[len(font_sizes) // 2]
+    else:
+        median_fs = 10.0
+
+    # THRESHOLD: 2.5x Font Size or 15.0pt floor.
+    # Academic gutters are often 1pc (12pt); previous 30pt floor was too aggressive.
+
+    base_threshold = max(median_fs * 2.5, 15.0)
+
     significant_gaps = [g for g in gaps if g[0] > base_threshold]
     significant_gaps.sort(key=lambda x: x[0], reverse=True)
 
@@ -1840,7 +2015,92 @@ def _detect_columns(
         for size, left, right in significant_gaps:
             midpoint = (left + right) / 2
             # Only accept boundaries in center 50% of page
-            if (page_width * 0.25) < midpoint < (page_width * 0.75):
+            if (page_width * 0.20) < midpoint < (page_width * 0.80):
+
+                # REVISION A: Block-aware suppression
+                # If the same physical block_id exists on both sides of the proposed boundary,
+                # the boundary is likely slicing a single true text block (phantom column wall).
+                left_blocks = set()
+                right_blocks = set()
+
+                for s in spans:
+                    if s.get("is_margin_content"):
+                        continue
+
+                    rect = span_rect_map.get(id(s))
+                    if not rect:
+                        continue
+
+                    # Exclude figure/table regions from this guard (same as centroid grid input)
+                    if any(_rects_intersect(rect, ex) for ex in exclusion_rects):
+                        continue
+
+                    cx = centroid_map.get(id(s))
+                    if cx is None:
+                        cx = (rect[0] + rect[2]) / 2
+
+                    bid = s.get("block_id")
+                    if bid is None:
+                        continue
+
+                    if cx < midpoint:
+                        left_blocks.add(bid)
+                    elif cx > midpoint:
+                        right_blocks.add(bid)
+
+                # FUZZY VETO (P0 FIX):
+                # Allow a boundary even if a small number of blocks cross it (e.g., Titles),
+                # provided the vast majority of body spans respect the split.
+                overlapping_blocks = left_blocks & right_blocks
+
+                if overlapping_blocks:
+                    total_body_spans = 0
+                    violating_spans = 0
+
+                    # Dynamic Y-Bounds for Gating
+                    all_y0 = [s["bbox"][1] for s in spans if s.get("bbox")]
+                    all_y1 = [s["bbox"][3] for s in spans if s.get("bbox")]
+
+                    if all_y0 and all_y1:
+                        page_y_min = min(all_y0)
+                        page_y_max = max(all_y1)
+                        page_height_est = max(1.0, page_y_max - page_y_min)
+                    else:
+                        page_y_min, page_height_est = 0.0, 1000.0  # Fallback
+
+                    for s in spans:
+                        if s.get("is_margin_content"):
+                            continue
+
+                        rect = span_rect_map.get(id(s))
+                        if not rect:
+                            continue
+
+                        # Ignore excluded regions (figures/tables)
+                        if any(_rects_intersect(rect, ex) for ex in exclusion_rects):
+                            continue
+
+                        # Ignore vertical extremes (headers / footers)
+                        y0, y1 = rect[1], rect[3]
+                        y_center = (y0 + y1) / 2.0
+                        norm_y = (y_center - page_y_min) / page_height_est
+
+                        # SKIP Header/Footer Zones (Top/Bottom 8%)
+                        if norm_y < 0.08 or norm_y > 0.92:
+                            continue
+
+                        total_body_spans += 1
+
+                        bid = s.get("block_id")
+                        if bid in overlapping_blocks:
+                            violating_spans += 1
+
+                    # HARD RULE: allow boundary if ≥90% of body spans respect it
+                    if total_body_spans > 0:
+                        violation_ratio = violating_spans / total_body_spans
+                        if violation_ratio > 0.10:
+                            continue
+
                 valid_boundaries.append(midpoint)
                 if len(valid_boundaries) >= (_LAYOUT_MAX_COLUMNS - 1):
                     break
@@ -1865,27 +2125,49 @@ def _detect_columns(
     margin_left_count = 0
     margin_right_count = 0
 
+    # HARDEN: Ensure all spans receive layout_stream (prevents silent corruption)
+    for span in spans:
+        span.setdefault("layout_stream", "body_col_0")
+
     for span in spans:
         cx = centroid_map.get(id(span))
         span_rect = span_rect_map.get(id(span))
 
         if cx is None:
             span["column_index"] = 0
+            span["layout_stream"] = "body_col_0"
+            continue
+
+        # MARGIN ISOLATION: Reserved column indices for margin content
+        if not span_rect:
+            span["column_index"] = 0
+            span["layout_stream"] = "body_col_0"
+            continue
+
+        span_width = span_rect[2] - span_rect[0]
+
+        # Full-width banners should never be treated as margin
+        if span_width > (page_width * 0.85):
+            span["column_index"] = 0
+            span["layout_stream"] = "full_width_banner"
+            span["is_margin_content"] = False
             continue
 
         # MARGIN ISOLATION: Reserved column indices for margin content
         if span.get("is_margin_content"):
             if cx < body_left:
                 span["column_index"] = _COLUMN_INDEX_LEFT_MARGIN
+                span["layout_stream"] = "margin_left"
                 margin_left_count += 1
             else:
                 span["column_index"] = _COLUMN_INDEX_RIGHT_MARGIN
+                span["layout_stream"] = "margin_right"
                 margin_right_count += 1
             continue
 
-        # BODY CONTENT: Assign based on detected boundaries
         if num_columns == 1:
             span["column_index"] = 0
+            span["layout_stream"] = "body_col_0"
         else:
             effective_center = cx
             if span_rect:
@@ -1898,6 +2180,122 @@ def _detect_columns(
                 else:
                     break
             span["column_index"] = col_idx
+            span["layout_stream"] = f"body_col_{col_idx}"
+
+    # =========================================================================
+    # PHASE 2.1: Ragged-Edge Magnet Rule
+    # Corrects margin misclassification for spans on BODY-majority visual lines.
+    # VLG = (line_id, row_key)
+    # Safe Harbor: visual distance check prevents sidebar pollution.
+    # Contract:
+    #   May mutate: is_margin_content, column_index, layout_stream
+    #   Must not mutate: raw_text, bbox, line_bbox, block_bbox
+    # =========================================================================
+
+    vlg_groups = defaultdict(list)
+    for span in spans:
+        lid = span.get("line_id")
+        rk = span.get("row_key")
+        if lid is not None and rk is not None:
+            vlg_groups[(lid, rk)].append(span)
+
+    magnet_reclassified = 0
+
+    for (line_id, row_key), group in vlg_groups.items():
+        body_spans = [s for s in group if not s.get("is_margin_content")]
+        margin_spans = [s for s in group if s.get("is_margin_content")]
+
+        # Majority vote — BODY must dominate
+        if len(body_spans) <= len(margin_spans):
+            continue
+
+        if not body_spans or not margin_spans:
+            continue
+
+        for m in margin_spans:
+            m_rect = span_rect_map.get(id(m))
+            if not m_rect:
+                continue
+
+            mx0, mx1 = float(m_rect[0]), float(m_rect[2])
+            fs = float(m.get("font_size", 10.0) or 10.0)
+
+            min_gap = float("inf")
+            nearest_col = 0
+
+            for b in body_spans:
+                b_rect = span_rect_map.get(id(b))
+                if not b_rect:
+                    continue
+
+                bx0, bx1 = float(b_rect[0]), float(b_rect[2])
+
+                gap = min(
+                    abs(mx0 - bx1),  # margin right of body
+                    abs(bx0 - mx1),  # margin left of body
+                )
+
+                if gap < min_gap:
+                    min_gap = gap
+                    nearest_col = int(b.get("column_index", 0) or 0)
+
+            # Safe-harbor threshold
+            if min_gap <= (MAGNET_GAP_EM * fs):
+                m["is_margin_content"] = False
+                m["column_index"] = nearest_col
+                m["layout_stream"] = f"body_col_{nearest_col}"
+                magnet_reclassified += 1
+
+    # =========================================================================
+    # PHASE 2.2: Line-End Punctuation Guard (REQUIRED)
+    # Flags legitimate punctuation so it survives short-fragment pruning.
+    # =========================================================================
+    LINE_END_PUNCTUATION = {
+        ".", ")", ").", ":", ";", "?", "\"", "]", "].", "!", "'",
+    }
+    LINE_START_PUNCTUATION = {
+        "\"", "'", "(", "[", "¿", "¡", "«",
+    }
+
+    punctuation_protected = 0
+
+    for (line_id, row_key), group in vlg_groups.items():
+        body_count = sum(1 for s in group if not s.get("is_margin_content"))
+        margin_count = sum(1 for s in group if s.get("is_margin_content"))
+
+        if body_count <= margin_count:
+            continue
+
+        for s in group:
+            text = (s.get("raw_text") or "").strip()
+            if not text:
+                continue
+
+            is_line_end = s.get("is_line_end", False)
+            is_line_start = s.get("span_index_in_line", -1) == 0
+
+            # Line-end protection (allows short punctuation)
+            if is_line_end:
+                if text in LINE_END_PUNCTUATION or (len(text) <= 3 and not text.isalnum()):
+                    s["filter_protected"] = True
+                    punctuation_protected += 1
+                    continue
+
+            # Line-start protection (STRICT punctuation only)
+            if is_line_start:
+                if text in LINE_START_PUNCTUATION:
+                    s["filter_protected"] = True
+                    punctuation_protected += 1
+
+    if trace_id and (magnet_reclassified > 0 or punctuation_protected > 0):
+        logger.info(
+            "[%s] Phase 2: Magnet reclassified %d spans; protected %d punctuation",
+            trace_id, magnet_reclassified, punctuation_protected
+        )
+
+    if trace_id:
+        margin_left_count = sum(1 for s in spans if s.get("layout_stream") == "margin_left")
+        margin_right_count = sum(1 for s in spans if s.get("layout_stream") == "margin_right")
 
     # =========================================================================
     # Logging
@@ -1912,10 +2310,17 @@ def _detect_columns(
     return num_columns
 
 
+def _extract_column_number(stream_name: str) -> int:
+    """Extract numeric column index from layout_stream for deterministic ordering."""
+    try:
+        return int(stream_name.split("_")[-1])
+    except (ValueError, IndexError, AttributeError, TypeError):
+        return 10 ** 9
+
+
 def _detect_margin_boundaries(
         spans: List[Dict],
         page_width: float,
-        page_height: float = None,
         exclude_roles: frozenset[TextRole] = None,
         trace_id: str = None
 ) -> Tuple[float, float]:
@@ -1950,18 +2355,34 @@ def _detect_margin_boundaries(
         exclude_roles = _MARGIN_EXCLUDE_ROLES
 
     # =========================================================================
-    # CONFIGURATION: Adaptive bin count
+    # CONFIGURATION: DPI/Resolution normalization (Reference-Width Histogram)
     # =========================================================================
+    REF_WIDTH = 600.0
+    norm_scale = (REF_WIDTH / page_width) if page_width > REF_WIDTH else 1.0
+    norm_width = page_width * norm_scale  # equals REF_WIDTH when page is wider than REF
+
+    # =====================================================================
+    # [P0 HARDENING] High-resolution histogram
+    # Rationale:
+    # - With coarse bins (~30px), legitimate 2-col gutters and sidebar gaps
+    # can quantize into similar "empty-bin" counts.
+    # - Force ~12px/bin at REF_WIDTH≈600 so:
+    # gutter (12–20px) -> 1–2 bins
+    # sidebar gap (40–60px) -> 3–5 bins
+    # This enables density-aware region classification below.
+    # =====================================================================
+    HIGH_RES_BIN_COUNT = 50  # ~12px per bin at 600px reference width
     num_bins = max(
-        _MARGIN_MIN_BINS,
-        min(_MARGIN_MAX_BINS, int(page_width / _MARGIN_TARGET_BIN_WIDTH))
+            HIGH_RES_BIN_COUNT,
+            min(_MARGIN_MAX_BINS, int(norm_width / 12.0))
     )
-    bin_width = page_width / num_bins
+    bin_width = norm_width / num_bins
 
     # =========================================================================
     # BUILD WEIGHTED HISTOGRAM
     # =========================================================================
     bins: List[float] = [0.0] * num_bins
+    bin_y_ranges: List[List[float]] = [[float('inf'), float('-inf')] for _ in range(num_bins)]
     span_count = 0
 
     for span in spans:
@@ -1981,10 +2402,11 @@ def _detect_margin_boundaries(
         if span_rect is None:
             continue
 
-        center_x = (span_rect[0] + span_rect[2]) / 2
+        left_x = span_rect[0]
+        left_x_norm = left_x * norm_scale
 
-        # Clamp to valid bin range
-        bin_idx = max(0, min(int(center_x / bin_width), num_bins - 1))
+        # Clamp to valid bin range (normalized coordinate system)
+        bin_idx = max(0, min(int(left_x_norm / bin_width), num_bins - 1))
 
         # Weight by character count (optional)
         if _MARGIN_WEIGHT_BY_CHARS:
@@ -1995,6 +2417,13 @@ def _detect_margin_boundaries(
 
         bins[bin_idx] += weight
         span_count += 1
+
+        # Track vertical extent for this bin
+        y0, y1 = span_rect[1], span_rect[3]
+        if y0 < bin_y_ranges[bin_idx][0]:
+            bin_y_ranges[bin_idx][0] = y0
+        if y1 > bin_y_ranges[bin_idx][1]:
+            bin_y_ranges[bin_idx][1] = y1
 
     # =========================================================================
     # HANDLE EDGE CASES
@@ -2015,86 +2444,155 @@ def _detect_margin_boundaries(
         )
 
     # =========================================================================
+    # APPLY VERTICAL COVERAGE BONUS
+    # =========================================================================
+    all_y_min = min((r[0] for r in bin_y_ranges if r[0] != float('inf')), default=0)
+    all_y_max = max((r[1] for r in bin_y_ranges if r[1] != float('-inf')), default=1)
+    page_h_est = max(all_y_max - all_y_min, 1.0)
+
+    for i in range(num_bins):
+        y_min, y_max = bin_y_ranges[i]
+        if y_min != float('inf') and bins[i] > 0:
+            vertical_coverage = (y_max - y_min) / page_h_est
+            # Bonus: 1.0x at 0% coverage → 1.5x at 100% coverage
+            coverage_bonus = 1.0 + (vertical_coverage * 0.5)
+            bins[i] *= coverage_bonus
+
+    # =========================================================================
     # CALCULATE DENSITY THRESHOLD
     # =========================================================================
-    total_weight = sum(bins)
-    avg_weight = total_weight / num_bins if num_bins > 0 else 1
+    active_bins = sorted(b for b in bins if b > 0)
+    if not active_bins:
+        return (
+            page_width * _MARGIN_MIN_RATIO,
+            page_width * (1 - _MARGIN_MIN_RATIO)
+        )
 
-    ratio_threshold = max_count * _MARGIN_DENSITY_RATIO
-    avg_threshold = avg_weight * _MARGIN_AVG_WEIGHT_MULTIPLIER
-
+    median_val = active_bins[len(active_bins) // 2]
     density_threshold = max(
         _MARGIN_MIN_DENSITY_COUNT,
-        max(ratio_threshold, avg_threshold)
+        median_val * 0.35
     )
 
     # =========================================================================
-    # FIND BODY BOUNDARIES (CENTRALITY BIAS)
-    # Strategy: Scan OUTWARDS from center to find the main content block.
-    # Stops at the first "gap" (low density bin), excluding detached sidebars.
+    # FIND BODY BOUNDARIES (WIDTH-DOMINANT / LCR)
+    # Strategy:
+    #   1. Identify all contiguous dense regions
+    #   2. Merge across small gaps (figures, indents)
+    #   3. Select the WIDEST region as Body
+    #   4. Use centrality only as a tiebreaker
     # =========================================================================
 
-    center_idx = num_bins // 2
-    anchor_bin = center_idx
+    max_gap = 2
 
-    # 1. FIND ANCHOR: If center is empty (e.g. image), find nearest dense bin
-    if bins[center_idx] < density_threshold:
-        for offset in range(1, center_idx + 1):
-            left, right = center_idx - offset, center_idx + offset
-            if 0 <= left < num_bins and bins[left] >= density_threshold:
-                anchor_bin = left
-                break
-            if 0 <= right < num_bins and bins[right] >= density_threshold:
-                anchor_bin = right
-                break
-
-    # 2. EXPAND LEFT (with gap tolerance)
-    body_left_bin = anchor_bin
-    gap_count = 0
-    max_gap = 1  # Allow 1 empty bin (~30-50px) for internal figures
-
-    for i in range(anchor_bin, -1, -1):
-        if bins[i] >= density_threshold:
-            gap_count = 0
-            body_left_bin = i
-        else:
-            gap_count += 1
-            if gap_count > max_gap:
-                break
-
-    # 3. EXPAND RIGHT (with gap tolerance)
-    body_right_bin = anchor_bin
+    regions = []
+    region_start = None
+    region_weight = 0
     gap_count = 0
 
-    for i in range(anchor_bin, num_bins):
-        if bins[i] >= density_threshold:
+    for i, val in enumerate(bins):
+        if val >= density_threshold:
+            if region_start is None:
+                region_start = i
+            region_weight += val
             gap_count = 0
-            body_right_bin = i
         else:
             gap_count += 1
-            if gap_count > max_gap:
+            if gap_count > max_gap and region_start is not None:
+                region_end = i - gap_count
+                regions.append((region_start, region_end, region_weight))
+                region_start = None
+                region_weight = 0
+
+    if region_start is not None:
+        # Find actual last dense bin (exclude trailing sparse bins)
+        actual_end = region_start
+        for j in range(num_bins - 1, region_start - 1, -1):
+            if bins[j] >= density_threshold:
+                actual_end = j
                 break
+        regions.append((region_start, actual_end, region_weight))
+
+    if not regions:
+        body_left_bin = int(num_bins * 0.1)
+        body_right_bin = int(num_bins * 0.9)
+    else:
+        # =====================================================================
+        # [P0 CRITICAL] Density-aware region classification
+        #
+        # Problem:
+        #   - "Pick the heaviest region" can exclude a legitimate 2nd column
+        #     (IEEE/ACM) OR include a sidebar/margin block as body.
+        #
+        # Solution:
+        #   - Compare the top two regions by weight.
+        #       ratio = secondary_weight / primary_weight
+        #      * ratio > 0.50  => likely true multi-column -> MERGE
+        #      * ratio < 0.30  => likely sidebar/margin    -> EXCLUDE secondary
+        #      * else          => ambiguous -> choose leftmost (western bias)
+        # =====================================================================
+        sorted_regions = sorted(regions, key=lambda r: r[2], reverse=True)
+        primary = sorted_regions[0]
+
+        if len(sorted_regions) == 1:
+            body_left_bin, body_right_bin = primary[0], primary[1]
+        else:
+            secondary = sorted_regions[1]
+            primary_weight = primary[2]
+            secondary_weight = secondary[2]
+            ratio = (secondary_weight / primary_weight) if primary_weight > 0 else 0.0
+
+            if ratio > 0.50:
+                # MERGE: treat as true multi-column body (preserve both)
+                body_left_bin = min(primary[0], secondary[0])
+                body_right_bin = max(primary[1], secondary[1])
+                if trace_id:
+                    logger.debug(
+                        "[%s] Density-aware: MERGE (ratio=%.2f) -> bins %d-%d",
+                        trace_id, ratio, body_left_bin, body_right_bin
+                    )
+            elif ratio < 0.30:
+                # EXCLUDE: treat secondary as sidebar/margin (preserve primary only)
+                body_left_bin, body_right_bin = primary[0], primary[1]
+                if trace_id:
+                    logger.debug(
+                        "[%s] Density-aware: EXCLUDE secondary (ratio=%.2f) -> bins %d-%d",
+                        trace_id, ratio, body_left_bin, body_right_bin
+                    )
+
+            else:
+                # AMBIGUOUS: prefer PRIMARY (heavier) region
+                # Western (leftmost) bias fails for right-body layouts
+                # (e.g., figure captions on left, body on right)
+                body_left_bin, body_right_bin = primary[0], primary[1]
+                if trace_id:
+                    logger.debug(
+                        "[%s] Density-aware: AMBIGUOUS -> PRIMARY (ratio=%.2f, w=%.0f vs %.0f) -> bins %d-%d",
+                        trace_id, ratio, primary_weight, secondary_weight, body_left_bin, body_right_bin
+                    )
 
     # =========================================================================
     # CONVERT TO COORDINATES
     # =========================================================================
-    body_left = body_left_bin * bin_width
-    body_right = (body_right_bin + 1) * bin_width
+    # Convert from normalized coordinates back to original page coordinates
+    body_left_norm = body_left_bin * bin_width
+    body_right_norm = (body_right_bin + 1) * bin_width
+
+    inv = (1.0 / norm_scale) if norm_scale != 0 else 1.0
+    body_left = body_left_norm * inv
+    body_right = body_right_norm * inv
 
     # =========================================================================
     # APPLY MARGIN CONSTRAINTS
     # =========================================================================
-    min_margin = page_width * _MARGIN_MIN_RATIO
-    max_margin = page_width * _MARGIN_MAX_RATIO
+    min_margin = page_width * _MARGIN_MIN_RATIO  # ~5%
 
-    # Clamp body_left: must be at least min_margin, at most max_margin
-    body_left = max(min_margin, min(body_left, max_margin))
+    # Ensure body does not touch extreme edges
+    if body_left < min_margin:
+        body_left = min_margin
 
-    # Clamp body_right: must be at least (page_width - max_margin)
-    body_right = min(
-        page_width - min_margin,
-        max(body_right, page_width - max_margin)
-    )
+    if body_right > page_width - min_margin:
+        body_right = page_width - min_margin
 
     # =========================================================================
     # VALIDATION: Ensure body_left < body_right
@@ -2116,10 +2614,15 @@ def _detect_margin_boundaries(
             "█" if b >= density_threshold else ("▄" if b > 0 else "░")
             for b in bins
         )
+        region_info = ", ".join(
+            f"({r[0]}-{r[1]}:w={r[2]:.0f})" for r in regions
+        ) if regions else "none"
+
         logger.debug(
             "[%s] Margin detection: left=%.0f, right=%.0f, bins=[%s], "
-            "threshold=%.1f, spans=%d",
-            trace_id, body_left, body_right, bin_viz, density_threshold, span_count
+            "threshold=%.1f, spans=%d, regions=[%s]",
+            trace_id, body_left, body_right, bin_viz,
+            density_threshold, span_count, region_info
         )
 
     return body_left, body_right
@@ -2133,6 +2636,17 @@ def _detect_margin_boundaries(
 
 # ✦────── a. Ingestion & Cleaning ──────✦
 
+def _row_key(span_obj):
+    """
+    Normalize y-position into a stable visual row bucket.
+    Font-scaled tolerance absorbs scan jitter and baseline drift.
+    """
+    bbox = span_obj.get("bbox") or [0, 0, 0, 0]
+    y0 = float(bbox[1])
+    fs = float(span_obj.get("size", 0) or 10.0)
+
+    return round(y0 / max(1.0, fs * 0.25), 0)
+
 
 def _flatten_to_raw_spans(
         text_page: Dict,
@@ -2142,103 +2656,353 @@ def _flatten_to_raw_spans(
     """
     Flatten PyMuPDF block/line/span hierarchy into a linear list of span dicts.
 
-    This is the ingestion boundary — all bbox values are normalized to tuple
-    format (x0, y0, x1, y1) per architectural standard.
-
-    Args:
-        text_page: PyMuPDF text dict from page.get_text("dict").
-        page_num: Zero-indexed page number.
-        trace_id: Optional trace ID for logging.
-
-    Returns:
-        List of span dictionaries with standardized structure.
-
-    Note:
-        Malformed blocks/lines/spans are logged and skipped (fail-fast but resilient).
+    Phase 1.5:  Deterministic order stabilization (row_key → x1 → x0 → index)
+    Phase 1.75: Horizontal adjacency signaling (metadata-only, lossless)
+    A2-V:       Vertical continuation detection within block
     """
+
     raw_spans: List[Dict] = []
     skipped_count = 0
 
+    # REVISION A2-M/V: Continuation link counters
+    horizontal_link_count = 0
+    vertical_link_count = 0
+
     blocks = text_page.get("blocks", [])
 
+    # HARDENED: Enforce top-to-bottom, left-to-right block order
+    blocks = sorted(
+        blocks,
+        key=lambda b: (
+            b.get("bbox", [0, 0, 0, 0])[1],  # y0
+            b.get("bbox", [0, 0, 0, 0])[0],  # x0
+        )
+    )
+
     for block_idx, block in enumerate(blocks):
-        # Skip non-text blocks (images, drawings)
         if block.get("type") != _PYMUPDF_TEXT_BLOCK_TYPE:
             continue
+
+        prev_span = None
 
         lines = block.get("lines")
         if not lines:
             continue
 
         for line_idx, line in enumerate(lines):
+            # REVISION A2-V: Capture prior line tail before reset
+            # Enables vertical continuation detection without cross-column risk
+            carry_tail = prev_span
+
+            # CRITICAL (retained): Horizontal micro-stitching remains line-local
+            prev_span = None
+
             spans = line.get("spans")
             if not spans:
                 continue
 
+            # =========================================================
+            # PHASE 1.5: Order Stabilization (Diagnostic-Verified)
+            # PyMuPDF x0 is unreliable for spans split by inline formatting.
+            # x1 (end position) is always accurate from glyph placement.
+            # Sort by: y0 (row) → x1 (end) → x0 → original index
+            # =========================================================
+            spans_indexed = list(enumerate(spans))
+
+            spans_indexed.sort(key=lambda s: (
+                _row_key(s[1]),  # 1) visual row (stable)
+                float(s[1].get("bbox", [0, 0, 0, 0])[2] or 0.0),  # 2) x1 (glyph end, reliable)
+                float(s[1].get("bbox", [0, 0, 0, 0])[0] or 0.0),  # 3) x0 (tie-break)
+                s[0],  # 4) original index (determinism)
+            ))
+
+            spans = [s[1] for s in spans_indexed]
+
+            # Cache row_key per span for consistency and micro-perf
+            for s in spans:
+                s["_row_key"] = _row_key(s)
+
+            line_text_canonical = "".join(s.get("text", "") for s in spans)
+
+            # =========================================================
+            # PHASE 1.75: Horizontal Adjacency Signaling (Lossless)
+            # Captured separately to avoid mutating raw PyMuPDF spans
+            # =========================================================
+            horizontal_links = {}
+
+            for i in range(len(spans) - 1):
+                curr = spans[i]
+                nxt = spans[i + 1]
+
+                if curr["_row_key"] != nxt["_row_key"]:
+                    continue
+
+                curr_text = (curr.get("text") or "").rstrip()
+                next_text = (nxt.get("text") or "").lstrip()
+
+                if not curr_text or not next_text:
+                    continue
+
+                if curr_text.endswith((".", "?", "!")):
+                    continue
+
+                if curr_text.endswith("-"):
+                    horizontal_links[i] = ("hyphen_wrap", "a2_horizontal_hyphen")
+                else:
+                    horizontal_links[i] = ("space_join", "a2_horizontal_same_row")
+
+                horizontal_link_count += 1
+
+            # =========================================================
+            # PHASE 1.5B (DIAGNOSTIC): Flag suspicious bbox geometry
+            # =========================================================
+            if trace_id:
+                for _s in spans:
+                    _bbox = _s.get("bbox") or []
+                    _txt = _s.get("text", "") or ""
+                    if len(_bbox) >= 4 and _txt:
+                        _w = float(_bbox[2]) - float(_bbox[0])
+                        _fs = float(_s.get("size", 0) or 0)
+                        if _fs > 0 and len(_txt) < 60 and _w > (_fs * 20):
+                            logger.debug(
+                                "[%s] Phase1.5B: suspicious span bbox w=%.1f fs=%.1f chars=%d x0=%.1f x1=%.1f text=%r",
+                                trace_id, _w, _fs, len(_txt),
+                                float(_bbox[0]), float(_bbox[2]), _txt
+                            )
+
             for span_idx, span in enumerate(spans):
                 try:
-                    # Extract and validate bbox
+                    # PHASE 0: Lossless bbox validation (never drop text)
                     bbox_raw = span.get("bbox")
-                    if not bbox_raw or len(bbox_raw) < 4:
-                        skipped_count += 1
-                        continue
+                    bbox_is_valid = bool(bbox_raw and len(bbox_raw) >= 4)
 
-                    x0, y0, x1, y1 = bbox_raw[0], bbox_raw[1], bbox_raw[2], bbox_raw[3]
+                    bbox = None
+                    bbox_invalid_reason = None
+                    x0, y0, x1, y1 = 0.0, 0.0, 0.0, 0.0  # Safe defaults for invalid bbox
 
-                    # Validate dimensions
-                    if x1 <= x0 or y1 <= y0:
-                        skipped_count += 1
-                        continue
+                    if not bbox_is_valid:
+                        bbox_invalid_reason = "missing_or_short_bbox"
+                    else:
+                        x0, y0, x1, y1 = bbox_raw[:4]
+                        if x1 <= x0 or y1 <= y0:
+                            bbox_invalid_reason = "degenerate_bbox"
+                        else:
+                            bbox = (float(x0), float(y0), float(x1), float(y1))
 
-                    # Standardized bbox tuple (architectural contract)
-                    bbox: BboxTuple = (float(x0), float(y0), float(x1), float(y1))
+                    if bbox_invalid_reason:
+                        skipped_count += 1  # keep metric, but DO NOT continue
 
-                    # Extract baseline/origin
+                    # Compute origin/baseline using validated coordinates (or safe defaults)
                     origin = span.get("origin", (x0, y1))
                     baseline_y = float(origin[1])
-                    line_y_band = round(baseline_y, 1)
-
-                    # Extract text
+                    line_y_band = round(baseline_y, 2)
                     raw_text = span.get("text", "")
 
-                    raw_spans.append({
+                    # =========================================================
+                    # REVISION A2-V: Vertical Continuation Detection
+                    # First span of line only — links to prior line tail if safe
+                    # =========================================================
+                    if span_idx == 0 and carry_tail is not None and raw_text:
+                        prev_text = (carry_tail.get("raw_text") or "").rstrip()
+                        curr_text = raw_text.lstrip()
+
+                        # Guard 1: Must share native block identity
+                        carry_block_id = carry_tail.get("block_id")
+                        curr_block_id = block.get("number", block_idx)
+                        same_block = (
+                                carry_block_id is not None and
+                                carry_block_id == curr_block_id
+                        )
+
+                        # Guard 2: Previous span must not end with hard sentence boundary
+                        prev_tail_stripped = prev_text.rstrip(" '\"”’)]}")
+                        prev_hard_end = prev_tail_stripped.endswith((".", "?", "!"))
+
+                        # Guard 3: Context-aware uppercase handling (RELAXED for scientific text)
+                        # Allow uppercase continuation if previous line is clearly unfinished
+                        curr_starts_upper = len(curr_text) > 0 and curr_text[0].isupper()
+                        prev_clearly_unfinished = prev_tail_stripped.endswith(
+                            (",", ";", ":", "-", "—", "(", "[", "{")
+                        )
+                        # Block uppercase only if it genuinely looks like a new sentence
+                        curr_looks_new_sentence = (
+                                curr_starts_upper and
+                                not prev_clearly_unfinished and
+                                not prev_text.endswith("-")  # Hyphen wrap is always safe
+                        )
+
+                        # Guard 4: Geometry sanity (vertical gap + indent within tolerance)
+                        allow_geom = False
+                        prev_bbox = carry_tail.get("bbox")
+
+                        # PHASE 0/1: Geometry checks only valid if current bbox exists
+                        if bbox is not None and prev_bbox is not None and len(prev_bbox) >= 4:
+                            v_gap = bbox[1] - prev_bbox[3]  # curr_y0 - prev_y1
+                            indent_dx = abs(bbox[0] - prev_bbox[0])  # x-offset
+                            fs = float(carry_tail.get("font_size") or 10.0)
+
+                            max_v_gap = max(2.0, fs * 1.8)
+                            max_indent = max(12.0, fs * 3.5)
+
+                            allow_geom = (v_gap <= max_v_gap) and (indent_dx <= max_indent)
+
+                        # Set metadata if all guards pass (NO geometry mutation)
+                        if same_block and allow_geom and not prev_hard_end and not curr_looks_new_sentence:
+                            carry_tail["a2_continues_to_next"] = True
+
+                            if prev_text.endswith("-"):
+                                carry_tail["a2_continuation_mode"] = "hyphen_wrap"
+                                carry_tail["a2_continuation_reason"] = "a2_vertical_hyphen"
+                            else:
+                                carry_tail["a2_continuation_mode"] = "space_join"
+                                carry_tail["a2_continuation_reason"] = "a2_vertical_same_block"
+
+                            vertical_link_count += 1
+
+                        # CRITICAL: Clear carry_tail after processing to prevent unbounded chaining
+                        # Each vertical link applies to exactly one line transition
+                        carry_tail = None
+
+                    # 2. Append new span if not merged
+                    new_span_entry = {
                         "raw_text": raw_text,
                         "cleaned_text": None,
-                        "bbox": bbox,  # TUPLE: (x0, y0, x1, y1)
+                        "bbox": bbox,
+                        "bbox_is_valid": (bbox is not None),
+                        "bbox_invalid_reason": bbox_invalid_reason,
                         "font_size": float(span.get("size", 0)),
+                        "line_text": line_text_canonical,
                         "font": span.get("font", ""),
                         "flags": span.get("flags", 0),
                         "color": span.get("color", 0),
                         "origin": origin,
                         "baseline_y": baseline_y,
                         "line_y_band": line_y_band,
+
                         "page_number": page_num + 1,
+                        "row_key": _row_key(span),
+                        "is_line_end": (span_idx == len(spans) - 1),
+                        "span_count_in_line": len(spans),
                         "column_index": 0,
                         "paragraph_index": 0,
                         "is_paragraph_start": False,
-                        "role": TextRole.BODY.value,  # Enum value for compatibility
+                        "role": TextRole.BODY.value,
                         "char_offset": 0,
-                        "block_id": None,
+                        "block_id": block.get("number", block_idx),
+
+                        # PHASE 0: Preserve native line identity & bbox (enables Phase 1/2/4 determinism)
+                        "line_index": line_idx,
+                        "line_id": f"{page_num + 1}:{block.get('number', block_idx)}:{line_idx}",
+                        "line_bbox": tuple(line.get("bbox", [0, 0, 0, 0])),
+                        "block_bbox": tuple(block.get("bbox", [0, 0, 0, 0])),
+                        "span_index_in_line": span_idx,
+
+                        # PHASE 0: per-span provenance (audit / debug)
+                        "source_block_type": block.get("type"),
+                        "source_block_number": block.get("number", block_idx),
+
+                        # REVISION A2-M: Continuation metadata (Phase B consumes)
+                        "a2_continues_to_next": span_idx in horizontal_links,
+                        "a2_continuation_mode": horizontal_links.get(span_idx, (None, None))[0],
+                        "a2_continuation_reason": horizontal_links.get(span_idx, (None, None))[1],
                         "is_subscript": False,
                         "figure_index": None,
-                    })
+                    }
 
-                except (KeyError, TypeError, IndexError) as e:
+                    raw_spans.append(new_span_entry)
+                    prev_span = new_span_entry
+
+                except (KeyError, TypeError, IndexError):
                     skipped_count += 1
-                    if trace_id:
-                        logger.warning(
-                            "[%s] Skipped malformed span at block=%d, line=%d, span=%d: %s",
-                            trace_id, block_idx, line_idx, span_idx, e
-                        )
+                    # HARDENED: Fallback for malformed spans
+                    raw_spans.append({
+                        "raw_text": span.get("text", ""),
+                        "cleaned_text": None,
+                        "bbox": None,
+                        "flags": ["span_exception"],
+                        "page_number": page_num + 1,
+                        "role": "body",  # Use string literal to avoid import dependency issues
+                    })
+                    prev_span = None
                     continue
 
-    if trace_id and skipped_count > 0:
-        logger.warning(
-            "[%s] Ingestion: skipped %d malformed spans",
-            trace_id, skipped_count
+    if trace_id and (horizontal_link_count > 0 or vertical_link_count > 0):
+        logger.info(
+            "[%s] Ingestion: emitted %d horizontal + %d vertical continuation links (a2_*)",
+            trace_id, horizontal_link_count, vertical_link_count
         )
 
     return raw_spans
+
+def _build_lines_from_spans(
+        spans: List[Dict],
+        trace_id: str = None
+) -> Dict[str, Dict]:
+    """
+    PHASE 1: Build Line abstractions from flat span list.
+
+    Groups spans by line_id and creates canonical line representations.
+    Enables line-coherent semantic operations without altering geometry.
+
+    Returns:
+        Dict mapping line_id -> Line dict with:
+            - line_id, page_number, block_id, line_index
+            - line_bbox, y_band
+            - spans: List[Dict] ordered by span_index_in_line (then x0 fallback)
+            - text_raw: str (lossless concatenation)
+            - font_sizes: List[float]
+            - fonts: List[str]
+            - span_count: int
+    """
+    lines: Dict[str, Dict] = {}
+
+    for span in spans:
+        line_id = span.get("line_id")
+        if not line_id:
+            continue
+
+        if line_id not in lines:
+            lines[line_id] = {
+                "line_id": line_id,
+                "page_number": span.get("page_number"),
+                "block_id": span.get("block_id"),
+                "line_index": span.get("line_index"),
+                "line_bbox": span.get("line_bbox"),
+                "y_band": span.get("line_y_band"),
+                "spans": [],
+                "font_sizes": set(),
+                "fonts": set(),
+            }
+
+        line = lines[line_id]
+        line["spans"].append(span)
+
+        if span.get("font_size"):
+            line["font_sizes"].add(span["font_size"])
+        if span.get("font"):
+            line["fonts"].add(span["font"])
+
+    # Order spans within each line and build lossless text
+    for line in lines.values():
+        line["spans"].sort(key=lambda s: (
+            s.get("span_index_in_line", 0),
+            (s.get("bbox") or [0, 0, 0, 0])[0],  # x0 fallback only
+            (s.get("bbox") or [0, 0, 0, 0])[1],  # y0 tie-breaker
+        ))
+
+        line["text_raw"] = "".join(s.get("raw_text", "") for s in line["spans"])
+
+        line["span_count"] = len(line["spans"])
+        line["font_sizes"] = sorted(line["font_sizes"])
+        line["fonts"] = sorted(line["fonts"])
+
+    if trace_id:
+        logger.debug(
+            "[%s] Built %d line abstractions from %d spans",
+            trace_id, len(lines), len(spans)
+        )
+
+    return lines
 
 
 def _filter_spans(
@@ -2282,6 +3046,7 @@ def _filter_spans(
     Mutates:
         Excluded spans receive 'exclusion_reason' key.
     """
+
     if not spans:
         return [], []
 
@@ -2311,7 +3076,6 @@ def _filter_spans(
 
     # Drop Cap thresholds (pre-calculated, loop-invariant)
     drop_cap_font_threshold = _PARA_DEFAULT_LINE_HEIGHT * 1.5
-    drop_cap_zone_threshold = effective_page_height * _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT
 
     # =========================================================================
     # MAIN FILTER LOOP
@@ -2339,11 +3103,15 @@ def _filter_spans(
 
         # Get text
         text = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
+        text_norm = text.strip(".,;:")
 
         if not text:
             span["exclusion_reason"] = _REASON_EMPTY
             excluded.append(span)
             continue
+
+        # Standardized Y-band rounding
+        y_band = round(span_y / y_band_precision) * y_band_precision
 
         # =====================================================================
         # WHITELIST CHECK — Greek/scientific symbols bypass ALL filters
@@ -2351,11 +3119,9 @@ def _filter_spans(
         # =====================================================================
         text_lower = text.lower()
         if text_lower in GREEK_WHITELIST or text in GREEK_WHITELIST:
-            valid.append(span)
-            continue
-
-        # Standardized Y-band rounding
-        y_band = round(span_y / y_band_precision) * y_band_precision
+            if y_band not in header_bands and y_band not in footer_bands:
+                valid.append(span)
+                continue
 
         keep = True
         reason = ""
@@ -2364,57 +3130,75 @@ def _filter_spans(
         # FILTER 1: Header/Footer Bands (Global Detection)
         # ---------------------------------------------------------------------
         if y_band in header_bands:
-            text_stripped = text.strip()
-            is_drop_cap = len(
-                text_stripped) == 1 and text_stripped.isalpha() and text_stripped.isupper()
+            # HARDENED: Preserve sentence continuations (lowercase start)
+            if text and text[0].islower():
+                keep = True
+            else:
+                text_stripped = text.strip()
+                is_drop_cap = (
+                        len(text_stripped) == 1 and
+                        text_stripped.isalpha() and
+                        text_stripped.isupper()
+                )
 
-            if not is_drop_cap:
-                keep = False
-                reason = _REASON_HEADER_BAND
+                if not is_drop_cap:
+                    keep = False
+                    reason = _REASON_HEADER_BAND
 
         elif y_band in footer_bands:
-            text_stripped = text.strip()
-            is_drop_cap = len(
-                text_stripped) == 1 and text_stripped.isalpha() and text_stripped.isupper()
+            # HARDENED: Preserve sentence continuations (lowercase start)
+            if text and text[0].islower():
+                keep = True
+            else:
+                text_stripped = text.strip()
+                is_drop_cap = (
+                        len(text_stripped) == 1 and
+                        text_stripped.isalpha() and
+                        text_stripped.isupper()
+                )
 
-            if not is_drop_cap:
-                keep = False
-                reason = _REASON_FOOTER_BAND
+                if not is_drop_cap:
+                    keep = False
+                    reason = _REASON_FOOTER_BAND
+
 
         # ---------------------------------------------------------------------
         # FILTER 2: Header Zone Artifacts
         # FIX v3.3: Corrected threshold + unified large-font protection
         # ---------------------------------------------------------------------
         elif span_y < header_artifact_zone_y:
-            # Single alpha characters deferred to Filter 5 (Drop Cap / Initial logic)
-            text_stripped = text.strip()
-            if len(text_stripped) == 1 and text_stripped.isalpha():
-                pass  # Defer to Filter 5
-            else:
-                is_short = len(text) < _FILTER_SHORT_TEXT_LENGTH
-                is_uppercase = text.isupper()
-                is_fragment = len(text) < _FILTER_FRAGMENT_THRESHOLD
+            # HARDENED: No deletion here. Mark as suspected artifact only.
+            # IMPORTANT: Do NOT touch PyMuPDF font flags (int).
+            span.setdefault("processing_tags", []).append(
+                "suspected_header_artifact_zone"
+            )
 
-                # Large font = significant content (Drop Caps, titles, callouts)
+            # NOTE:
+            # 'suspected_header_artifact_zone' is a NON-DESTRUCTIVE diagnostic flag.
+            # It must NEVER be used as a sole deletion criterion.
+            # It may only be considered in conjunction with:
+            #   - global header/footer band membership, OR
+            #   - high text similarity to confirmed header samples.
+
+        # ---------------------------------------------------------------------
+        # EARLY GUARD: Header-Zone Single-Letter Kill Switch
+        # ---------------------------------------------------------------------
+        if keep:
+            text_clean = text.strip()
+
+            # Single uppercase letters in the header artifact zone
+            # are ONLY valid if they are Drop Caps (large font).
+            if (
+                    len(text_clean) == 1 and
+                    text_clean.isalpha() and
+                    text_clean.isupper() and
+                    span_y < header_artifact_zone_y
+            ):
                 is_large_font = span.get("font_size", 0) >= drop_cap_font_threshold
 
-                is_protected = (
-                        text in PROTECTED_SHORT_WORDS or
-                        _is_protected_acronym(text) or
-                        is_large_font
-                )
-
-                if not is_protected:
-                    if (is_short and is_uppercase) or (is_fragment and not text.isalpha()):
-                        has_no_vowels = not any(c in text.upper() for c in _FILTER_VOWELS)
-                        is_likely_artifact = has_no_vowels or len(
-                            text) <= _FILTER_VERY_SHORT_THRESHOLD
-
-                        if is_likely_artifact or is_uppercase:
-                            keep = False
-                            reason = _REASON_HEADER_ARTIFACT
-
-
+                if not is_large_font:
+                    keep = False
+                    reason = _REASON_HEADER_ARTIFACT
 
         # ---------------------------------------------------------------------
         # FILTER 3a: Geometric Visual Region Guard (Figures ONLY)
@@ -2438,9 +3222,11 @@ def _filter_spans(
         # ---------------------------------------------------------------------
         # FILTER 3: Diagram Labels
         # ---------------------------------------------------------------------
-        elif ENABLE_DIAGRAM_LABEL_FILTER and keep and _is_diagram_label(span, figure_tuples):
-            keep = False
-            reason = _REASON_DIAGRAM_LABEL
+        # HARDENED: Run label check even if figures exist (catch labels outside the box)
+        if keep and ENABLE_DIAGRAM_LABEL_FILTER:
+            if _is_diagram_label(span, figure_tuples):
+                keep = False
+                reason = _REASON_DIAGRAM_LABEL
 
         # ---------------------------------------------------------------------
         # FILTER 4: Bare Captions
@@ -2464,10 +3250,18 @@ def _filter_spans(
                 is_uppercase_letter = text_clean.isalpha() and text_clean.isupper()
 
                 if is_uppercase_letter:
-                    # UNCONDITIONAL PROTECTION:
-                    # Single uppercase letters (F, W, A.) are rarely noise.
-                    if trace_id:
-                        logger.debug("[%s] Single uppercase protected: '%s'", trace_id, text_clean)
+                    # CONTEXTUAL PROTECTION (Lead-approved):
+                    # Reject header-zone glyph junk unless it is a Drop Cap
+                    is_in_artifact_zone = span_y < header_artifact_zone_y
+                    is_large_font = span.get("font_size", 0) >= drop_cap_font_threshold
+
+                    if is_in_artifact_zone and not is_large_font:
+                        keep = False
+                        reason = _REASON_HEADER_ARTIFACT
+                    else:
+                        # Preserve valid body single-letter words ("I", "A")
+                        # and legitimate Drop Caps
+                        keep = True
                 else:
                     keep = False
                     reason = _REASON_NOISE_SINGLE_CHAR
@@ -2496,11 +3290,18 @@ def _filter_spans(
         # ---------------------------------------------------------------------
         # FILTER 8: Noise — Very Short Non-Word Fragments
         # ---------------------------------------------------------------------
-        if keep and len(text) <= _FILTER_SHORT_FRAGMENT_THRESHOLD:
-            is_letter = text.isalpha()
-            is_protected = text in PROTECTED_SHORT_WORDS
+        if keep and len(text) <= _FILTER_SHORT_FRAGMENT_THRESHOLD and not span.get(
+                "filter_protected"):
 
-            if not (is_letter or is_protected):
+            is_letter = text_norm.isalpha()
+            is_protected = text_norm in PROTECTED_SHORT_WORDS
+
+            # Preserve linguistic connectors even with punctuation
+            is_connector = text_norm.lower() in {
+                "and", "or", "to", "of", "but", "nor", "for", "so", "yet"
+            }
+
+            if not (is_letter or is_protected or is_connector):
                 keep = False
                 reason = _REASON_NOISE_FRAGMENT
 
@@ -2537,26 +3338,41 @@ def _filter_spans(
 
 def _clean_spans(spans: List[Dict], trace_id: str = None) -> None:
     """
-    In-place text cleaning for extracted spans.
+    In-place structural text normalization.
 
-    UPDATED v1.8.1:
-        1. Added noise substring removal (Fix B)
-        2. Added noise pattern removal
-        3. Preserved Greek letter handling (constants fix)
+    ARCHITECTURAL GUARDRAIL:
+    This method is the SOLE owner of structural normalization
+    (Unicode normalization, control/zero-width character removal,
+    and whitespace normalization).
+
+    It must NOT perform:
+      - Semantic deletion (e.g. removing "noise" words)
+      - Sentence-level repair or healing
+      - Pronunciation or TTS-specific adjustments
+
+    Operations performed:
+        1. Unicode NFKC normalization
+        2. Control / zero-width character removal
+        3. Whitespace normalization (collapsing to single spaces)
     """
     if not spans:
         return
 
     cleaned_count = 0
     erased_count = 0
-    noise_removed_count = 0
 
     for span in spans:
         if not isinstance(span, dict):
             continue
 
-        text = span.get("raw_text", "")
-        original_text = text
+        original_text = span.get("raw_text", "")
+        text = original_text
+
+        if not isinstance(text, str):
+            span["cleaned_text"] = ""
+            continue
+
+        # original_text is the raw span content, used only for comparison/logging
 
         if not text:
             span["cleaned_text"] = ""
@@ -2589,53 +3405,37 @@ def _clean_spans(spans: List[Dict], trace_id: str = None) -> None:
         # =====================================================================
         text = text.translate(_CLEAN_TRANS_TABLE)
 
-        # =====================================================================
-        # STEP 6: Noise Substring Removal (v1.8.1)
-        # =====================================================================
-        text_before_noise = text
 
-        # Remove known noise substrings (case-insensitive)
-        for noise in _NOISE_SUBSTRINGS:
-            if noise.lower() in text.lower():
-                pattern = re.compile(rf"(^|\s){re.escape(noise)}(\s|$)", re.IGNORECASE)
-                text = pattern.sub(" ", text)
-
-        # Remove noise patterns (regex)
-        for pattern in _NOISE_PATTERNS:
-            text = pattern.sub("", text)
-
-        if text != text_before_noise:
-            noise_removed_count += 1
-            if trace_id:
-                logger.debug(
-                    "[%s] Noise removed from span: '%s' -> '%s'",
-                    trace_id, text_before_noise[:50], text[:50]
-                )
 
         # =====================================================================
-        # STEP 7: Whitespace Normalization (Final)
+        # STEP 6: Whitespace Normalization (Final)
+        # NOTE: .strip() removes leading indentation and trailing whitespace.
         # =====================================================================
         text = _WHITESPACE_PATTERN.sub(" ", text).strip()
 
         # =====================================================================
         # STORE RESULT
         # =====================================================================
-        span["cleaned_text"] = text
+        if not text and original_text.strip():
+            # GUARDRAIL: Never erase meaningful content at this stage.
+            # If structural cleaning would erase all text, revert to the
+            # minimally normalized original (strip-only) instead.
+            span["cleaned_text"] = original_text.strip()
+            erased_count += 1
+            if trace_id:
+                logger.warning(
+                    "[%s] Cleaner attempted full erasure; reverting to original text: '%s'",
+                    trace_id, original_text
+                )
+        else:
+            span["cleaned_text"] = text
+            if text != original_text:
+                cleaned_count += 1
 
-        if text != original_text:
-            cleaned_count += 1
-            if not text and original_text.strip():
-                erased_count += 1
-                if trace_id:
-                    logger.warning(
-                        "[%s] Span erased completely by cleaner: '%s' -> ''",
-                        trace_id, original_text
-                    )
-
-    if trace_id and (cleaned_count > 0 or noise_removed_count > 0):
+    if trace_id and (cleaned_count > 0 or erased_count > 0):
         logger.debug(
-            "[%s] Cleaned %d/%d spans (%d erased, %d noise removed)",
-            trace_id, cleaned_count, len(spans), erased_count, noise_removed_count
+            "[%s] Cleaned %d/%d spans (%d reverted to original)",
+            trace_id, cleaned_count, len(spans), erased_count
         )
 
 
@@ -2712,7 +3512,10 @@ def _is_orphan_fragment(text: str) -> bool:
             clean.isalpha() and
             clean.isupper()
     ):
-        if not any(c in clean.upper() for c in _FILTER_VOWELS):
+        # HARDENED: Treat 'Y' as a vowel for short all-caps words to avoid
+        # false positives like MY/BY/WHY/TRY/SHY.
+        vowels = set(_FILTER_VOWELS) | {"Y"}
+        if not any(c in vowels for c in clean.upper()):
             return True
 
     # HEURISTIC 3: Isolated lowercase starting with mid-word pattern
@@ -2755,18 +3558,41 @@ def _detect_subscripts(spans: List[Dict], trace_id: str = None) -> None:
 
     for band, band_spans in line_bands.items():
         # Collect valid baselines
-        baselines = [
-            s.get("baseline_y")
-            for s in band_spans
-            if s.get("baseline_y") is not None
-        ]
+        baselines = []
+        if band_spans:
+            # Anchor to the first span in the visual line
+            anchor = band_spans[0]
+            anchor_y0, anchor_y1 = anchor["bbox"][1], anchor["bbox"][3]
+
+            for s in band_spans:
+                if s.get("baseline_y") is None or "bbox" not in s:
+                    continue
+
+                # Check vertical overlap with anchor to prevent cross-line pollution
+                s_y0, s_y1 = s["bbox"][1], s["bbox"][3]
+
+                inter_y0 = max(s_y0, anchor_y0)
+                inter_y1 = min(s_y1, anchor_y1)
+                overlap = max(0.0, inter_y1 - inter_y0)
+                shortest_h = min(s_y1 - s_y0, anchor_y1 - anchor_y0)
+
+                # Require >50% vertical overlap to contribute to the baseline pool
+                if shortest_h > 0 and (overlap / shortest_h) > 0.50:
+                    baselines.append(s["baseline_y"])
 
         if not baselines:
             continue
 
-        # Compute median baseline
-        sorted_baselines = sorted(baselines)
-        median_baseline = sorted_baselines[len(sorted_baselines) // 2]
+        # Compute dominant baseline (Weighted by frequency to ignore outliers)
+        baseline_counts = {}
+        for b in baselines:
+            b_rounded = round(b, 1)
+            baseline_counts[b_rounded] = baseline_counts.get(b_rounded, 0) + 1
+
+        # The most frequent baseline is the "anchor"
+        dominant_rounded = max(baseline_counts, key=baseline_counts.get)
+        # Find the exact value closest to this rounded anchor
+        median_baseline = next(b for b in baselines if round(b, 1) == dominant_rounded)
 
         for span in band_spans:
             baseline = span.get("baseline_y")
@@ -2784,6 +3610,8 @@ def _detect_subscripts(spans: List[Dict], trace_id: str = None) -> None:
             threshold = font_size * _SUBSCRIPT_OFFSET_RATIO
 
             if delta > threshold:
+                # NOTE: is_subscript is a glyph-position marker only.
+                # It must NOT be interpreted as a sentence or block boundary.
                 span["is_subscript"] = True
                 if trace_id:
                     logger.debug(
@@ -2836,14 +3664,9 @@ def _format_cell(
     if cell is not None:
         try:
             if hasattr(cell, "bbox") and cell.bbox is not None:
-                raw_bbox = cell.bbox
-                if len(raw_bbox) >= 4:
-                    cell_bbox = (
-                        float(raw_bbox[0]),
-                        float(raw_bbox[1]),
-                        float(raw_bbox[2]),
-                        float(raw_bbox[3])
-                    )
+                # HARDENING: Normalize via _to_bbox_tuple to ensure validity (x1 > x0)
+                cell_bbox = _to_bbox_tuple(cell.bbox)
+
         except Exception as e:
             cell_bbox = None
             if trace_id:
@@ -2931,9 +3754,13 @@ def _detect_page_regions(
                         _REGION_FIGURE_EXPAND_PADDING,
                         _REGION_FIGURE_EXPAND_PADDING
                     )
-                    candidate_figures.append(
-                        (expanded.x0, expanded.y0, expanded.x1, expanded.y1)
-                    )
+                    x0 = max(0.0, expanded.x0)
+                    y0 = max(0.0, expanded.y0)
+                    x1 = min(page.rect.width, expanded.x1)
+                    y1 = min(page.rect.height, expanded.y1)
+
+                    if x1 > x0 and y1 > y0:
+                        candidate_figures.append((x0, y0, x1, y1))
     except Exception as e:
         if trace_id:
             logger.debug("[%s] Image detection failed: %s", trace_id, e)
@@ -2977,39 +3804,104 @@ def _detect_page_regions(
         total_text_length = 0
         fig_x0, fig_y0, fig_x1, fig_y1 = fig_rect
 
+        # FIX: Initialize containers for density check
+        contained_y_coords = []
+        contained_font_sizes = []
+
         for span in raw_spans:
             span_bbox = span.get("bbox")
             if span_bbox is None or len(span_bbox) < 4:
                 continue
             span_x0, span_y0, span_x1, span_y1 = span_bbox
-            span_cx = (span_x0 + span_x1) / 2
-            span_cy = (span_y0 + span_y1) / 2
 
-            if fig_x0 <= span_cx <= fig_x1 and fig_y0 <= span_cy <= fig_y1:
-                span_text = span.get("raw_text", "")
-                total_text_length += len(span_text)
-                word_count = len(span_text.split())
-                has_sentence_punct = any(
-                    c in span_text for c in _REGION_SENTENCE_PUNCTUATION
-                )
-                if (word_count >= _REGION_PROSE_MIN_WORD_COUNT or
-                        (len(span_text) > _REGION_PROSE_MIN_TEXT_LENGTH and has_sentence_punct)):
-                    prose_span_count += 1
+            # Intersection Logic
+            inter_x0 = max(span_x0, fig_x0)
+            inter_y0 = max(span_y0, fig_y0)
+            inter_x1 = min(span_x1, fig_x1)
+            inter_y1 = min(span_y1, fig_y1)
 
+            if inter_x1 > inter_x0 and inter_y1 > inter_y0:
+                inter_area = (inter_x1 - inter_x0) * (inter_y1 - inter_y0)
+                span_area = max(1e-6, (span_x1 - span_x0) * (span_y1 - span_y0))
+                overlap_ratio = inter_area / span_area
+
+                # Require meaningful containment (>50%), not a 1px graze
+                if overlap_ratio >= 0.50:
+                    # FIX: Collect data for density check
+                    contained_y_coords.append(span_y0)
+                    fs = span.get("font_size", 0)
+                    if fs > 0:
+                        contained_font_sizes.append(fs)
+
+                    span_text = span.get("raw_text", "")
+                    total_text_length += len(span_text)
+                    word_count = len(span_text.split())
+
+                    has_sentence_punct = any(
+                        c in span_text for c in _REGION_SENTENCE_PUNCTUATION
+                    )
+
+                    if (word_count >= _REGION_PROSE_MIN_WORD_COUNT or
+                            (
+                                    len(span_text) > _REGION_PROSE_MIN_TEXT_LENGTH and has_sentence_punct)):
+                        prose_span_count += 1
+
+        # HARDENED v4.0: Density Check
+        # Distinguish between "Text Box" (reject) and "Dense Diagram" (keep).
+        should_reject = False
+
+        # 1. Trigger rejection on raw counts (existing logic)
         if (prose_span_count >= _REGION_FIGURE_MAX_PROSE_SPANS or
                 total_text_length > _REGION_FIGURE_MAX_TEXT_LENGTH):
+            should_reject = True
+
+            # 2. OVERRIDE: If it's a dense diagram, keep it!
+            if len(contained_y_coords) > 5:
+                # FIX: Deduplicate Ys to handle horizontal labels (prevent div-by-zero or low gap)
+                unique_y = sorted(list(set(contained_y_coords)))
+
+                if len(unique_y) > 1:
+                    gaps = [unique_y[i] - unique_y[i - 1] for i in range(1, len(unique_y))]
+                    avg_gap = sum(gaps) / len(gaps)
+
+                    # FIX: Use actual font size of content
+                    if contained_font_sizes:
+                        contained_font_sizes.sort()
+                        est_fs = contained_font_sizes[len(contained_font_sizes) // 2]
+                    else:
+                        est_fs = 10.0
+
+                    # If average gap is loose (> 2.0x font size), it's a diagram.
+                    if avg_gap > (est_fs * 2.0):
+                        should_reject = False
+
+        region_w = fig_rect[2] - fig_rect[0]
+        region_h = fig_rect[3] - fig_rect[1]
+        page_w = page.rect.width
+        page_h = page.rect.height
+        page_area = page_w * page_h
+
+        # HARDENED: Background Layer Protection (with full-page-diagram escape hatch)
+        # Reject near-full-page regions ONLY if they also closely touch all margins,
+        # which is a strong watermark/background signature.
+        if (region_w * region_h) > (page_area * 0.90):
+            touches_left = fig_rect[0] <= (page_w * 0.02)
+            touches_right = fig_rect[2] >= (page_w * 0.98)
+            touches_top = fig_rect[1] <= (page_h * 0.02)
+            touches_bottom = fig_rect[3] >= (page_h * 0.98)
+            if touches_left and touches_right and touches_top and touches_bottom:
+                continue
+
+        if should_reject:
             if trace_id:
                 logger.debug(
                     "[%s] Rejecting false-positive figure at (%.0f,%.0f): "
                     "%d prose spans, %d chars",
                     trace_id, fig_x0, fig_y0, prose_span_count, total_text_length
                 )
-            # REVERTED v3.7: Do not append.
-            # Rejecting this "figure" allows the text inside (likely body prose)
-            # to be processed normally. This saves Page 1 content from being
-            # swallowed by page borders.
         else:
-            regions["figures"].append(fig_rect)
+            if fig_rect not in regions["figures"]:
+                regions["figures"].append(fig_rect)
 
     # =========================================================================
     # 2. TABLE DETECTION
@@ -3100,12 +3992,6 @@ def _detect_page_regions(
         y_rounded = int(round(span_y / _REGION_Y_BAND_ROUNDING) * _REGION_Y_BAND_ROUNDING)
         y_bands[y_rounded] = y_bands.get(y_rounded, 0) + 1
 
-    # Calculate threshold (reserved for future body content detection)
-    band_threshold = max(
-        _REGION_MIN_BAND_COUNT,
-        int(len(raw_spans) * _REGION_BAND_THRESHOLD_RATIO)
-    )
-
     for y, count in y_bands.items():
         norm_y = y / page_height if page_height > 0 else 0
 
@@ -3114,10 +4000,12 @@ def _detect_page_regions(
         is_header_zone = norm_y < _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT
         is_footer_zone = norm_y > (1.0 - _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT)
 
-        if is_header_zone:
-            regions["header_bands"].append(y)
-        elif is_footer_zone:
-            regions["footer_bands"].append(y)
+        # HARDEN: still permissive by zone, but ignore ultra-rare bands (noise)
+        if count >= _REGION_MIN_BAND_COUNT:
+            if is_header_zone:
+                regions["header_bands"].append(y)
+            elif is_footer_zone:
+                regions["footer_bands"].append(y)
 
         # Body bands: Reserved for future use
         # elif count >= band_threshold:
@@ -3135,6 +4023,9 @@ def _detect_page_regions(
             len(regions["footer_bands"])
         )
 
+    regions["header_bands"] = sorted(set(regions["header_bands"]))
+    regions["footer_bands"] = sorted(set(regions["footer_bands"]))
+
     return regions
 
 def _assign_block_ids(spans: List[Dict]) -> None:
@@ -3145,111 +4036,230 @@ def _assign_block_ids(spans: List[Dict]) -> None:
     Future V1.2 can refine to merge multi-paragraph blocks (e.g., heading + body).
     """
     for s in spans:
-        s["block_id"] = s.get("paragraph_index", 0)
+        # REVISION 2: Non-destructive block assignment
+        # Preserve native block_id unless paragraph logic has explicitly run.
+        p_idx = s.get("paragraph_index", 0)
+        if p_idx > 0:
+            s["block_id"] = p_idx
 
 
-def _detect_paragraphs(spans: List[Dict], trace_id: str = None) -> None:
+def _detect_paragraphs(
+        spans: List[Dict],
+        trace_id: str = None,
+        global_median_line_height: float = None
+) -> None:
     """
     Assign paragraph_index to spans.
-
-    CRITICAL: Assumes 'spans' are ALREADY sorted by reading order (Fuzzy Row).
-    Does NOT re-sort, to preserve the 'Visual Line' grouping from Stage 1.
+    Phase A Hardened: Uses "Mixed Layout Protection" and global context.
     """
+    # 1. Sort by reading order (Page, Y, X)
+    spans.sort(
+        key=lambda s: (
+            s.get("page_number", 0),
+            s.get("bbox", [0, 0, 0, 0])[1],
+            s.get("bbox", [0, 0, 0, 0])[0],
+            s.get("span_index", 0),  # Phase 2.3 optional: stable ordering tiebreaker
+        )
+    )
+
     if not spans:
         return
 
-    # =========================================================================
-    # GROUP BY COLUMN (Preserving Input Order)
-    # =========================================================================
+    # 2. Group by Column
     columns: Dict[int, List[Dict]] = {}
-
     for span in spans:
         col_idx = span.get("column_index", 0)
         if col_idx not in columns:
             columns[col_idx] = []
         columns[col_idx].append(span)
 
-    # 🛑 DELETED: The internal sort that undid our Fuzzy Sort work.
-    # We trust 'extract_page' has already sorted spans by (Column, FuzzyY, X).
-
-    # =========================================================================
-    # CALCULATE MEDIAN LINE HEIGHT
-    # =========================================================================
+    # 3. Calculate Local Median Line Height
     line_heights: List[float] = []
+    _PARA_MAX_LINE_GAP = 50.0
+    _PARA_DEFAULT_LINE_HEIGHT = 12.0
+    _PARA_GAP_MULTIPLIER = 1.25
 
     for col_spans in columns.values():
         for i in range(1, len(col_spans)):
             prev_bbox = col_spans[i - 1].get("bbox")
             curr_bbox = col_spans[i].get("bbox")
-
             if prev_bbox is None or curr_bbox is None:
                 continue
-
-            prev_y = prev_bbox[1]  # y0
-            curr_y = curr_bbox[1]  # y0
-            gap = curr_y - prev_y
-
-            # Only count gaps that look like line breaks (positive but small)
-            # Negative gap = same line (inline fonts). Large gap = paragraph break.
+            prev_bottom = prev_bbox[3]
+            curr_top = curr_bbox[1]
+            gap = curr_top - prev_bottom
             if 0 < gap < _PARA_MAX_LINE_GAP:
                 line_heights.append(gap)
 
+    local_median = _PARA_DEFAULT_LINE_HEIGHT
     if line_heights:
         sorted_heights = sorted(line_heights)
-        median_line_height = sorted_heights[len(sorted_heights) // 2]
-    else:
-        median_line_height = _PARA_DEFAULT_LINE_HEIGHT
+        local_median = sorted_heights[len(sorted_heights) // 2]
 
-    # Paragraph gap threshold
+    # 4. Determine Threshold (Global vs Local)
+    if global_median_line_height and global_median_line_height > 0:
+        median_line_height = max(
+            global_median_line_height * 0.75,
+            min(local_median, global_median_line_height * 1.5)
+        )
+    else:
+        median_line_height = local_median
+
     para_gap_threshold = median_line_height * _PARA_GAP_MULTIPLIER
 
-    # =========================================================================
-    # ASSIGN PARAGRAPH INDICES
-    # =========================================================================
+    # 5. Assign Indices (The "Decision Loop")
     global_para_idx = 0
 
-    for col_idx in sorted(columns.keys()):
+    col_keys = list(columns.keys())
+    body_cols = sorted([k for k in col_keys if k not in (-1, 100)])
+    margin_cols = [k for k in (-1, 100) if k in col_keys]
+
+    for col_idx in (body_cols + margin_cols):
         col_spans = columns[col_idx]
         if not col_spans:
             continue
 
-        # First span starts a new paragraph
         col_spans[0]["paragraph_index"] = global_para_idx
-
-        # Initialize prev_y to the BOTTOM of the first span
-        first_bbox = col_spans[0].get("bbox")
-        prev_bottom = first_bbox[3] if first_bbox else 0
+        prev_bottom = col_spans[0].get("bbox", [0, 0, 0, 0])[3]
 
         for i in range(1, len(col_spans)):
-            curr_bbox = col_spans[i].get("bbox")
+            curr_span = col_spans[i]
+            curr_bbox = curr_span.get("bbox")
 
             if curr_bbox is None:
-                col_spans[i]["paragraph_index"] = global_para_idx
+                curr_span["paragraph_index"] = global_para_idx
                 continue
 
-            curr_top = curr_bbox[1]  # y0
+            prev_span = col_spans[i - 1]
+            prev_bbox = prev_span.get("bbox")
 
-            # Gap = Distance from bottom of previous line to top of current line
-            # Inline text (Bold/Italic) will have curr_top < prev_bottom (Negative Gap)
+            curr_top = curr_bbox[1]
             gap = curr_top - prev_bottom
+            start_new_paragraph = False
 
-            # New paragraph if gap exceeds threshold
+            # ------------------------------------------------------------------
+            # TEXT EXTRACTION (SPAN-SAFE)
+            # ------------------------------------------------------------------
+            prev_text = (prev_span.get("raw_text") or prev_span.get("text") or "").strip()
+            curr_text = (curr_span.get("raw_text") or curr_span.get("text") or "").strip()
+
+            prev_tail = prev_text.rstrip()
+            curr_head = curr_text.lstrip()
+
+            # Guard against empty text
+            if not prev_text or not curr_text:
+                curr_span["paragraph_index"] = global_para_idx
+                prev_bottom = curr_bbox[3]
+                continue
+
+            # ------------------------------------------------------------------
+            # SEMANTIC SIGNALS
+            # ------------------------------------------------------------------
+            has_lowercase_start = curr_head[:1].islower()
+            prev_ends_hard = prev_tail.endswith((".", "!", "?"))
+            curr_starts_cap = curr_head[:1].isupper()
+
+            # Abbreviation detection (robust)
+            prev_last_token = prev_tail.lower().rstrip(".!?")
+            prev_last_token = prev_last_token.split()[-1] if prev_last_token.split() else ""
+            is_abbreviation = prev_last_token in _PARA_ABBREVIATIONS
+
+            # ------------------------------------------------------------------
+            # VISUAL GAP ZONES (THREE-TIER MODEL)
+            # ------------------------------------------------------------------
+            visual_break_threshold = median_line_height * 1.5
+            borderline_threshold = para_gap_threshold * 1.25
+
+            is_visual_break = gap > visual_break_threshold
+            is_borderline = para_gap_threshold < gap <= borderline_threshold
+
+            # ------------------------------------------------------------------
+            # A. VERTICAL GAP CHECK (OUTER GATE — REQUIRED)
+            # Paragraph logic must only engage when the vertical gap exceeds
+            # normal line spacing.
+            # ------------------------------------------------------------------
+
             if gap > para_gap_threshold:
+
+                # VISUAL GAP ZONES
+                is_visual_break = gap > (median_line_height * 1.5)
+                is_borderline = para_gap_threshold < gap <= (para_gap_threshold * 1.25)
+
+                # SEMANTIC HARD STOP (GUARDED BY GAP)
+                semantic_break = (
+                        prev_ends_hard and
+                        curr_starts_cap and
+                        not is_abbreviation
+                )
+
+                if is_visual_break or semantic_break:
+                    start_new_paragraph = True
+
+
+                elif is_borderline:
+                    # Borderline zone (1.25x to 1.5x median line height):
+                    # Use semantic signals to decide if sentence continues.
+                    continues_sentence = (
+                            not prev_ends_hard and
+                            (
+                                    has_lowercase_start or
+                                    curr_head[:1] in {",", ";", ":", ")", "]"} or
+                                    prev_tail.endswith((",", ";", ":", "-", "—", "(", "["))
+                            )
+                    )
+
+                    if not continues_sentence:
+                        start_new_paragraph = True
+                    # else: Keep same paragraph (honor continuation signals)
+
+            # ------------------------------------------------------------------
+            # PHASE 2.3: Same-line detection (used by multiple guards)
+            # line_id is primary (discrete), row_key is fallback (bucketed float)
+            # ------------------------------------------------------------------
+            same_line = (
+                    (prev_span.get("line_id") is not None and prev_span.get(
+                        "line_id") == curr_span.get("line_id")) or
+                    (prev_span.get("row_key") is not None and prev_span.get(
+                        "row_key") == curr_span.get("row_key"))
+            )
+
+            # ------------------------------------------------------------------
+            # HORIZONTAL COHESION CHECK (MIXED LAYOUT PROTECTION)
+            # PHASE 2.3: Skip for same visual line (inline spans have zero overlap)
+            # ------------------------------------------------------------------
+            if not start_new_paragraph and prev_bbox:
+                if not same_line:
+                    overlap_x = min(prev_bbox[2], curr_bbox[2]) - max(prev_bbox[0], curr_bbox[0])
+                    min_width = min(
+                        prev_bbox[2] - prev_bbox[0],
+                        curr_bbox[2] - curr_bbox[0]
+                    )
+
+                    horizontal_cohesion = (
+                            min_width > 0 and
+                            (overlap_x / min_width) >= 0.65
+                    )
+
+                    if not horizontal_cohesion:
+                        start_new_paragraph = True
+
+            # ------------------------------------------------------------------
+            # FINALIZE PARAGRAPH INDEX
+            # ------------------------------------------------------------------
+            if start_new_paragraph:
                 global_para_idx += 1
 
-            col_spans[i]["paragraph_index"] = global_para_idx
+            curr_span["paragraph_index"] = global_para_idx
 
-            # Update prev_bottom for next iteration
-            prev_bottom = curr_bbox[3]
+            # PHASE 2.3 HARDEN: Track max bottom across same-line spans.
+            # Prevents artificially large gaps when inline spans vary in height.
+            if start_new_paragraph or not same_line:
+                prev_bottom = curr_bbox[3]
+            else:
+                prev_bottom = max(prev_bottom, curr_bbox[3])
 
-        # Increment for next column to ensure separation
+        # Advance paragraph index after each column
         global_para_idx += 1
-
-    if trace_id:
-        logger.debug(
-            "[%s] Paragraph detection: %d paragraphs across %d columns (Height: %.1f, Threshold: %.1f)",
-            trace_id, global_para_idx, len(columns), median_line_height, para_gap_threshold
-        )
 
 
 # ✦────── d. Role Detectors ──────✦
@@ -3273,9 +4283,11 @@ def _span_is_code(span: Dict) -> bool:
     if any(hint in font_name for hint in CODE_FONT_HINTS):
         return True
 
-    # Check punctuation density
+    # FIX: Define text before using it
     text = (span.get("cleaned_text") or "").strip()
-    if not text:
+
+    # HARDENING: Avoid math-heavy false positives (equations are not code)
+    if any(c in text for c in "∑∫√≈≤≥"):
         return False
 
     punct_chars = _CODE_PUNCT_PATTERN.findall(text)
@@ -3500,7 +4512,17 @@ def _is_diagram_label(
             has_prose_indicator = any(w in _LABEL_PROSE_INDICATORS for w in words_lower)
             is_short = word_count <= _LABEL_MAX_WORDS
             has_technical = technical_count >= 1
-            has_parenthetical = '(' in span_text and ')' in span_text
+            has_parenthetical = False
+            if '(' in span_text and ')' in span_text:
+                inside_parens = span_text[span_text.find('(') + 1: span_text.rfind(')')]
+
+                # HARDENED: Exclude citations (years) and eq refs from being labels
+                is_citation = re.search(r'\b(19|20)\d{2}\b', inside_parens)
+                is_eq_ref = inside_parens.lower().startswith("eq")
+
+                if not is_citation and not is_eq_ref:
+                    if len(span_text) > 0 and (len(inside_parens) / len(span_text) > 0.60):
+                        has_parenthetical = True
 
             # Title case detection
             is_title_case = span_text[0].isupper() and not span_text.isupper()
@@ -3553,6 +4575,13 @@ def _is_diagram_label(
     # =========================================================================
     has_sentence_end = _LABEL_SENTENCE_END_PATTERN.search(span_text)
 
+    # HARDENED: Reject sentence-like structures even if short (e.g. "Data flows up.")
+    if has_sentence_end and word_count >= 6:
+        return False
+
+    if span_text.count('.') > 1:
+        return False
+
     if has_sentence_end and word_count > _LABEL_MAX_WORDS:
         return False
 
@@ -3566,6 +4595,13 @@ def _is_diagram_label(
     # GUARD 6: Word count ceiling (existing constant)
     # =========================================================================
     if word_count > _LABEL_MAX_WORDS:
+        return False
+
+    # =========================================================================
+    # GUARD 7: Sentence Continuation
+    # =========================================================================
+    # Labels may be lowercase ("flow rate"), but not long sentence tails ("flow rate increases.")
+    if span_text and span_text[0].islower() and word_count >= 4:
         return False
 
     # =========================================================================
@@ -3620,6 +4656,16 @@ def _is_caption_candidate(
         span_rect = _span_to_rect(span)
         if span_rect is not None:
             buffer = _ROLE_FIGURE_PROXIMITY_BUFFER
+
+            # HARDENING: Avoid long prose misclassified as caption
+            # Captions are rarely longer than the bare caption threshold
+            if len(text) > _FILTER_BARE_CAPTION_MAX_CHARS:
+                return False
+
+            # GUARD: Proximity captions (no pattern) rarely end in a period if they are long
+            # This prevents "The data is shown below." from being a caption.
+            if text.endswith(".") and len(text.split()) > 6:
+                return False
 
             for fig_rect in figure_rects:
                 # Create an expanded detection box
@@ -3753,11 +4799,23 @@ def _assign_roles(
     for span in spans:
         role = TextRole.BODY.value
 
+        # HARDENED: Enforce schema contract
+        if not isinstance(span.get("flags", 0), int):
+            span["flags"] = 0
+
         # Extract span properties (tuple bbox)
         bbox = span.get("bbox")
         if bbox is None or len(bbox) < 4:
-            span["role"] = TextRole.EMPTY.value
-            previous_role = TextRole.EMPTY.value
+            # PHASE 0: Don't mark as EMPTY just because bbox is invalid
+            # Assign BODY default and let downstream handle based on text content
+            if not (span.get("raw_text") or "").strip():
+                span["role"] = TextRole.EMPTY.value
+                previous_role = TextRole.EMPTY.value
+                continue
+            # Has text but no bbox — assign default role, skip geometry-dependent checks
+            span["role"] = TextRole.BODY.value
+            span["_bbox_invalid_in_role_assignment"] = True
+            previous_role = TextRole.BODY.value
             continue
 
         span_x0, span_y0, span_x1, span_y1 = bbox
@@ -3766,7 +4824,7 @@ def _assign_roles(
 
         font_size = span.get("font_size", baseline_font_size)
         font_name = span.get("font", "").lower()
-        span_text = (span.get("cleaned_text") or "").strip()
+        span_text = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
 
         span_rect = _span_to_rect(span)
         if span_rect is None:
@@ -3925,8 +4983,22 @@ def _assign_roles(
             is_title_case = span_text and (span_text[0].isupper() or span_text.isupper())
             no_terminal_punct = span_text and span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION
 
-            if is_short and is_title_case and no_terminal_punct:
-                if is_large or is_bold:
+            # HARDENED: Allow longer headings if visual signal is strong (Bold/Large)
+            is_strong_visual = (is_large or is_bold)
+            relaxed_length = word_count <= (_ROLE_HEADING_MAX_WORDS * 2.0)
+
+            # GUARD: Headings should not start with lowercase (unless all caps)
+            # This protects sentence continuations from being promoted
+            starts_like_sentence = span_text and span_text[0].islower()
+            if starts_like_sentence and not span_text.isupper():
+                is_strong_visual = False  # Force strict checks or fail
+            elif span_text.isupper() and word_count > _ROLE_HEADING_MAX_WORDS:
+                is_strong_visual = False
+
+
+            if (is_short or (
+                    is_strong_visual and relaxed_length)) and is_title_case and no_terminal_punct:
+                if is_strong_visual:
                     role = TextRole.HEADING.value
 
         # =====================================================================
@@ -3941,11 +5013,24 @@ def _assign_roles(
             is_title_case = span_text and span_text[0].isupper()
             is_italic = any(hint in font_name for hint in ("italic", "oblique"))
 
-            if is_medium and is_short and is_title_case:
+            # =================================================================
+            # PHASE 3.0: Inline span protection
+            # Subheadings must be structurally independent, not inline emphasis.
+            # A span is inline if it appears mid-line (span_index_in_line > 0).
+            # This prevents italic technical terms like "Meissner corpuscles"
+            # from being promoted to subheading.
+            # =================================================================
+            is_inline_span = (
+                    span.get("span_index_in_line", 0) > 0 or
+                    span.get("a2_continues_to_next", False)
+            )
+            is_structurally_independent = not is_inline_span
+
+            if is_medium and is_short and is_title_case and is_structurally_independent:
                 role = TextRole.SUBHEADING.value
             elif is_italic and is_short and is_title_case and word_count >= 2:
-                role = TextRole.SUBHEADING.value
-
+                if is_structurally_independent:
+                    role = TextRole.SUBHEADING.value
         # =====================================================================
         # PRIORITY 8: Footnote
         # =====================================================================
@@ -3972,12 +5057,20 @@ def _assign_roles(
         if role == TextRole.BODY.value:
             is_monospace = any(hint in font_name for hint in CODE_FONT_HINTS)
 
-            if is_monospace:
+            if is_monospace and "symbol" not in font_name and "wingdings" not in font_name:
                 role = TextRole.CODE.value
             elif char_count > _ROLE_CODE_MIN_CHAR_COUNT:
                 code_chars = _ROLE_CODE_PUNCT_PATTERN.findall(span_text)
                 if len(code_chars) / char_count > _ROLE_CODE_PUNCT_RATIO:
                     role = TextRole.CODE.value
+
+        # PHASE 0: CODE veto for punctuation-only spans
+        # Prevents body punctuation fragments from being dropped as non-viable CODE.
+        if role == TextRole.CODE.value:
+            alpha_count = sum(1 for c in span_text if c.isalpha())
+            # Veto CODE if span has words (>3 letters) - clearly prose, not code
+            if alpha_count >= 3:
+                role = TextRole.BODY.value
 
         # =====================================================================
         # PRIORITY 11: Hyperlink
@@ -4029,19 +5122,728 @@ def _assign_roles(
         # =====================================================================
         # ASSIGN ROLE AND UPDATE STATE
         # =====================================================================
+        if role in {
+            TextRole.FIGURE_LABEL.value,
+            TextRole.INLINE_EQUATION.value,
+            TextRole.SUBSCRIPT.value,
+            TextRole.SUPERSCRIPT.value,
+            TextRole.CAPTION.value,  # Added
+            TextRole.LIST_ITEM.value,  # Added
+        }:
+            span["sentence_continuation_ok"] = True
+
         span["role"] = role
 
         previous_role = role
         previous_y = span_y
         previous_x = span_x
         previous_text = span_text
-        previous_font_size = font_size
 
         if trace_id and role not in (TextRole.BODY.value, TextRole.EMPTY.value):
             logger.debug(
                 "[%s] Role: '%s' -> %s (font=%.1f, baseline=%.1f)",
                 trace_id, span_text[:25], role, font_size, baseline_font_size
             )
+
+
+def _apply_continuity_role_resolution(
+        spans: List[Dict],
+        trace_id: str = None
+) -> int:
+    """
+    PHASE 1.5: Apply continuity-aware role resolution.
+
+    Fixes sentence fragmentation at figure boundaries by preserving
+    spans that are part of continuous body text flow, even when
+    geometric classification marks them as inside_figure.
+
+    PRINCIPLE: Stream continuity trumps geometric classification.
+
+    This is Phase 1 of the stream-first architecture migration:
+    - Introduces continuity context concept
+    - Documents the "stream integrity" principle
+    - Creates foundation for full stream-first implementation
+
+    Safety guards (per lead review):
+    - Requires lowercase continuation (no short-span shortcut)
+    - Enforces physical adjacency (block_id or Y-gap)
+    - Hard veto for known label/metadata patterns
+    - Explicit reading-order sort before processing
+
+    Args:
+        spans: List of span dicts (mutated in place)
+        trace_id: Optional trace ID for logging
+
+    Returns:
+        Count of spans with role overrides applied.
+
+    Mutations:
+        For overridden spans:
+        - role: Changed to "body"
+        - _continuity_override: True
+        - _continuity_override_reason: Detailed explanation
+        - _original_geometry_role: Original role before override
+    """
+    if not spans or len(spans) < 2:
+        return 0
+
+    # =========================================================================
+    # GUARD: Ensure reading order before continuity analysis
+    # Continuity checks use spans[i-1] / spans[i+1], so order is critical.
+    # Sort by (page, column, block, line, span_in_line) for stable ordering.
+    # =========================================================================
+    spans.sort(key=lambda s: (
+        s.get("page_number", 0),
+        s.get("column_index", 0),
+        s.get("block_id", 0),
+        s.get("line_index", 0),
+        s.get("span_index_in_line", 0),
+    ))
+
+    override_count = 0
+
+    for i, span in enumerate(spans):
+        current_role = span.get("role", TextRole.BODY.value)
+
+        # Fast path: Only process override candidates
+        if current_role not in _CONTINUITY_OVERRIDE_CANDIDATES:
+            continue
+
+        # Fast path: Only override if span is in a body column
+        layout_stream = span.get("layout_stream", "")
+        if not layout_stream.startswith("body_col"):
+            continue
+
+        # GUARD: Hard semantic veto for known non-body patterns
+        span_text = (span.get("cleaned_text") or span.get("raw_text", "")).strip()
+        if _matches_continuity_veto_pattern(span_text):
+            if trace_id:
+                logger.debug(
+                    "[%s] Phase 1.5: Veto override for pattern match: '%s...'",
+                    trace_id, span_text[:30]
+                )
+            continue
+
+        # Build continuity context with adjacency checks
+        previous_span = spans[i - 1] if i > 0 else None
+        next_span = spans[i + 1] if i < len(spans) - 1 else None
+
+        continues_from = _check_continuity_from_previous(previous_span, span)
+        continues_to = _check_continuity_to_next(span, next_span)
+
+        # Decision: Override if in active flow
+        in_active_flow = continues_from or continues_to
+
+        if in_active_flow:
+            # CONTINUITY WINS: Preserve stream integrity
+            span["_continuity_override"] = True
+            span["_continuity_override_reason"] = (
+                f"stream={layout_stream}, "
+                f"from_prev={continues_from}, "
+                f"to_next={continues_to}"
+            )
+            span["_original_geometry_role"] = current_role
+            span["role"] = TextRole.BODY.value
+            override_count += 1
+
+            if trace_id:
+                logger.debug(
+                    "[%s] Phase 1.5: Continuity override %s → body: '%s...'",
+                    trace_id, current_role, span_text[:40]
+                )
+
+    if trace_id and override_count > 0:
+        logger.info(
+            "[%s] Phase 1.5: Continuity role resolution overrode %d spans",
+            trace_id, override_count
+        )
+
+    return override_count
+
+
+def _matches_continuity_veto_pattern(text: str) -> bool:
+    """
+    Check if text matches known non-body patterns that should never be
+    promoted to body role regardless of continuity signals.
+
+    Prevents label/metadata leakage into TTS output.
+
+    Args:
+        text: Span text to check
+
+    Returns:
+        True if text matches a veto pattern (should NOT be overridden).
+    """
+    if not text:
+        return False
+
+    text_lower = text.lower().strip()
+
+    # Check against veto patterns
+    for pattern in _CONTINUITY_VETO_PATTERNS:
+        if text_lower.startswith(pattern):
+            return True
+
+    # Additional check: Pure numeric/reference patterns (e.g., "[1]", "(a)", "1.")
+    if len(text_lower) <= 5:
+        # Very short + starts with bracket/paren/digit = likely reference
+        if text_lower[0] in "[(0123456789":
+            return True
+
+    return False
+
+
+def _check_continuity_from_previous(
+        previous: Optional[Dict],
+        current: Dict
+) -> bool:
+    """
+    Check if current span continues from previous span.
+
+    Continuation requires ALL of:
+    1. Previous span exists and is body-like
+    2. Previous text doesn't end with terminal punctuation (.!?)
+    3. Current text starts lowercase (REQUIRED - no short-span shortcut)
+    4. Both spans in body column family
+    5. Physical adjacency (same block OR Y-gap within threshold)
+
+    Returns:
+        True if continuation is confirmed.
+    """
+    if not previous:
+        return False
+
+    # Get text
+    prev_text = (previous.get("cleaned_text") or previous.get("raw_text", "")).strip()
+    curr_text = (current.get("cleaned_text") or current.get("raw_text", "")).strip()
+
+    if not prev_text or not curr_text:
+        return False
+
+    # REQUIREMENT 1: Previous role must be body-like
+    prev_role = previous.get("role", TextRole.BODY.value)
+    prev_is_body_like = prev_role in (
+        TextRole.BODY.value,
+        TextRole.HEADING.value,
+        TextRole.INSIDE_FIGURE.value,  # May also be misclassified
+        TextRole.FIGURE_LABEL.value,
+    )
+    if not prev_is_body_like:
+        return False
+
+    # REQUIREMENT 2: Both in body column family
+    prev_stream = previous.get("layout_stream", "")
+    curr_stream = current.get("layout_stream", "")
+    both_body_streams = (
+            prev_stream.startswith("body_col") and
+            curr_stream.startswith("body_col")
+    )
+    if not both_body_streams:
+        return False
+
+    # REQUIREMENT 3: Physical adjacency (same block OR close Y-gap)
+    # Prevents "role contagion" across disconnected figure blocks
+    same_block = previous.get("block_id") == current.get("block_id")
+
+    if not same_block:
+        # Check Y-gap as fallback for cross-block but adjacent content
+        prev_bbox = previous.get("bbox", [0, 0, 0, 0])
+        curr_bbox = current.get("bbox", [0, 0, 0, 0])
+        y_gap = curr_bbox[1] - prev_bbox[3]  # Current top - previous bottom
+
+        if y_gap > _CONTINUITY_MAX_Y_GAP:
+            return False
+
+    # REQUIREMENT 4: Previous doesn't end with terminal punctuation
+    # NOTE: Only .!? are terminal; : and ; are NOT (per lead review)
+    ends_terminal = prev_text[-1] in _CONTINUITY_TERMINAL_CHARS
+    if ends_terminal:
+        return False
+
+    # REQUIREMENT 5: Current starts lowercase (STRICT - no is_short shortcut)
+    # This prevents promoting uppercase labels like "Figure 3:" even when short
+    starts_lower = curr_text[0].islower()
+    if not starts_lower:
+        return False
+
+    return True
+
+
+def _check_continuity_to_next(
+        current: Dict,
+        next_span: Optional[Dict]
+) -> bool:
+    """
+    Check if current span continues to next span.
+
+    Continuation requires ALL of:
+    1. Next span exists
+    2. Current text doesn't end with terminal punctuation (.!?)
+    3. Next text starts lowercase (REQUIRED)
+    4. Both spans in body column family
+    5. Physical adjacency (same block OR Y-gap within threshold)
+
+    Returns:
+        True if continuation is confirmed.
+    """
+    if not next_span:
+        return False
+
+    # Get text
+    curr_text = (current.get("cleaned_text") or current.get("raw_text", "")).strip()
+    next_text = (next_span.get("cleaned_text") or next_span.get("raw_text", "")).strip()
+
+    if not curr_text or not next_text:
+        return False
+
+    # REQUIREMENT 1: Both in body column family
+    curr_stream = current.get("layout_stream", "")
+    next_stream = next_span.get("layout_stream", "")
+    both_body_streams = (
+            curr_stream.startswith("body_col") and
+            next_stream.startswith("body_col")
+    )
+    if not both_body_streams:
+        return False
+
+    # REQUIREMENT 2: Physical adjacency (same block OR close Y-gap)
+    same_block = current.get("block_id") == next_span.get("block_id")
+
+    if not same_block:
+        curr_bbox = current.get("bbox", [0, 0, 0, 0])
+        next_bbox = next_span.get("bbox", [0, 0, 0, 0])
+        y_gap = next_bbox[1] - curr_bbox[3]  # Next top - current bottom
+
+        if y_gap > _CONTINUITY_MAX_Y_GAP:
+            return False
+
+    # REQUIREMENT 3: Current doesn't end with terminal punctuation
+    ends_terminal = curr_text[-1] in _CONTINUITY_TERMINAL_CHARS
+    if ends_terminal:
+        return False
+
+    # REQUIREMENT 4: Next starts lowercase (STRICT)
+    starts_lower = next_text[0].islower()
+    if not starts_lower:
+        return False
+
+    return True
+
+
+# PHASE 2.0: Sliding Window Functions (Two-Pass Architecture)
+def _build_sliding_window_spans(
+        page_span_cache: Dict[int, List[Dict]],
+        current_page_idx: int,
+        trace_id: str = None
+) -> Tuple[List[Dict], Tuple[int, int]]:
+    """
+    PHASE 2.0: Build a sliding window of spans for cross-page aware segmentation.
+
+    Uses PRE-PASS cached spans to ensure all spans have identical viability
+    processing (Phase 1.5 continuity, Phase 1.3 rescue, etc.).
+
+    Window structure:
+    - Last N spans from previous page (deep copied, tagged)
+    - ALL spans from current page (deep copied, tagged with _page_local_idx)
+    - First N spans from next page (deep copied, tagged)
+
+    Args:
+        page_span_cache: Dict mapping page_idx → processed spans_for_text
+        current_page_idx: Index of current page being processed
+        trace_id: Optional trace ID for logging
+
+    Returns:
+        Returns: Tuple of:
+            - window_spans: Combined span list for the window (deep copies)
+            - page_span_range: (start_idx, end_idx) marking current page in window
+
+
+    Invariants:
+        - All spans are deep copies (no mutation of cache)
+        - Current page spans tagged with _page_local_idx for remapping
+        - All spans tagged with _source_page_idx for attribution
+    """
+    import copy
+
+    def _copy_span_for_window(span: Dict) -> Dict:
+        """
+        Phase 2 invariant: Window spans MUST be isolated from cached spans.
+
+        We always deep-copy here to prevent:
+          - cross-page mutation
+          - tag leakage (_page_local_idx, _source_page_idx)
+          - Heisenbugs during multi-pass stitching
+
+        NOTE:
+          Deep-copy cost is negligible because window size is bounded
+          (prev_tail + current + next_head).
+        """
+        return copy.deepcopy(span)
+
+    window_spans: List[Dict] = []
+    current_spans = page_span_cache.get(current_page_idx, [])
+
+    # Get page number from first span (or 0 if empty)
+    current_page_num = 0
+    if current_spans:
+        current_page_num = current_spans[0].get("page_number", current_page_idx + 1)
+
+    # =========================================================================
+    # PREVIOUS PAGE TAIL (deep copy, tagged)
+    # =========================================================================
+    prev_tail_count = 0
+    if current_page_idx > 0:
+        prev_spans = page_span_cache.get(current_page_idx - 1, [])
+        if prev_spans:
+            tail_spans = prev_spans[-_WINDOW_TAIL_SPAN_COUNT:]
+            for span in tail_spans:
+                role = span.get("role", "")
+                layout_stream = span.get("layout_stream", "")
+
+                if (
+                    role == TextRole.SIDEBAR.value
+                    or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
+                ):
+                    if not span.get("_tts_promoted_to_body_stream", False):
+                        continue
+
+                span_copy = _copy_span_for_window(span)
+                span_copy["_window_position"] = "prev_tail"
+                span_copy["_source_page_idx"] = current_page_idx - 1
+                window_spans.append(span_copy)
+                prev_tail_count += 1
+
+    # =========================================================================
+    # CURRENT PAGE (deep copy, tagged with _page_local_idx)
+    # =========================================================================
+    page_start_idx = len(window_spans)
+
+    for page_local_idx, span in enumerate(current_spans):
+        role = span.get("role", "")
+        layout_stream = span.get("layout_stream", "")
+
+        if(
+            role == TextRole.SIDEBAR.value
+            or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
+        ):
+            if not span.get("_tts_promoted_to_body_stream", False):
+                continue
+
+        span_copy = _copy_span_for_window(span)
+        span_copy["_window_position"] = "current"
+        span_copy["_source_page_idx"] = current_page_idx
+        span_copy["_page_local_idx"] = page_local_idx
+        window_spans.append(span_copy)
+
+    page_end_idx = len(window_spans)
+
+    # =========================================================================
+    # NEXT PAGE HEAD (deep copy, tagged)
+    # =========================================================================
+    next_head_count = 0
+    if current_page_idx + 1 in page_span_cache:
+        next_spans = page_span_cache.get(current_page_idx + 1, [])
+        if next_spans:
+            head_spans = next_spans[:_WINDOW_HEAD_SPAN_COUNT]
+            for span in head_spans:
+                role = span.get("role", "")
+                layout_stream = span.get("layout_stream", "")
+
+                if (
+                    role == TextRole.SIDEBAR.value
+                    or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
+                ):
+                    if not span.get("_tts_promoted_to_body_stream", False):
+                        continue
+
+                span_copy = _copy_span_for_window(span)
+                span_copy["_window_position"] = "next_head"
+                span_copy["_source_page_idx"] = current_page_idx + 1
+                window_spans.append(span_copy)
+                next_head_count += 1
+
+    if trace_id:
+        logger.debug(
+            "[%s] Phase 2.0: Window for page %d: prev_tail=%d, current=%d, next_head=%d, total=%d",
+            trace_id,
+            current_page_num,
+            prev_tail_count,
+            page_end_idx - page_start_idx,
+            next_head_count,
+            len(window_spans)
+        )
+
+    return window_spans, (page_start_idx, page_end_idx)
+
+
+def _filter_sentences_to_page(
+        window_sentences: List[Dict],
+        window_spans: List[Dict],
+        page_span_range: Tuple[int, int],
+        current_page_idx: int,
+        page_num: int,
+        trace_id: str = None
+) -> List[Dict]:
+    """
+    PHASE 2.0: Filter window sentences to those belonging to current page.
+
+    Attribution rule: A sentence belongs to the page where it STARTS.
+    This prevents duplication when adjacent windows overlap.
+
+    Remaps window span indices to page-local indices using the _page_local_idx
+    tag set during window construction. This is robust against any future
+    changes to window construction logic.
+
+    Args:
+        window_sentences: All sentences from window segmentation
+        window_spans: The full window span list (with tags)
+        page_span_range: (start_idx, end_idx) of current page within window
+        current_page_idx: Index of current page (for validation)
+        page_num: Current page number (for sentence attribution)
+        trace_id: Optional trace ID for logging
+
+    Returns:
+        List of sentences belonging to this page, with page-local indices.
+
+    Invariants:
+        - Only sentences STARTING in current page are returned
+        - span_start_index and span_end_index are page-local (not window)
+        - page_number is correctly set
+    """
+    page_start, page_end = page_span_range
+    page_sentences: List[Dict] = []
+    cross_page_context_count = 0
+
+    for sent in window_sentences:
+        # Get the starting span index in window coordinates
+        window_start_idx = sent.get("span_start_index", -1)
+
+        if window_start_idx < 0 or window_start_idx >= len(window_spans):
+            # Invalid index, skip
+            if trace_id:
+                logger.warning(
+                    "[%s] Phase 2.0: Invalid window_start_idx %d, skipping sentence",
+                    trace_id, window_start_idx
+                )
+            continue
+
+        # Get the source span to check attribution
+        start_span = window_spans[window_start_idx]
+        source_page_idx = start_span.get("_source_page_idx")
+
+        # START-PAGE RULE: Only emit if sentence starts in current page
+        if source_page_idx != current_page_idx:
+            # Sentence starts in different page - skip (will be captured by that page's window)
+            continue
+
+        # Get page-local index from tag (robust against window changes)
+        page_local_start = start_span.get("_page_local_idx")
+        if page_local_start is None:
+            if trace_id:
+                logger.warning(
+                    "[%s] Phase 2.0: Missing _page_local_idx on span, using fallback",
+                    trace_id
+                )
+            # Fallback to arithmetic (less safe but better than dropping)
+            page_local_start = window_start_idx - page_start
+
+        # Handle end index similarly
+        window_end_idx = sent.get("span_end_index", window_start_idx)
+        if 0 <= window_end_idx < len(window_spans):
+            end_span = window_spans[window_end_idx]
+            end_source_page = end_span.get("_source_page_idx")
+
+            if end_source_page == current_page_idx:
+                # End is also in current page - use its local index
+                page_local_end = end_span.get("_page_local_idx", window_end_idx - page_start)
+            else:
+                # Sentence extends into next page
+                # Use last span of current page as end
+                page_local_end = page_end - page_start - 1
+                sent["_crosses_to_next_page"] = True
+                cross_page_context_count += 1
+        else:
+            page_local_end = page_local_start
+
+        # Create sentence copy with remapped indices
+        page_sent = dict(sent)
+        page_sent["span_start_index"] = page_local_start
+        page_sent["span_end_index"] = max(page_local_start, page_local_end)
+        page_sent["page_number"] = page_num
+
+        # Track if sentence benefited from window context
+        if sent.get("_crosses_to_next_page") or window_start_idx < page_start:
+            page_sent["_used_window_context"] = True
+
+        page_sentences.append(page_sent)
+
+    if trace_id and cross_page_context_count > 0:
+        logger.info(
+            "[%s] Phase 2.0: Page %d: %d sentences used cross-page context",
+            trace_id, page_num, cross_page_context_count
+        )
+
+    return page_sentences
+
+def _refine_roles_via_content_flow(spans: List[Dict], trace_id: str = None) -> None:
+    """
+    PHASE X: Content-Flow Outlier Refinement ("Island Logic")
+    Detects and demotes orphan artifacts (attribution lines, drifted headers/footers,
+    margin notes) using multi-signal combination scoring.
+
+    IMPORTANT PIPELINE CONTRACT:
+      - Mutates spans in place by setting role to *non-TTS-viable* roles only.
+      - Must run AFTER initial role assignment + block_id assignment
+        and BEFORE spans_for_text filtering / sentence segmentation.
+
+    Signals (binary):
+      1) boundary: near top/bottom of content extent
+      2) small_font: font size below median
+      3) gap: block has large vertical gap before it (relative + absolute)
+      4) pattern: attribution/meta boilerplate match
+      5) orphan: small block (<=2 spans)
+    """
+    if not spans:
+        return
+
+    # ---- A) Collect only bbox-valid spans for geometry stats ----
+    geo_spans = [s for s in spans if s.get("bbox") and len(s["bbox"]) == 4]
+    if not geo_spans:
+        return
+
+    # Content vertical bounds (use y0/y1 to avoid center-only bias)
+    y0s = [s["bbox"][1] for s in geo_spans]
+    y1s = [s["bbox"][3] for s in geo_spans]
+    content_min_y, content_max_y = min(y0s), max(y1s)
+    content_height = max(1.0, content_max_y - content_min_y)
+
+    # Median font size (robust default)
+    fonts = sorted([float(s.get("font_size", 11.0)) for s in geo_spans])
+    median_font = fonts[len(fonts) // 2] if fonts else 11.0
+
+    # Build block stats: y-range + count
+    blocks: Dict[int, Dict[str, float]] = {}
+    for s in geo_spans:
+        bid = int(s.get("block_id", 0))
+        b = blocks.get(bid)
+        if b is None:
+            blocks[bid] = {"y0": s["bbox"][1], "y1": s["bbox"][3], "count": 1}
+        else:
+            b["y0"] = min(b["y0"], s["bbox"][1])
+            b["y1"] = max(b["y1"], s["bbox"][3])
+            b["count"] += 1
+
+    # Block gaps: gap before each block, based on sorted block y0
+    sorted_bids = sorted(blocks.keys(), key=lambda b: blocks[b]["y0"])
+    block_gaps: Dict[int, float] = {}
+    prev_bid = None
+    for bid in sorted_bids:
+        if prev_bid is None:
+            block_gaps[bid] = 0.0
+        else:
+            gap = blocks[bid]["y0"] - blocks[prev_bid]["y1"]
+            block_gaps[bid] = max(0.0, float(gap))
+        prev_bid = bid
+
+    # Median positive gap for relative comparisons
+    positive_gaps = sorted([g for g in block_gaps.values() if g > 0.0])
+    median_gap = positive_gaps[len(positive_gaps) // 2] if positive_gaps else 20.0
+
+    # Pattern set: keep narrowly attribution/meta (safe for legal/web too)
+    # (Extend list, do NOT add new signal types.)
+    meta_patterns = (
+        "based on", "adapted from", "source:", "courtesy of", "lecture notes",
+        "from wikibooks", "licensed under", "all rights reserved", "copyright",
+        "retrieved", "doi:", "http://", "https://", "www."
+    )
+
+    # Roles that should never be altered by this pass (structural truth sources)
+    protected_roles = {
+        TextRole.TABLE_CELL.value,
+        TextRole.INSIDE_FIGURE.value,
+        TextRole.FIGURE_LABEL.value,
+        TextRole.CODE.value,
+    }
+
+    # ---- B) Single-pass scoring ----
+    for span in spans:
+        bbox = span.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+
+        # Respect structural roles (don’t “override ground truth”)
+        role = span.get("role", TextRole.BODY.value)
+        if role in protected_roles:
+            continue
+
+        # Respect explicit protection flags if present in your pipeline
+        if span.get("filter_protected") is True:
+            continue
+
+        # Text for semantic patterns
+        text = (span.get("cleaned_text") or span.get("raw_text") or "").strip().lower()
+        if not text:
+            continue
+
+        # Signal 1: boundary (tight thresholds reduce false positives)
+        y_center = (bbox[1] + bbox[3]) / 2.0
+        rel_pos = (y_center - content_min_y) / content_height
+        boundary = (rel_pos <= 0.05) or (rel_pos >= 0.95)
+
+        # Signal 2: small font
+        font_size = float(span.get("font_size", median_font))
+        font_ratio = font_size / max(1e-6, median_font)
+        small_font = font_ratio < 0.92
+
+        # Signal 3/5: gap + orphan block
+        bid = int(span.get("block_id", 0))
+        gap_before = float(block_gaps.get(bid, 0.0))
+        orphan = int(blocks.get(bid, {}).get("count", 0)) <= 2
+
+        # Gap must be both relative AND absolute (prevents “figure gap” false hits)
+        gap = (gap_before > (median_gap * 2.0)) and (gap_before > 40.0)
+
+        # Signal 4: pattern match (attribution/meta only)
+        pattern = any(p in text for p in meta_patterns)
+
+        # ---- Combination scoring (compact, but conservative) ----
+        score = 0.0
+        reasons = []
+
+        if pattern:
+            score = 0.50
+            reasons.append("pattern")
+            if boundary:
+                score = 0.70
+                reasons.append("boundary")
+            if small_font:
+                score = 0.90
+                reasons.append("small_font")
+
+        elif boundary and small_font:
+            score = 0.50
+            reasons.extend(["boundary", "small_font"])
+            if gap or orphan:
+                score = 0.70
+                if gap: reasons.append("gap")
+                if orphan: reasons.append("orphan")
+
+        elif boundary and gap and orphan:
+            score = 0.50
+            reasons.extend(["boundary", "gap", "orphan"])
+
+        # Verdict threshold: only demote on high confidence
+        if score >= 0.70:
+            # CRITICAL: demote ONLY into roles already guaranteed non-viable for TTS.
+            # Bottom artifacts behave like footnotes; top artifacts like header artifacts.
+            if rel_pos >= 0.50:
+                span["role"] = TextRole.FOOTNOTE.value
+            else:
+                span["role"] = TextRole.HEADER_ARTIFACT.value
+
+            # Debug tags (cheap, optional)
+            span["_outlier_score"] = round(score, 2)
+            span["_outlier_reasons"] = reasons
 
 
 def _associate_captions_to_figures(
@@ -4121,15 +5923,13 @@ def _associate_captions_to_figures(
             # Combined distance (vertical weighted more)
             combined_dist = vert_dist + (horiz_dist * _CAPTION_ASSOC_HORIZ_WEIGHT)
 
-            # Determine direction
-            vert_overlap = not (span_rect[3] < f_rect[1] or span_rect[1] > f_rect[3])
-
             if f_rect[3] <= span_rect[1]:
                 direction = "above"
             elif f_rect[1] >= span_rect[3]:
                 direction = "below"
-            elif vert_overlap and not horiz_overlap:
-                # Vertically aligned but horizontally separated -> Side layout
+            elif not horiz_overlap:
+                # HARDENED: Any non-overlapping horizontal adjacency is a "Side" caption
+                # This catches margin notes that aren't perfectly vertically aligned
                 direction = "side"
             else:
                 direction = "overlap"
@@ -4145,13 +5945,44 @@ def _associate_captions_to_figures(
             else:
                 adjusted_dist = combined_dist
 
+            # HARDENED: Deterministic tie-breaker
+            # If distances are effectively equal, prefer horizontal alignment
             if adjusted_dist < best_dist:
                 best_dist = adjusted_dist
                 best_idx = idx
                 best_direction = direction
+            elif abs(adjusted_dist - best_dist) < 1e-5:
+                # Break ties by choosing the figure closer horizontally
+                curr_offset = abs(span_center_x - f_center_x)
+                best_fig_rect = figure_rects[best_idx]
+                best_center_x = (best_fig_rect[0] + best_fig_rect[2]) / 2
+                best_offset = abs(span_center_x - best_center_x)
+
+                if curr_offset < best_offset:
+                    best_dist = adjusted_dist
+                    best_idx = idx
+                    best_direction = direction
 
         # Apply distance threshold
-        if best_idx is not None and best_dist <= max_caption_distance:
+        blocked = False
+        if best_idx is not None:
+            target_rect = figure_rects[best_idx]
+            target_y = (target_rect[1] + target_rect[3]) / 2
+
+            # Check all other figures
+            for other_idx, other_rect in enumerate(figure_rects):
+                if other_idx == best_idx: continue
+                other_y = (other_rect[1] + other_rect[3]) / 2
+
+                # If other figure is strictly between target and caption vertically
+                if min(target_y, span_center_y) < other_y < max(target_y, span_center_y):
+                    # And roughly aligned horizontally (within 50px)
+                    other_cx = (other_rect[0] + other_rect[2]) / 2
+                    if abs(other_cx - span_center_x) < 50:
+                        blocked = True
+                        break
+
+        if best_idx is not None and best_dist <= max_caption_distance and not blocked:
             span["figure_index"] = best_idx
             if trace_id:
                 caption_preview = (span.get("cleaned_text") or "")[:30]
@@ -4297,7 +6128,12 @@ def _detect_structural_continuity(
             curr_width = curr_x1 - curr_x0
 
             # Horizontal alignment check
-            x_aligned = abs(prev_x0 - curr_x0) < _CONTINUITY_X_ALIGNMENT_TOLERANCE
+            align_tolerance = max(
+                _CONTINUITY_X_ALIGNMENT_TOLERANCE,
+                prev_width * 0.10,
+                curr_width * 0.10
+            )
+            x_aligned = abs(prev_x0 - curr_x0) < align_tolerance
 
             # Width similarity check
             max_width = max(prev_width, curr_width, 1)
@@ -4350,8 +6186,15 @@ def _detect_structural_continuity(
                     # Check if figure starts at top margin
                     curr_at_top = curr_fig_top < (curr_height * _CONTINUITY_FIGURE_TOP_MARGIN_RATIO)
 
-                    # Horizontal overlap check
-                    x_overlap = not (prev_fig_x1 < curr_fig_x0 or prev_fig_x0 > curr_fig_x1)
+                    # Horizontal overlap check (Hardened: Require 20% overlap)
+                    inter_x0 = max(prev_fig_x0, curr_fig_x0)
+                    inter_x1 = min(prev_fig_x1, curr_fig_x1)
+                    overlap_w = max(0.0, inter_x1 - inter_x0)
+
+                    prev_w = max(1.0, prev_fig_x1 - prev_fig_x0)
+                    curr_w = max(1.0, curr_fig_x1 - curr_fig_x0)
+
+                    x_overlap = (overlap_w / min(prev_w, curr_w)) >= 0.20
 
                     if curr_at_top and x_overlap:
                         continuity["figure_continues"] = True
@@ -4391,6 +6234,8 @@ def _text_similarity(text1: str, text2: str) -> float:
     if not text1 or not text2:
         return 0.0
 
+    # HARDENED: Local import prevents NameError if global imports drift.
+    from difflib import SequenceMatcher
     return SequenceMatcher(None, text1, text2).ratio()
 
 
@@ -4622,9 +6467,8 @@ def _is_cross_page_continuation(
 
     should_merge, _ = _stitch_helper_should_merge(
         prev_sent,
-        next_sent,
-        prev_spans,
-        next_spans
+        next_sent
+
     )
 
     return should_merge
@@ -4666,6 +6510,12 @@ def _stitch_cross_page_sentences(
     if len(all_sentences) < 2:
         return all_sentences
 
+    # Connector words that cannot terminate a sentence meaningfully
+    CONNECTOR_WORDS = {
+        "and", "or", "but", "nor", "so", "yet", "for",
+        "to", "of", "in", "with", "by", "at", "from",
+    }
+
     # =========================================================================
     # MULTI-PASS STITCHING
     # =========================================================================
@@ -4704,6 +6554,71 @@ def _stitch_cross_page_sentences(
                     result.append(curr)
                     i += 1
                     continue
+
+                # ---------------------------------------------------------------------
+                # CONNECTOR RULE (INLINE, NO HELPER)
+                # If curr ends with a connector word + punctuation (e.g. "or."),
+                # treat punctuation as artifact and FORCE merge with next sentence.
+                # ---------------------------------------------------------------------
+                curr_text = (curr.get("text") or "").rstrip()
+                next_text = (next_sent.get("text") or "").lstrip()
+
+                # Extract last token safely
+                curr_words = curr_text.split()
+                if curr_words:
+                    last_token = curr_words[-1]
+                    # Strip trailing punctuation from last token
+                    stripped = last_token.rstrip(".,;:!?")
+                    trailing_punct = last_token[len(stripped):]
+
+                    # Check for hanging connector with punctuation
+                    if (
+                            stripped.lower() in CONNECTOR_WORDS and
+                            trailing_punct
+                    ):
+                        # Remove ONLY the trailing punctuation from curr text
+                        fixed_curr_text = curr_text[:-len(trailing_punct)].rstrip()
+
+                        # Force merge: connector implies continuation by definition
+                        merged = _stitch_helper_merge(
+                            {**curr, "text": fixed_curr_text},
+                            next_sent
+                        )
+
+                        # Enforce exactly one space between fragments
+                        merged["text"] = fixed_curr_text + " " + next_text
+
+                        # Metrics
+                        is_same_page = curr.get("page_number") == next_sent.get("page_number")
+                        if is_same_page:
+                            same_page_stitches += 1
+                        else:
+                            cross_page_stitches += 1
+
+                        stitches_this_pass += 1
+                        span_gap: Optional[int] = None
+
+                        if trace_id:
+                            stitch_type = "same-page" if is_same_page else "cross-page"
+                            logger.info(
+                                "[%s] Stitched (%s): page %s → %s (reason=connector_force_merge, text='%s...')",
+                                trace_id,
+                                stitch_type,
+                                curr.get("page_number"),
+                                next_sent.get("page_number"),
+                                merged.get("text", "")[:50]
+                            )
+
+                        result.append(merged)
+
+                        # Preserve skipped non-body sentences
+                        for k in range(i + 1, next_idx):
+                            skipped = all_sentences[k]
+                            if skipped:
+                                result.append(skipped)
+
+                        i = next_idx + 1
+                        continue
 
                 should, reason = _stitch_helper_should_merge(curr, next_sent)
 
@@ -4862,14 +6777,32 @@ def _stitch_helper_merge(curr: Dict, next_sent: Dict) -> Dict:
     if "end_y" in next_sent:
         merged["end_y"] = next_sent["end_y"]
 
+    # ------------------------------------------------------------------
+    # Preserve multi-page geometry during iterative sentence merges
+    # ------------------------------------------------------------------
+
+    # Initialize page_bboxes if missing
+    if "page_bboxes" not in merged or not isinstance(merged.get("page_bboxes"), dict):
+        merged["page_bboxes"] = {}
+
+    # Seed with current sentence bbox
+    curr_page = curr.get("page_number")
+    curr_bbox = curr.get("bbox")
+    if curr_page is not None and curr_bbox:
+        merged["page_bboxes"][curr_page] = curr_bbox
+
+    # Add next sentence bbox
+    next_page = next_sent.get("page_number")
+    next_bbox = next_sent.get("bbox")
+    if next_page is not None and next_bbox:
+        merged["page_bboxes"][next_page] = next_bbox
+
     return merged
 
 
 def _stitch_helper_should_merge(
         prev: Dict,
-        next_s: Dict,
-        prev_spans: List[Dict] = None,
-        next_spans: List[Dict] = None
+        next_s: Dict
 ) -> Tuple[bool, str]:
     """
     Determine if two sentences should be merged.
@@ -4909,6 +6842,27 @@ def _stitch_helper_should_merge(
     prev_text = (prev.get("text") or "").rstrip()
     next_text = (next_s.get("text") or "").lstrip()
 
+    # REVISION B3-M: Deterministic continuation from A2 (with adjacency verification)
+    # Adjacency check: same page, reasonable vertical proximity
+    if prev.get("a2_continues_to_next"):
+        # Verify adjacency to guard against orphaned flags
+        same_page = prev.get("page_number") == next_s.get("page_number")
+
+        # Geometric adjacency: next span should be reasonably close
+        prev_bbox = prev.get("bbox")
+        next_bbox = next_s.get("bbox")
+        geom_adjacent = False
+        if prev_bbox and next_bbox and len(prev_bbox) >= 4 and len(next_bbox) >= 4:
+            v_gap = next_bbox[1] - prev_bbox[3]  # next_y0 - prev_y1
+            fs = float(prev.get("font_size") or 10.0)
+            # Allow gap up to ~3 lines (generous to account for A4 removing headers/footers)
+            geom_adjacent = v_gap <= (fs * 4.0)
+
+        if same_page and geom_adjacent:
+            mode = prev.get("a2_continuation_mode", "unknown")
+            reason = prev.get("a2_continuation_reason", "a2_signal")
+            return True, f"{reason}:{mode}"
+
     # =========================================================================
     # PRE-COMPUTE: Text Analysis (MOVED UP v2.1)
     # We need these signals available for the Guard Rules below.
@@ -4926,6 +6880,8 @@ def _stitch_helper_should_merge(
     # Signals
     has_incomplete_ending = last_word in _STITCH_INCOMPLETE_ENDINGS  # e.g., "the", "of", "and"
     has_lowercase_start = first_char.islower()
+    # Strong same-page continuation requires BOTH signals
+    strong_linguistic_continuation = has_incomplete_ending and has_lowercase_start
 
     # =========================================================================
     # RULE 0: Empty Text Check
@@ -4938,20 +6894,39 @@ def _stitch_helper_should_merge(
     next_page = next_s.get("page_number")
     is_same_page = (prev_page == next_page)
 
-    # =========================================================================
-    # RULE 1: Span Proximity Check
-    # Prevents merging sentences from distant content blocks
-    # =========================================================================
-    prev_span_end = prev.get("span_end_index", 0)
-    next_span_start = next_s.get("span_start_index", 0)
-    span_gap = next_span_start - prev_span_end
+    # Initialize span_gap explicitly (assigned only for same-page logic)
+    span_gap = None
 
-    allowed_gap = _STITCH_MAX_SPAN_GAP
-    if has_incomplete_ending:
-        allowed_gap = _STITCH_MAX_SPAN_GAP * 3  # Increase tolerance (e.g., 20 -> 60)
+    columns_match = _stitch_helper_columns_match(prev, next_s)
 
-    if span_gap > allowed_gap:
-        return False, f"span_gap_too_large:{span_gap}"
+    # =========================================================================
+    # RULE 1: Span Proximity Check (SAME-PAGE ONLY)
+    # Prevents merging sentences from distant content blocks.
+    #
+    # CRITICAL: span_start_index/span_end_index are PAGE-LOCAL indices.
+    # They are computed relative to each page's spans_for_text list.
+    # Cross-page index comparison is mathematically meaningless:
+    #   Page 1 end: span_end_index=17 (of 18 spans)
+    #   Page 2 start: span_start_index=0 (of 15 spans)
+    #   span_gap = 0 - 17 = -17 (meaningless!)
+    #
+    # For cross-page pairs, skip this rule entirely.
+    # RULE 1.5 (geometric Y-gap) provides backup validation.
+    # =========================================================================
+    if is_same_page:
+        prev_span_end = prev.get("span_end_index", 0)
+        next_span_start = next_s.get("span_start_index", 0)
+        span_gap = next_span_start - prev_span_end
+
+        allowed_gap = _STITCH_MAX_SPAN_GAP
+
+        # Inflate gap ONLY when structurally adjacent
+        if has_incomplete_ending and columns_match and span_gap >= 0:
+            allowed_gap = _STITCH_MAX_SPAN_GAP * 2
+
+        # Enforce span proximity
+        if span_gap > allowed_gap:
+            return False, f"span_gap_too_large:{span_gap}"
 
     # =========================================================================
     # RULE 1.5: Geometric Proximity Check (NEW v2.0)
@@ -4970,15 +6945,18 @@ def _stitch_helper_should_merge(
 
         y_gap = next_y_start - prev_y_end
 
-        # Only check positive gaps (next is below prev)
-        # Negative gaps mean next is above prev (reordering issue, allow merge)
+        # Positive gap: next is below prev
         if y_gap > _STITCH_MAX_Y_GAP_SAME_PAGE:
             return False, f"y_gap_too_large:{y_gap:.1f}"
+
+        # Negative gap: next is ABOVE prev → likely reorder or cross-block
+        if y_gap < -_STITCH_MAX_NEGATIVE_Y_GAP:
+            return False, f"y_gap_negative:{y_gap:.1f}"
 
     # =========================================================================
     # RULE 2: Column Alignment
     # =========================================================================
-    if not _stitch_helper_columns_match(prev, next_s):
+    if not columns_match:
         return False, "column_mismatch"
 
     # =========================================================================
@@ -4991,16 +6969,74 @@ def _stitch_helper_should_merge(
 
     if prev_role != next_role:
         if is_same_page:
-            # FIXED v2.1: Linguistic Override
-            # If the sentence is clearly cut off, ignore role/font changes.
-            # Example: "The ends of the" (Body) -> "bone" (Misclassified as Caption)
-            if not has_incomplete_ending and not has_lowercase_start:
+            # Require STRONG linguistic continuation on same page
+            if not strong_linguistic_continuation:
                 return False, "same_page_role_mismatch"
         else:
             # Cross-page: Only block non-body + non-body
             # Rationale: Layout shifts between pages are common
             if prev_role != TextRole.BODY.value and next_role != TextRole.BODY.value:
                 return False, "role_mismatch"
+
+    # -------------------------------------------------------------------------
+    # HEAD NORMALIZATION (for hard-stop checks)
+    # Strip leading tokens that commonly mask capitalization in PDFs.
+    # -------------------------------------------------------------------------
+    curr_head = next_text.lstrip().lstrip("'\"“”‘’([{—–•")
+    head_first_char = curr_head[:1] if curr_head else ""
+    head_first_word = (curr_head.split()[0] if curr_head.split() else "")
+
+    effective_first_char = head_first_char or first_char
+
+    # -------------------------------------------------------------------------
+    # Connector normalization (local, non-invasive)
+    # Avoid punctuation-attached tokens breaking connector detection.
+    # -------------------------------------------------------------------------
+    _last_word_norm = (last_word or "").strip().strip(",;:")
+
+    # =========================================================================
+    # RULE 3.25: Parenthetical / Enumeration Completion Hard Stop [P1 FIX]
+    # Prevents: "(nociceptors)" + "The receptors..." from merging
+    # =========================================================================
+    prev_stripped = prev_text.rstrip()
+
+    prev_ends_paren_pattern = (
+            prev_stripped.endswith(")") or
+            prev_stripped.endswith(").") or
+            prev_stripped.endswith("),")
+    )
+
+    comma_count = prev_text.count(",")
+    prev_is_listish = (comma_count >= 2 and len(prev_stripped) <= 120)
+
+    if (prev_ends_paren_pattern or prev_is_listish) and head_first_char.isupper():
+        return False, "hard_stop:parenthetical_or_enumeration_complete"
+
+    # =========================================================================
+    # RULE 3.5: Capitalized Sentence Hard Stop [P1 FIX]
+    # =========================================================================
+    if head_first_char.isupper():
+        connector_words = {
+            "and", "or", "of", "the", "a", "an", "in", "on",
+            "at", "to", "for", "with", "by"
+        }
+
+        prev_ends_connector = (
+                _last_word_norm in connector_words or
+                prev_text.rstrip().endswith((",", ";", ":"))
+        )
+
+        if not prev_ends_connector:
+            common_starters = {
+                "The", "A", "An", "It", "This", "These", "Those",
+                "He", "She", "They", "But", "However", "Therefore",
+                "Furthermore", "In", "On", "Figure", "Table"
+            }
+
+            if head_first_word in common_starters:
+                return False, "hard_stop:capitalized_sentence_starter"
+
+            return False, "hard_stop:capitalized_no_connector"
 
     # =========================================================================
     # RULE 4: Terminal Punctuation Check
@@ -5013,12 +7049,6 @@ def _stitch_helper_should_merge(
         # Example: "Mechanoreceptors can." + "be free receptors..."
         if has_incomplete_ending and has_lowercase_start:
             reason = "same_page:incomplete_override" if is_same_page else "incomplete_override"
-            return True, reason
-
-        # OVERRIDE 2 (v2.1): Artifact Punctuation on Incomplete Endings
-        # Example: "The ends of the." (Period is likely PDF noise)
-        if has_incomplete_ending:
-            reason = "same_page:punctuation_artifact_override" if is_same_page else "punctuation_artifact_override"
             return True, reason
 
         # OVERRIDE 3 (v2.1): Grammatical patterns (Possessives/Gerunds)
@@ -5050,63 +7080,70 @@ def _stitch_helper_should_merge(
         # No override conditions met — block merge
         return False, "has_terminal_punct"
 
-    # =========================================================================
-    # RULE 5: Span-based Role Blocking (Optional)
-    # =========================================================================
-    if prev_spans and next_spans:
-        prev_span_idx = prev.get("span_end_index", 0)
-        next_span_idx = next_s.get("span_start_index", 0)
+    # RULE 5 DISABLED: span index domain mismatch (global vs local)
 
-        if prev_span_idx < len(prev_spans) and next_span_idx < len(next_spans):
-            span_prev_role = prev_spans[prev_span_idx].get("role", TextRole.BODY.value)
-            span_next_role = next_spans[next_span_idx].get("role", TextRole.BODY.value)
-
-            if span_prev_role in _STITCH_BLOCKING_ROLES or span_next_role in _STITCH_BLOCKING_ROLES:
-                return False, "span_role_blocked"
     # =========================================================================
     # RULE 6: Drop Cap / Initial Reassembly (SURGICAL FIX v3.5)
     # Handles: "F" + "ROM" -> "FROM"
     # =========================================================================
-    if is_same_page and len(prev_text) == 1 and prev_text.isupper() and prev_text.isalpha():
-        # Condition: Physically adjacent spans (gap=1)
-        # Condition: Vertically aligned (y_gap ~ 0)
-        if span_gap <= 1:
-            prev_y_end = prev.get("end_y") or (prev.get("bbox", [0, 0, 0, 0])[3])
-            next_y_start = next_s.get("bbox", [0, 0, 0, 0])[1]
-            y_diff = abs(next_y_start - prev_y_end)
+    if (
+        is_same_page and
+        span_gap == 1 and
+        len(prev_text) == 1 and
+        prev_text.isupper() and
+        prev_text.isalpha()
+    ):
+        prev_y_end = prev.get("end_y") or (prev.get("bbox", [0, 0, 0, 0])[3])
+        next_y_start = next_s.get("bbox", [0, 0, 0, 0])[1]
+        y_diff = abs(next_y_start - prev_y_end)
 
-            # Allow slight vertical misalignment (drop caps often offset)
-            # but require horizontal flow
-            if y_diff < 20.0:
-                return True, "same_page:drop_cap_reassembly"
+        # Allow slight vertical misalignment (drop caps often offset)
+        # but require horizontal flow
+        if y_diff < 20.0:
+            return True, "same_page:drop_cap_reassembly"
+
     # =========================================================================
     # CONTINUATION SIGNAL DETECTION (Standard — no terminal punct)
+    # GUARDED: Only trigger if structurally adjacent
     # =========================================================================
 
-    # Signal A: Lowercase start (STRONG)
+    # Compute structural adjacency
+    is_structurally_adjacent = (
+            is_same_page and
+            span_gap is not None and
+            columns_match and
+            span_gap <= _STITCH_MAX_SPAN_GAP
+    )
+
+    # Signal A: Lowercase start — REQUIRE structural adjacency (no bypass)
     if has_lowercase_start:
-        reason = "same_page:lowercase_start" if is_same_page else "lowercase_start"
-        return True, reason
+        if is_structurally_adjacent:
+            reason = "same_page:lowercase_start" if is_same_page else "lowercase_start"
+            return True, reason
 
-    # Signal B: Continuation word
+    # Signal B: Continuation word — require adjacency
     if first_word in _STITCH_CONTINUATION_WORDS:
-        reason = "same_page:continuation_word" if is_same_page else "continuation_word"
-        return True, reason
+        if is_structurally_adjacent:
+            reason = "same_page:continuation_word" if is_same_page else "continuation_word"
+            return True, reason
 
-    # Signal C: Incomplete ending (even without lowercase — weaker signal)
+    # Signal C: Incomplete ending — require adjacency
     if has_incomplete_ending:
-        reason = "same_page:incomplete_ending" if is_same_page else "incomplete_ending"
-        return True, reason
+        if is_structurally_adjacent:
+            reason = "same_page:incomplete_ending" if is_same_page else "incomplete_ending"
+            return True, reason
 
-    # Signal D: Continuing punctuation
-    if first_char in _STITCH_CONTINUING_PUNCT and first_char not in _STITCH_NEW_SENTENCE_PUNCT:
-        reason = "same_page:continuing_punct" if is_same_page else "continuing_punct"
-        return True, reason
+    # Signal D: Continuing punctuation — require adjacency
+    if effective_first_char in _STITCH_CONTINUING_PUNCT and first_char not in _STITCH_NEW_SENTENCE_PUNCT:
+        if is_structurally_adjacent:
+            reason = "same_page:continuing_punct" if is_same_page else "continuing_punct"
+            return True, reason
 
-    # Signal E: Number continuation
+    # Signal E: Number continuation — require adjacency
     if first_char.isdigit() and last_word in _STITCH_NUMBER_CONTEXT_WORDS:
-        reason = "same_page:number_continuation" if is_same_page else "number_continuation"
-        return True, reason
+        if is_structurally_adjacent:
+            reason = "same_page:number_continuation" if is_same_page else "number_continuation"
+            return True, reason
 
     # No signals found
     return False, "same_page_no_signal" if is_same_page else "no_signal"
@@ -5118,38 +7155,39 @@ def _reconstruct_text_for_segmentation(
         trace_id: str = None
 ) -> Tuple[str, List[Dict], List[int]]:
     """
-    Intelligent text reconstruction with Source Map for sentence segmentation.
-
-    Creates a character-to-span mapping that enables O(1) lookup from any
-    character position to its source span, eliminating brittle find() approaches.
-
-    HARDENED v2.1:
-        1. Smart letter-spacing detection (fixes "F ROM W IKIBOOKS")
-        2. Page-aware joining (page breaks → space, not newline)
-        3. Defensive null handling
-        4. NEW: Margin status tracking — margin boundary changes trigger breaks
-
-    Break Priorities:
-        1. Column change (same page) → "\n\n"
-        2. Margin status change (same page) → "\n\n" (NEW v2.1)
-        3. Role breaks (BREAK_BEFORE/AFTER roles) → "\n\n"
-        4. Page change → " " (preserve sentence flow)
-        5. Paragraph change (same page) → "\n"
-        6. Smart joining (letter-spacing detection)
-        7. Default word boundary → " "
-
-    Args:
-        spans: List of span dictionaries with cleaned_text.
-        trace_id: Optional trace ID for logging.
-
-    Returns:
-        Tuple of:
-            - full_text: Reconstructed text for pysbd
-            - span_map: List of span boundary records
-            - char_to_span: Character index → span index mapping (SOURCE MAP)
+    Reconstruct a stable text stream for sentence segmentation.
+    ARCHITECTURAL GUARDRAIL:
+    This method is the SOLE authority for stream shaping.
+    It may introduce structural whitespace separators only.
+    This method must NOT:
+      - Perform semantic deletion
+      - Perform sentence repair or healing
+      - Perform role-based or margin-based hard breaks
+      - Modify text content beyond structural spacing
+    Stream rules:
+      - Column change → '\\n\\n'
+      - Paragraph change → '\\n'
+      - Page change → ' '
+      - Default join → ' '
     """
     if not spans:
         return "", [], []
+
+    # =========================================================================
+    # PHASE 2.5: Enforce reading order before reconstruction
+    # CRITICAL: Use integer fields to avoid string sort bugs ("1:3:10" < "1:3:2")
+    # =========================================================================
+    # 1. Attach original index: (orig_idx, span)
+    indexed_spans = list(enumerate(spans))
+
+    # 2. Sort by geometry/structure using the span object (item[1])
+    sorted_spans = sorted(indexed_spans, key=lambda item: (
+        item[1].get('page_number', 0),
+        item[1].get('column_index', 0),
+        item[1].get('block_id', 0),
+        item[1].get('line_index', 0),
+        item[1].get('span_index_in_line', 0),
+    ))
 
     full_text = ""
     span_map: List[Dict] = []
@@ -5158,92 +7196,116 @@ def _reconstruct_text_for_segmentation(
     # Track previous span for boundary detection
     prev_column: Optional[int] = None
     prev_para: Optional[int] = None
-    prev_role: Optional[str] = None
     prev_page: Optional[int] = None
     prev_text: str = ""
-    prev_margin: Optional[bool] = None  # NEW v2.1: Track margin status
 
-    letter_spacing_joins = 0
-    margin_breaks = 0  # NEW v2.1: Metric for logging
+    # REVISION B: Initialize reference tracker for A2 signals
+    prev_span_ref: Optional[Dict] = None
 
-    for i, span in enumerate(spans):
+    a2_signal_joins = 0
+
+    for _, (orig_idx, span) in enumerate(sorted_spans):
         if not isinstance(span, dict):
+            continue
+
+        # =====================================================================
+        # PHASE 2.7 GUARD 0: Inline-Role Override (Chameleon Logic)
+        # Rescues valid body text mislabeled as Sidebar/Subheading/Heading.
+        # CRITICAL: Do NOT rescue actual margin content.
+        # =====================================================================
+        effective_role = span.get("role", "")
+        if effective_role in {
+            TextRole.SIDEBAR.value,
+            TextRole.SUBHEADING.value,
+            TextRole.HEADING.value,
+        }:
+            is_actual_margin = span.get("is_margin_content", False)
+            was_line_rescued = span.get("_tts_rescued", False)
+
+            # Phase 1.3 rescue overrides margin classification
+            if not is_actual_margin or was_line_rescued:
+
+                is_inline = span.get("span_index_in_line", 0) > 0
+                is_a2_source = span.get("a2_continues_to_next", False)
+                is_a2_target = (
+                        prev_span_ref is not None and
+                        prev_span_ref.get("a2_continues_to_next", False)
+                )
+                if is_inline or is_a2_source or is_a2_target:
+                    effective_role = TextRole.BODY.value
+
+        # =====================================================================
+        # PHASE 2.7 GUARD 1: Non-viable role quarantine
+        # Uses effective_role (post-chameleon) to spare rescued inline spans.
+        # These roles must not influence reconstruction boundaries or text stream.
+        # =====================================================================
+        if effective_role in {
+            TextRole.SIDEBAR.value,
+            TextRole.FOOTNOTE.value,
+            TextRole.TABLE_CELL.value,
+            TextRole.INSIDE_FIGURE.value,
+            TextRole.FIGURE_LABEL.value,
+            TextRole.CODE.value,
+            TextRole.HEADER_ARTIFACT.value,
+        }:
             continue
 
         text = (span.get("cleaned_text") or "")
         if not text:
             continue
 
-        curr_column = span.get("column_index", 0)
-        curr_para = span.get("paragraph_index", 0)
-        curr_role = span.get("role", TextRole.BODY.value)
+        curr_column = span.get("column_index", 0) or 0
+        curr_para = span.get("paragraph_index", 0) or 0
         curr_page = span.get("page_number", 0)
-        curr_margin = span.get("is_margin_content", False)  # NEW v2.1
 
         # Determine prefix based on boundaries
         prefix = ""
         if full_text:
             # =================================================================
+            # PRIORITY 0 (PHASE 2.7): UNIVERSAL A2 OVERRIDE — SUPREME AUTHORITY
+            # If upstream proved linguistic continuity, we MUST weld.
+            # =================================================================
+            if prev_span_ref and prev_span_ref.get("a2_continues_to_next", False):
+                prefix = " "
+                a2_signal_joins += 1
+
+            # =================================================================
             # PRIORITY 1: Column change (same page) = hard break
             # =================================================================
-            if prev_column is not None and curr_column != prev_column and curr_page == prev_page:
+            elif (
+                    prev_column is not None and
+                    curr_column != prev_column and
+                    curr_page == prev_page
+            ):
                 prefix = "\n\n"
 
             # =================================================================
-            # PRIORITY 1.5: Margin status change (same page) = hard break (NEW v2.1)
-            # Defense-in-depth: catches margin bleeding even if column detection
-            # fails to assign different indices.
-            # =================================================================
-            elif prev_margin is not None and curr_margin != prev_margin and curr_page == prev_page:
-                prefix = "\n\n"
-                margin_breaks += 1
-
-            # =================================================================
-            # PRIORITY 2: Role-based breaks
-            # =================================================================
-            elif curr_role in _RECONSTRUCT_BREAK_BEFORE_ROLES:
-                prefix = "\n\n"
-            elif prev_role in _RECONSTRUCT_BREAK_AFTER_ROLES:
-                prefix = "\n\n"
-
-            # =================================================================
-            # PRIORITY 3: Page change = space (preserve sentence flow)
+            # PRIORITY 2: Page change = space (preserve sentence flow)
             # =================================================================
             elif prev_page is not None and curr_page != prev_page:
                 prefix = " "
 
             # =================================================================
-            # PRIORITY 4: Paragraph change on same page = soft break
+            # PRIORITY 3: Paragraph change on same page = soft break
             # =================================================================
             elif prev_para is not None and curr_para != prev_para:
                 prefix = "\n"
 
             # =================================================================
-            # PRIORITY 5: Smart joining (letter-spacing detection)
+            # PRIORITY 4: Default join (no structural break)
             # =================================================================
-            elif not full_text.endswith(" ") and not text.startswith(" "):
+            else:
+                prefix = " "
 
-                # -------------------------------------------------------------
-                # HARDENING: Hyphen-space normalization across line breaks
-                # Example: "bio- \n logical" → "bio-logical"
-                # NOTE: We intentionally preserve the hyphen to avoid
-                #       corrupting character index mappings.
-                # -------------------------------------------------------------
-                if prev_text.endswith("-") and text and text[0].islower():
-                    prefix = ""  # remove space only, keep hyphen
-                    letter_spacing_joins += 1
-
-                elif _should_join_without_space(prev_text, text):
-                    prefix = ""  # No space — join directly
-                    letter_spacing_joins += 1
-
-                else:
-                    prefix = " "  # Normal word boundary
+        # GUARDRAIL: prefix must be structural whitespace only
+        if prefix not in ("", " ", "\n", "\n\n"):
+            prefix = " "
 
         # Add prefix characters to source map (map to previous span or -1)
         prev_span_idx = span_map[-1]["span_index"] if span_map else -1
+        prefix_map_idx = prev_span_idx if prefix == " " else -1
         for _ in prefix:
-            char_to_span.append(prev_span_idx)
+            char_to_span.append(prefix_map_idx)
 
         # Build span map entry
         start_idx = len(full_text) + len(prefix)
@@ -5252,34 +7314,49 @@ def _reconstruct_text_for_segmentation(
 
         # Add text characters to source map (map to current span)
         for _ in text:
-            char_to_span.append(i)
+            char_to_span.append(orig_idx)
 
+            # NOTE: span_index now correctly refers to index in input list
         span_map.append({
             "start": start_idx,
             "end": end_idx,
-            "span_index": i,
+            "span_index": orig_idx,
             "column_index": curr_column,
             "paragraph_index": curr_para,
-            "role": curr_role,
         })
 
         # Update tracking
         prev_column = curr_column
         prev_para = curr_para
-        prev_role = curr_role
         prev_page = curr_page
         prev_text = text
-        prev_margin = curr_margin  # NEW v2.1
+
+        # REVISION B: Track span for next iteration
+        prev_span_ref = span
 
     if trace_id:
         logger.debug(
             "[%s] Reconstructed text: %d chars, %d spans, source map size: %d, "
-            "letter-spacing joins: %d, margin breaks: %d",
+            "a2_signal_joins: %d",
             trace_id, len(full_text), len(span_map), len(char_to_span),
-            letter_spacing_joins, margin_breaks
+            a2_signal_joins
         )
 
+    # =========================================================================
+    # PHASE 2.7 GUARD 3: Safety assertion (non-destructive)
+    # Detect structural anomalies without altering output.
+    # =========================================================================
+    open_parens = full_text.count("(")
+    close_parens = full_text.count(")")
+    if open_parens != close_parens:
+        if trace_id:
+            logger.warning(
+                "[%s] Phase 2.7: Unbalanced parentheses in stream (open=%d, close=%d)",
+                trace_id, open_parens, close_parens
+            )
+
     return full_text, span_map, char_to_span
+
 
 
 def _should_join_without_space(prev_text: str, curr_text: str) -> bool:
@@ -5405,6 +7482,8 @@ def _should_join_without_space(prev_text: str, curr_text: str) -> bool:
         'semi', 'sub', 'super', 'trans', 'ultra', 'extra', 'infra',
         'extrafusal', 'intrafusal', 'noci', 'proprio', 'chemo', 'baro',
         'osmo', 'soma', 'somato', 'viscero',
+        # HARDENED: Added high-frequency scientific prefixes
+        'non', 'multi', 'bi', 'tri', 'uni',
     })
 
     if prev_lower in compound_prefixes:
@@ -5469,7 +7548,8 @@ def _detect_synthetic_figures(
 
         word_count = len(text.split())
         char_count = len(text)
-        has_sentence_punct = text.rstrip()[-1] in '.!?' if text.rstrip() else False
+        tail = text.rstrip()
+        has_sentence_punct = (tail[-1] in '.!?:;') if tail else False
 
         # Prose indicators
         prose_starters = {'the', 'a', 'an', 'this', 'that', 'these', 'those',
@@ -5488,6 +7568,7 @@ def _detect_synthetic_figures(
         if is_label_like:
             label_candidates.append({
                 "text": text,
+                "text_font_size": span.get("font_size", 0),
                 "bbox": bbox,
                 "center_x": (bbox[0] + bbox[2]) / 2,
                 "center_y": (bbox[1] + bbox[3]) / 2,
@@ -5499,7 +7580,15 @@ def _detect_synthetic_figures(
     # =========================================================================
     # Step 2: Spatial Clustering (Simple Proximity Grouping)
     # =========================================================================
-    CLUSTER_DISTANCE = 80
+    # HARDENED: Scale distance by font size to handle High-DPI scans
+    font_sizes = [
+        s["text_font_size"] for s in label_candidates
+        if "text_font_size" in s and s["text_font_size"] > 0
+    ]
+    median_fs = sorted(font_sizes)[len(font_sizes) // 2] if font_sizes else 10.0
+
+    # Cluster distance = ~8 lines of text / characters. Scales with resolution.
+    CLUSTER_DISTANCE = max(median_fs * 6.0, 70.0)
 
     clusters: List[List[Dict]] = []
     used: Set[int] = set()
@@ -5523,15 +7612,21 @@ def _detect_synthetic_figures(
                     dx = abs(other["center_x"] - member["center_x"])
                     dy = abs(other["center_y"] - member["center_y"])
 
-                    # FIXED v3.5: Column-Aware Clustering
-                    # Prevent jumping across column gutters.
-                    # Text flows horizontally; large X gaps suggest different columns.
-                    COLUMN_GUTTER_GUARD = 60
-                    if dx > COLUMN_GUTTER_GUARD:
-                        continue
+                    # REVISION 3: Removed Column-Aware Clustering
+                    # Diagrams often span multiple columns (e.g. wide figures).
+                    # We must allow large horizontal gaps for labels like "Force" (left) and "Length" (right).
+                    # The previous guard prevented detecting wide diagrams, causing "Phantom Columns".
 
                     # Euclidean distance for local proximity
                     distance = (dx ** 2 + dy ** 2) ** 0.5
+
+                    # HARDEN (anti-bridging):
+                    # Prevent transitive "chain" merges across unrelated label groups.
+                    # Even in wide diagrams, a single hop should not span most of the page.
+                    MAX_HOP_X = page_width * 0.45
+                    MAX_HOP_Y = page_height * 0.35
+                    if dx > MAX_HOP_X or dy > MAX_HOP_Y:
+                        continue
 
                     if distance <= CLUSTER_DISTANCE:
                         cluster.append(other)
@@ -5545,7 +7640,7 @@ def _detect_synthetic_figures(
     # =========================================================================
     # Step 3: Validate Clusters (NEW: Horizontal Spread Check)
     # =========================================================================
-    MIN_DIMENSION_SPREAD = 50
+    MIN_DIMENSION_SPREAD = max(median_fs * 5.0, 50.0)
 
     valid_clusters: List[List[Dict]] = []
 
@@ -5834,6 +7929,7 @@ def _heal_cross_page_truncations(
 
     return healed
 
+
 def _segment_sentences(
         full_text: str,
         char_to_span: List[int],
@@ -5841,40 +7937,24 @@ def _segment_sentences(
         trace_id: str = None
 ) -> List[Dict]:
     """
-    Sentence segmentation with Source Map lookup and Fragment Healing.
+    Segment a reconstructed text stream into sentence units.
 
-    Uses char_to_span for O(1) mapping from character positions to source spans.
-    Includes robust 4-method fallback chain to minimize sentence drops.
+    ARCHITECTURAL GUARDRAIL:
+    This method is the SOLE authority for sentence segmentation (cutting).
 
-    HARDENED v3.0:
-        1. Deterministic role resolution
-        2. Bbox propagation for highlighting
-        3. tts_text field for downstream compatibility
-        4. Improved cursor tracking for normalized matches
-        5. Fragment Healing post-processing
-        6. NEW: Truncation Healing (repairs cuts at aux verbs/articles)
-        7. NEW: Punctuation Normalization
+    Responsibilities:
+      - Cut full_text into sentences
+      - Map sentences back to source spans via char_to_span
+      - Populate sentence-level structural metadata
 
-    Alignment Methods:
-        1. direct: Exact string find (fastest)
-        2. normalized: Whitespace-normalized match
-        3. fuzzy: First N words match
-        4. fallback: Cursor position (never drops)
-
-    Post-Processing:
-        - Fragment Healing: Merges orphan fragments with following sentences
-        - Truncation Healing: Repairs sentences cut at auxiliary verbs
-        - Punctuation Normalization: Fixes spacing around brackets/punctuation
-
-    Args:
-        full_text: Reconstructed text from all spans.
-        char_to_span: Character-to-span index mapping.
-        all_spans: List of all span dictionaries.
-        trace_id: Optional trace ID for logging.
-
-    Returns:
-        List of sentence dictionaries with text, span indices, and metadata.
+    Explicitly excluded:
+      - Fragment healing or merging
+      - Truncation repair
+      - Punctuation normalization
+      - Text mutation
+      - TTS preparation
     """
+
     if not full_text or not char_to_span or not all_spans:
         if trace_id:
             logger.warning("[%s] Empty input to _segment_sentences", trace_id)
@@ -5998,12 +8078,12 @@ def _segment_sentences(
                 )
             processed_sentences.append({
                 "text": sent,
-                "tts_text": sent,
-                "span_start_index": 0,
-                "span_end_index": 0,
-                "paragraph_index": 0,
-                "column_index": 0,
-                "page_number": 1,
+                "tts_text": None,
+                "span_start_index": -1,
+                "span_end_index": -1,
+                "paragraph_index": -1,
+                "column_index": -1,
+                "page_number": -1,
                 "role": TextRole.BODY.value,
                 "char_start": start_char,
                 "char_end": end_char,
@@ -6059,7 +8139,7 @@ def _segment_sentences(
         # =====================================================================
         sentence_record: Dict = {
             "text": sent,
-            "tts_text": sent,
+            "tts_text": None,
             "span_start_index": start_span_idx,
             "span_end_index": end_span_idx,
             "paragraph_index": first_span.get("paragraph_index", 0),
@@ -6086,110 +8166,6 @@ def _segment_sentences(
         processed_sentences.append(sentence_record)
 
     # =========================================================================
-    # POST-PROCESSING: Fragment Healing (v3.0 — Linguistic + Buffered)
-    # =========================================================================
-
-    # NOTE:
-    # - Forward-only merging via delayed emission (pending buffer)
-    # - Uses global _HEALING_CUT_INDICATORS for consistency
-    # - Metadata always populated
-
-    healed_sentences: List[Dict] = []
-    pending: Optional[Dict] = None
-    healed_count = 0
-
-    def _finalize_sentence(sent: Dict) -> None:
-        # Ensure schema stability
-        sent.setdefault("healing_applied", "none")
-        sent["alignment_confidence"] = sent.get("alignment_method", "direct")
-        healed_sentences.append(sent)
-
-    for curr in processed_sentences:
-        curr_text = (curr.get("text") or "").strip()
-
-        # Always initialize metadata
-        curr.setdefault("healing_applied", "none")
-        curr["alignment_confidence"] = curr.get("alignment_method", "direct")
-
-        if not pending:
-            pending = curr
-            continue
-
-        pending_text = (pending.get("text") or "").strip()
-
-        # -------------------------------
-        # Linguistic Signals
-        # -------------------------------
-        pending_words = pending_text.rstrip(".!?").split()
-        last_word = pending_words[-1].lower() if pending_words else ""
-
-        # REFERENCE GLOBAL CONSTANT HERE
-        ends_with_cut = last_word in _HEALING_CUT_INDICATORS
-
-        has_terminal_punct = pending_text.endswith((".", "!", "?"))
-        starts_lowercase = bool(curr_text) and curr_text[0].islower()
-
-        # Is the PENDING sentence a fragment that needs the CURRENT one?
-        is_fragment_candidate = (ends_with_cut or not has_terminal_punct)
-
-        # -------------------------------
-        # Merge Decision (Forward-only)
-        # -------------------------------
-        if is_fragment_candidate and starts_lowercase:
-            # Merge curr into pending
-            merged_text = pending_text.rstrip(".!?") + " " + curr_text.lstrip()
-
-            pending["text"] = merged_text
-            pending["tts_text"] = merged_text
-            pending["healing_applied"] = "fragment"
-            healed_count += 1
-            pending["source_sentence_count"] = (
-                    pending.get("source_sentence_count", 1)
-                    + curr.get("source_sentence_count", 1)
-            )
-
-            # Span / char continuity (conservative)
-            pending["span_end_index"] = curr.get(
-                "span_end_index", pending.get("span_end_index")
-            )
-            pending["char_end"] = curr.get(
-                "char_end", pending.get("char_end")
-            )
-
-            # Do not finalize pending yet; it might need to eat the next sentence too
-            continue
-
-        # -------------------------------
-        # No merge → finalize pending
-        # -------------------------------
-        _finalize_sentence(pending)
-        pending = curr
-
-    # Flush final pending sentence
-    if pending:
-        _finalize_sentence(pending)
-
-    processed_sentences = healed_sentences
-
-    # =========================================================================
-    # POST-PROCESSING: Truncation Healing (NEW v3.0)
-    # =========================================================================
-    # Repairs sentences cut at auxiliary verbs, articles, or prepositions.
-    # Only heals sentences ending with PERIOD (not ?, !, :).
-    # =========================================================================
-    processed_sentences = _heal_truncated_sentences(processed_sentences, trace_id)
-
-    # =========================================================================
-    # POST-PROCESSING: Punctuation Normalization (NEW v3.0)
-    # =========================================================================
-    # Fixes spacing artifacts around punctuation marks.
-    # "( text )" → "(text)"
-    # =========================================================================
-    for sent in processed_sentences:
-        sent["text"] = _normalize_punctuation_spacing(sent["text"])
-        sent["tts_text"] = _normalize_punctuation_spacing(sent.get("tts_text", sent["text"]))
-
-    # =========================================================================
     # LOGGING
     # =========================================================================
     if trace_id:
@@ -6199,9 +8175,9 @@ def _segment_sentences(
             methods[m] = methods.get(m, 0) + 1
         logger.debug(
             "[%s] Segmentation: %d sentences from %d raw, %d empty skipped, "
-            "alignment methods=%s, failures=%d, healed=%d",
+            "alignment methods=%s, failures=%d",
             trace_id, len(processed_sentences), len(raw_sentences),
-            empty_skipped, methods, alignment_failures, healed_count
+            empty_skipped, methods, alignment_failures
         )
 
     return processed_sentences
@@ -6240,47 +8216,120 @@ def _normalize_punctuation_spacing(text: str) -> str:
 
     return text.strip()
 
+
 def _find_actual_end_position(full_text: str, start: int, normalized_target: str) -> int:
     """
     Find the actual end position in full_text for a normalized match.
 
-    When whitespace is collapsed during normalization, the normalized length
-    differs from the actual span length. This function walks through full_text
-    to find where the normalized content actually ends.
+    HARDENED MAPPING RULE:
+    - Whitespace in normalized_target may correspond to ANY run of whitespace in full_text.
+    - For non-whitespace characters:
+        * Always advance through full_text.
+        * Only advance target_idx when the current non-space character matches (case-insensitive).
+        * If full_text contains ignorable characters (digits/punct) that may have been removed
+          during normalization, skip them WITHOUT consuming target characters.
+
+    This makes the mapper safe even if normalized_target was produced with
+    lowercase + digit/punctuation stripping, not strictly whitespace-only collapsing.
 
     Args:
         full_text: Original text with original whitespace.
         start: Starting position in full_text.
-        normalized_target: Normalized (whitespace-collapsed) target string.
+        normalized_target: Normalized target string (expected lowercase).
 
     Returns:
         End position in full_text.
     """
+
+    def _is_ignorable(ch: str) -> bool:
+        # Conservative: treat common "normalization-removed" characters as ignorable.
+        # (Digits + most punctuation). Keep letters/whitespace.
+        return ch.isdigit() or (not ch.isalnum() and not ch.isspace())
+
     target_idx = 0
     text_idx = start
 
     while target_idx < len(normalized_target) and text_idx < len(full_text):
-        # Skip extra whitespace in full_text
-        while text_idx < len(full_text) and full_text[text_idx].isspace():
-            if target_idx < len(normalized_target) and normalized_target[target_idx].isspace():
-                # Both have whitespace — advance both
-                target_idx += 1
-                text_idx += 1
-                # Skip any additional whitespace in full_text
-                while text_idx < len(full_text) and full_text[text_idx].isspace():
-                    text_idx += 1
-                break
-            else:
-                # Extra whitespace in full_text only — skip it
-                text_idx += 1
+        t_ch = normalized_target[target_idx]
 
-        # Match non-whitespace characters
-        if target_idx < len(normalized_target) and text_idx < len(full_text):
-            if not normalized_target[target_idx].isspace():
+        # 1) Whitespace in target: consume >=1 whitespace run in full_text
+        if t_ch.isspace():
+            # Advance target over any whitespace run
+            while target_idx < len(normalized_target) and normalized_target[target_idx].isspace():
                 target_idx += 1
+            # Advance text over any whitespace run
+            while text_idx < len(full_text) and full_text[text_idx].isspace():
                 text_idx += 1
+            continue
+
+        # 2) Non-whitespace in target: walk forward in full_text until we match t_ch,
+        # skipping whitespace differences and ignorable full_text chars.
+        #
+        # HARDENED: Bounded forward scan to prevent runaway resync
+        max_scan = max(len(normalized_target) * 4, 32)
+        scan_count = 0
+        while text_idx < len(full_text) and scan_count < max_scan:
+            scan_count += 1
+            f_ch = full_text[text_idx]
+
+            # Skip whitespace in full_text without consuming target chars
+            if f_ch.isspace():
+                text_idx += 1
+                continue
+
+            # If full_text char is ignorable under normalization rules, skip it
+            if _is_ignorable(f_ch):
+                text_idx += 1
+                continue
+
+            # Case-insensitive match (t_ch is already lowercase from _normalize_text)
+            if f_ch.lower() == t_ch:
+                text_idx += 1
+                target_idx += 1
+                break
+
+            # Non-match, non-ignorable: advance full_text (do NOT consume target)
+            text_idx += 1
+
+        # Guard: if we failed to match within bounded scan, stop to prevent drift
+        if scan_count >= max_scan:
+            break
 
     return text_idx
+
+
+def _compute_sentence_page_bboxes(
+        all_spans: List[Dict],
+        span_indices: List[int]
+) -> Dict[int, Tuple[float, float, float, float]]:
+    """
+    Compute per-page bbox unions for a sentence's source spans.
+
+    Returns:
+        {page_number: (x0,y0,x1,y1), ...} for all pages represented in span_indices.
+        Empty dict if nothing valid.
+    """
+    page_boxes: Dict[int, List[Tuple[float, float, float, float]]] = {}
+
+    for idx in span_indices or []:
+        if idx < 0 or idx >= len(all_spans):
+            continue
+        span = all_spans[idx]
+        bbox = span.get("bbox")
+        page = span.get("page_number")
+        if not bbox or page is None or len(bbox) < 4:
+            continue
+        page_boxes.setdefault(int(page), []).append(bbox)
+
+    out: Dict[int, Tuple[float, float, float, float]] = {}
+    for p, bxs in page_boxes.items():
+        out[p] = (
+            min(b[0] for b in bxs),
+            min(b[1] for b in bxs),
+            max(b[2] for b in bxs),
+            max(b[3] for b in bxs),
+        )
+    return out
 
 
 def _compute_sentence_bbox(
@@ -6382,7 +8431,8 @@ def _normalize_text(input_text: str) -> str:
 
 def _compute_global_header_footer_bands(
         page_outputs: List[Dict],
-        trace_id: str = None
+        trace_id: str = None,
+        global_median_font_size: float = None  # NEW ARGUMENT
 ) -> Dict[str, List[int]]:
     """
     Compute global header/footer Y-bands across all pages.
@@ -6438,9 +8488,19 @@ def _compute_global_header_footer_bands(
             if not text or len(text) < 2:
                 continue
 
+                # HARDENED: Continuation shield
+                # If a fragment starts lowercase, it is likely a cross-page continuation.
+            if text[0].islower():
+                continue
+
             # SAFETY FIX: Explicit Binning (Round to nearest 10px bucket)
             # Uses _REGION_Y_BAND_ROUNDING (10) for unambiguous grouping
-            rounded_y = int(round(span_y_top / _REGION_Y_BAND_ROUNDING) * _REGION_Y_BAND_ROUNDING)
+            base_fs = span.get("font_size", 10.0)
+            if global_median_font_size and global_median_font_size > 0:
+                base_fs = global_median_font_size
+
+            bucket_size = max(6.0, base_fs * 0.6)
+            rounded_y = int(round(span_y_top / bucket_size) * bucket_size)
 
             # Check if span is in header zone
             if span_y_top <= header_zone_max_y:
@@ -6493,17 +8553,24 @@ def _compute_global_header_footer_bands(
 
         return merged_pages, merged_texts
 
-    # Merge nearby bands
+    # HARDENED: Merge adjacent bands caused by scan drift (NEW SPECIALIST TWEAK)
+    # Use the calculated bucket_size (or global equivalent) as the tolerance.
+    merge_tolerance = max(6.0, (global_median_font_size or 10.0) * 0.6)
+
     header_band_pages, header_band_texts = merge_nearby_bands(
-        header_band_pages, header_band_texts, _GLOBAL_BAND_MERGE_TOLERANCE
+        header_band_pages, header_band_texts, merge_tolerance
+    )
+    footer_band_pages, footer_band_texts = merge_nearby_bands(
+        footer_band_pages, footer_band_texts, merge_tolerance
     )
     footer_band_pages, footer_band_texts = merge_nearby_bands(
         footer_band_pages, footer_band_texts, _GLOBAL_BAND_MERGE_TOLERANCE
     )
 
     # Apply frequency threshold
+    # FIX: Use min_floor to prevent single-page artifacts from polluting global bands
     min_floor = 2 if total_pages > 1 else 1
-    frequency_threshold = max(1, int(total_pages * _GLOBAL_BAND_MIN_PAGE_FRACTION))
+    frequency_threshold = max(min_floor, int(total_pages * _GLOBAL_BAND_MIN_PAGE_FRACTION))
 
     global_headers: Set[int] = set()
     global_footers: Set[int] = set()
@@ -6569,10 +8636,10 @@ def _apply_global_header_footer_roles(
     tagged_footer = 0
 
     for span in all_spans:
-        # Skip already-tagged non-body roles
+        # HARDENED: Only tag BODY spans as global header/footer.
+        # Prevents clobbering validated HEADINGS, CAPTIONS, or TABLES.
         current_role = span.get("role", TextRole.BODY.value)
-        if current_role in {TextRole.HEADER.value, TextRole.FOOTER.value,
-                            TextRole.PAGE_NUMBER.value}:
+        if current_role != TextRole.BODY.value:
             continue
 
         bbox = span.get("bbox")
@@ -6581,6 +8648,10 @@ def _apply_global_header_footer_roles(
 
         page_num = span.get("page_number", 1)
         page_height = page_heights.get(page_num, 800)
+
+        # Calculate zones for safety check
+        header_zone_max_y = page_height * _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT
+        footer_zone_min_y = page_height * (1.0 - _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT)
 
         # =====================================================================
         # Y-Band Matching
@@ -6594,6 +8665,12 @@ def _apply_global_header_footer_roles(
         # =====================================================================
         # Apply Tags (OR logic: either match triggers)
         # =====================================================================
+        # Guard: Even if in band, span must be physically in the zone
+        if in_header_band and span_y > header_zone_max_y:
+            in_header_band = False
+        if in_footer_band and span_y < footer_zone_min_y:
+            in_footer_band = False
+
         if in_header_band:
             span["role"] = TextRole.HEADER.value
             span["is_global_header"] = True
@@ -6642,8 +8719,9 @@ def _summarize_document_bands(
     header_set: set = set(global_header_bands)
     footer_set: set = set(global_footer_bands)
 
-    band_to_sample_header: Dict[int, Optional[str]] = {y: None for y in header_set}
-    band_to_sample_footer: Dict[int, Optional[str]] = {y: None for y in footer_set}
+    # HARDENED: Collect set of samples to capture variable headers
+    band_to_samples_header: Dict[int, Set[str]] = {y: set() for y in header_set}
+    band_to_samples_footer: Dict[int, Set[str]] = {y: set() for y in footer_set}
 
     for page_data in raw_data_list:
         # Consider both kept and excluded spans
@@ -6667,21 +8745,21 @@ def _summarize_document_bands(
             if not text:
                 continue
 
-            # Capture first sample for each band
-            if y_band in header_set and band_to_sample_header.get(y_band) is None:
-                band_to_sample_header[y_band] = text
+            # Collect unique variants
+            if y_band in header_set:
+                band_to_samples_header[y_band].add(text)
 
-            if y_band in footer_set and band_to_sample_footer.get(y_band) is None:
-                band_to_sample_footer[y_band] = text
+            if y_band in footer_set:
+                band_to_samples_footer[y_band].add(text)
 
-    # Build output summaries
+    # Build output summaries (return lists)
     headers_summary: List[Dict] = [
-        {"y": y, "sample_text": band_to_sample_header.get(y) or ""}
+        {"y": y, "samples": sorted(list(band_to_samples_header[y]))}
         for y in sorted(header_set)
     ]
 
     footers_summary: List[Dict] = [
-        {"y": y, "sample_text": band_to_sample_footer.get(y) or ""}
+        {"y": y, "samples": sorted(list(band_to_samples_footer[y]))}
         for y in sorted(footer_set)
     ]
 
@@ -6823,23 +8901,35 @@ def _filter_spans_by_global_bands(
         # =====================================================================
         span_text = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
         normalized_span_text = _normalize_text(span_text)
-
         should_exclude = False
         exclusion_reason = ""
 
+        # Shared "Body Text" Shield Logic (Symmetrical)
+        # 1. Lowercase start = likely continuation
+        # 2. Dense text = likely displaced body
+        is_continuation = bool(span_text) and span_text[0].islower()
+        is_dense_body = len(span_text) > 60 or len(span_text.split()) > 6
+        is_body_like = is_continuation or is_dense_body
+
+        # =========================================================
+        # HEADER BAND LOGIC (Semantic-First, Non-Destructive)
+        # =========================================================
         if matches_header_band:
-            if not normalized_header_samples:
-                # No samples available — exclude based on band position only
-                should_exclude = True
-                exclusion_reason = "header_band_no_samples"
+            if is_body_like:
+                should_exclude = False
+
+            elif not normalized_header_samples:
+                # HARDENED: Never delete based on position alone.
+                should_exclude = False
+
             else:
-                # Check similarity against header samples
                 similarity_threshold = (
                     _FILTER_SHORT_TEXT_THRESHOLD
                     if len(normalized_span_text) < _FILTER_SHORT_TEXT_LENGTH
                     else _FILTER_FUZZY_MATCH_THRESHOLD
                 )
 
+                # Semantic confirmation required
                 for sample in normalized_header_samples:
                     similarity = _text_similarity(normalized_span_text, sample)
                     if similarity >= similarity_threshold:
@@ -6847,19 +8937,25 @@ def _filter_spans_by_global_bands(
                         exclusion_reason = f"header_match_{similarity:.2f}"
                         break
 
+        # =========================================================
+        # FOOTER BAND LOGIC (Runs only if header did not exclude)
+        # =========================================================
         if not should_exclude and matches_footer_band:
-            if not normalized_footer_samples:
-                # No samples available — exclude based on band position only
-                should_exclude = True
-                exclusion_reason = "footer_band_no_samples"
+            if is_body_like:
+                should_exclude = False
+
+            elif not normalized_footer_samples:
+                # HARDENED: Never delete based on position alone.
+                should_exclude = False
+
             else:
-                # Check similarity against footer samples
                 similarity_threshold = (
                     _FILTER_SHORT_TEXT_THRESHOLD
                     if len(normalized_span_text) < _FILTER_SHORT_TEXT_LENGTH
                     else _FILTER_FUZZY_MATCH_THRESHOLD
                 )
 
+                # Semantic confirmation required
                 for sample in normalized_footer_samples:
                     similarity = _text_similarity(normalized_span_text, sample)
                     if similarity >= similarity_threshold:
@@ -6920,19 +9016,31 @@ def normalize_header_footer_across_document(
     # =========================================================================
     # STEP 1: Compute global bands
     # =========================================================================
-    global_bands = _compute_global_header_footer_bands(page_outputs)
+    # HARDENED: Calculate Global Median Font Size on the fly for bucket stability
+    # This enables the resolution-agnostic optimizations in _compute_global_header_footer_bands
+    all_fonts = []
+    for p in page_outputs:
+        # Collect from both content and previously excluded spans (if any)
+        for s in p.get("content", []) + p.get("excluded", []):
+            fs = s.get("font_size", 0)
+            if fs > 0:
+                all_fonts.append(fs)
+
+    global_median_fs = 10.0
+    if all_fonts:
+        all_fonts.sort()
+        global_median_fs = all_fonts[len(all_fonts) // 2]
+
+    # Pass the calculated median to the band detector
+    # This hardens BOTH headers and footers because they use the same bucketing math
+    global_bands = _compute_global_header_footer_bands(
+        page_outputs,
+        trace_id=trace_id,
+        global_median_font_size=global_median_fs
+    )
+
     global_header_bands = global_bands["header_bands"]
     global_footer_bands = global_bands["footer_bands"]
-
-    if trace_id:
-        logger.info(
-            "[%s] Global bands detected: %d header, %d footer",
-            trace_id, len(global_header_bands), len(global_footer_bands)
-        )
-
-    # If no global bands, nothing to normalize
-    if not global_header_bands and not global_footer_bands:
-        return
 
     # =========================================================================
     # STEP 2: Build sample text summaries
@@ -6943,16 +9051,14 @@ def normalize_header_footer_across_document(
         global_footer_bands
     )
 
-    # Extract sample texts for filtering
-    header_samples: List[str] = [
-        h["sample_text"] for h in band_summaries["headers"]
-        if h.get("sample_text")
-    ]
+    # Extract sample texts for filtering (Flatten lists)
+    header_samples: List[str] = []
+    for h in band_summaries["headers"]:
+        header_samples.extend(h.get("samples", []))
 
-    footer_samples: List[str] = [
-        f["sample_text"] for f in band_summaries["footers"]
-        if f.get("sample_text")
-    ]
+    footer_samples: List[str] = []
+    for f in band_summaries["footers"]:
+        footer_samples.extend(f.get("samples", []))
 
     if trace_id:
         logger.debug(
@@ -7013,29 +9119,38 @@ def normalize_header_footer_across_document(
 
 def _sanitize_for_tts(
         text: str,
+        role: str = TextRole.BODY.value,
         add_terminal_punct: bool = True,
         change_tracker: Dict = None,
         trace_id: str = None
 ) -> str:
     """
-    TTS text sanitization with optional change tracking.
+    Prepare text for TTS audio generation.
 
-    Converts text to TTS-safe format. Optionally tracks all modifications
-    for timing synchronization (when change_tracker dict is provided).
+    ARCHITECTURAL GUARDRAIL:
+    This method is the SOLE authority for pronunciation transformations.
+    It is the ONLY place allowed to change how text sounds.
 
-    Operations:
-        1. Smart case normalization (prevent TTS screaming)
-        2. Subscript/superscript expansion (H₂O → H 2 O)
-        3. Character substitutions (symbols → words)
-        4. Unicode normalization (NFKC)
-        5. Empty/orphan bracket removal
-        6. Space normalization
-        7. Terminal punctuation enforcement
+    This method must NOT:
+      - Perform structural normalization (owned by _clean_spans)
+      - Perform stream shaping (owned by _reconstruct_text_for_segmentation)
+      - Perform sentence segmentation or healing (owned by _segment_sentences)
+
+    Operations performed:
+        1. Smart case normalization (preserves acronyms)
+        2. Subscript/superscript expansion
+        3. Unit notation expansion
+        4. Symbol substitution
+        5. Role-aware noise removal (post-segmentation safe)
+        6. Empty/orphan bracket removal
+        7. Final spacing safety cleanup
+        8. Terminal punctuation enforcement
 
     Args:
-        text: Raw text to sanitize.
-        add_terminal_punct: Whether to add period if missing.
-        change_tracker: Optional dict to populate with change metadata.
+        text: Sentence text to sanitize.
+        role: Text role for role-aware noise removal (defaults to BODY).
+        add_terminal_punct: Whether to enforce terminal punctuation.
+        change_tracker: Optional mutation tracking dictionary.
         trace_id: Optional trace ID for logging.
 
     Returns:
@@ -7063,7 +9178,7 @@ def _sanitize_for_tts(
     if text.isupper() and len(text) > _TTS_ACRONYM_LENGTH_THRESHOLD:
         # Check if it's likely an acronym (no spaces, short)
         if " " in text or len(text) > _TTS_LONG_TEXT_THRESHOLD:
-            text = text.capitalize()
+            text = _smart_title_case(text)
             modifications.append("case_normalized")
 
     # =========================================================================
@@ -7076,7 +9191,7 @@ def _sanitize_for_tts(
         letter = match.group(1)
         subscripts = match.group(2)
         digits = "".join(SUBSCRIPT_DIGITS.get(c, c) for c in subscripts)
-        return f"{letter} {digits} "
+        return f"{letter} {digits}"
 
     text = _CHEMICAL_SUBSCRIPT_PATTERN.sub(expand_chemical_subscript, text)
 
@@ -7108,7 +9223,7 @@ def _sanitize_for_tts(
         modifications.append("superscript_expanded")
 
     # =========================================================================
-    # STEP 3.5: Unit notation expansion (BEFORE blanket substitutions)
+    # STEP 4: Unit notation expansion (BEFORE blanket substitutions)
     # Converts: 50/mm² → 50 per mm², 10/s → 10 per s
     # =========================================================================
     original_step35 = text
@@ -7118,7 +9233,7 @@ def _sanitize_for_tts(
         modifications.append("unit_notation_expanded")
 
     # =========================================================================
-    # STEP 4: Character substitutions (symbols → words)
+    # STEP 5: Character substitutions (symbols → words)
     # =========================================================================
     original = text
 
@@ -7132,15 +9247,6 @@ def _sanitize_for_tts(
 
     if text != original:
         modifications.append("symbols_substituted")
-
-    # =========================================================================
-    # STEP 5: Unicode normalization (NFKC)
-    # =========================================================================
-    original = text
-    text = unicodedata.normalize("NFKC", text)
-
-    if text != original:
-        modifications.append("unicode_normalized")
 
     # =========================================================================
     # STEP 6: Remove empty and orphan brackets
@@ -7157,9 +9263,42 @@ def _sanitize_for_tts(
         modifications.append("brackets_cleaned")
 
     # =========================================================================
-    # STEP 7: Space normalization
+    # STEP 7: Role-aware noise removal (post-segmentation safe)
     # =========================================================================
-    text = _WHITESPACE_PATTERN.sub(" ", text).strip()
+    _NOISE_REMOVAL_ALLOWED_ROLES = frozenset({
+        TextRole.BODY.value,
+    })
+
+    effective_role = role
+
+    if effective_role in _NOISE_REMOVAL_ALLOWED_ROLES:
+        text_before_noise = text
+
+        for noise in _NOISE_SUBSTRINGS:
+            if noise.lower() in text.lower():
+                pattern = re.compile(
+                    rf"(^|\s){re.escape(noise)}(\s|$)",
+                    re.IGNORECASE
+                )
+                text = pattern.sub(" ", text)
+
+        for noise_pattern in _NOISE_PATTERNS:
+            text = noise_pattern.sub("", text)
+
+        if text != text_before_noise:
+            modifications.append("noise_removed")
+            if trace_id:
+                logger.debug(
+                    "[%s] Noise removed: '%s' -> '%s'",
+                    trace_id,
+                    text_before_noise[:50],
+                    text[:50]
+                )
+
+    # =========================================================================
+    # STEP 7.5: Final spacing safety cleanup (non-structural)
+    # =========================================================================
+    text = _WHITESPACE_PATTERN.sub(" ", text)
 
     # =========================================================================
     # STEP 8: Terminal punctuation enforcement (decoder runaway mitigation)
@@ -7543,7 +9682,9 @@ def _finalize_chunk(
 def extract_page(
         doc: "fitz.Document",
         page_num: int,
-        trace_id: str = None
+        trace_id: str = None,
+        global_median_line_height: float = None,  # NEW
+        global_median_font_size: float = None  # NEW
 ) -> Dict:
     """
     STAGE 1: Extraction & Structure Analysis.
@@ -7572,6 +9713,8 @@ def extract_page(
         11. Assign span indices
 
     Args:
+        global_median_font_size:
+        global_median_line_height:
         doc: Open PyMuPDF Document object.
         page_num: Zero-based page index.
         trace_id: Optional trace ID for observability logging.
@@ -7644,10 +9787,13 @@ def extract_page(
         if table_rects:
             span_center_x = (span["bbox"][0] + span["bbox"][2]) / 2
             span_center_y = (span["bbox"][1] + span["bbox"][3]) / 2
+            # HARDENED: Check center OR intersection to catch edge-straddling spans
+            span_rect = fitz.Rect(span["bbox"])
             span["_is_table_content"] = any(
-                r.contains(fitz.Point(span_center_x, span_center_y))
+                r.contains(fitz.Point(span_center_x, span_center_y)) or r.intersects(span_rect)
                 for r in table_rects
             )
+
         else:
             span["_is_table_content"] = False
 
@@ -7680,7 +9826,11 @@ def extract_page(
     # =========================================================================
     # STEP 6: Detect Paragraphs (The "Blocks") — requires sorted spans
     # =========================================================================
-    _detect_paragraphs(raw_spans)
+    _detect_paragraphs(
+        raw_spans,
+        trace_id=trace_id,
+        global_median_line_height=global_median_line_height
+    )
 
     # =========================================================================
     # STEP 7: Filter Spans (The "Shield")
@@ -7724,6 +9874,7 @@ def extract_page(
             "page_number": page_num + 1,
             "width": page.rect.width,
             "height": page.rect.height,
+            "global_median_font_size": global_median_font_size,  # Store for Stage 2
         },
         "structure": regions,
         "content": valid_spans,
@@ -7766,10 +9917,10 @@ def compile_tts_ready_content(
     # =========================================================================
     # STEP 2: Process Each Page — Filter, Segment, Collect
     # =========================================================================
-    all_sentences: List[Dict] = []
-    global_sentence_index = 0
+    page_span_cache: Dict[int, List[Dict]] = {}
+    page_metadata_cache: Dict[int, Dict] = {}
 
-    for page_data in raw_data_list:
+    for page_idx, page_data in enumerate(raw_data_list):
         page_num = page_data.get("metadata", {}).get("page_number")
 
         header_sample_texts = [h.get("sample_text", "") for h in document_headers]
@@ -7789,44 +9940,413 @@ def compile_tts_ready_content(
         # Store excluded for debugging/analysis
         page_data["excluded_by_global_bands"] = excluded_spans
 
-        if not filtered_spans:
+        # =====================================================================
+        # PHASE 3.0: Content-Flow Outlier Refinement
+        # Detects single-page footers, attributions, isolated metadata that
+        # escaped global band detection. Mutates roles to FOOTNOTE/HEADER_ARTIFACT.
+        # Must run AFTER global bands, BEFORE role annotation loop.
+        # =====================================================================
+
+        _refine_roles_via_content_flow(filtered_spans, trace_id=trace_id)
+
+        # PHASE 0: Track bbox-invalid spans for auditability
+        bbox_invalid_spans = [s for s in filtered_spans if not s.get("bbox_is_valid", True)]
+        page_data["bbox_invalid_spans"] = bbox_invalid_spans
+
+        # PHASE 1: Preserve lossless text assembly while protecting geometry math
+        spans_for_text = list(filtered_spans)
+        spans_for_geometry = [s for s in filtered_spans if s.get("bbox_is_valid", True)]
+
+        if not spans_for_text:
             continue
 
-        tts_viable_spans = []
-        for span in filtered_spans:
-            # [cite_start]Default to BODY if role is missing [cite: 5]
+        # PHASE 1.5: Continuity-Aware Role Resolution (Stream-First Foundation)
+        _apply_continuity_role_resolution(spans_for_text, trace_id=trace_id)
+
+        # PHASE 0: Annotate non-viable spans instead of silently deleting them.
+        excluded_by_role = []
+
+        for span in spans_for_text:
             role = span.get("role", TextRole.BODY.value)
-            if role not in _TTS_NON_VIABLE_ROLES:
-                tts_viable_spans.append(span)
 
-        filtered_spans = tts_viable_spans
+            if role in _TTS_NON_VIABLE_ROLES:
+                span["_tts_excluded"] = True
+                span["_tts_exclude_reason"] = role
+                excluded_by_role.append(span)
+            else:
+                span["_tts_excluded"] = False
+                span["_tts_exclude_reason"] = None
 
-        if not filtered_spans:
+        # Record exclusions for audit/debug (lossless contract)
+        page_data["excluded_by_role"] = excluded_by_role
+
+        # =====================================================================
+        # PHASE 1.3: Line-Aware Rescue Rail
+        # Rescue excluded spans if they are on a line with viable BODY content.
+        # Prevents inline fragments like "), and pain (" from being lost.
+        # =====================================================================
+        lines = _build_lines_from_spans(spans_for_text, trace_id)
+
+        viable_line_ids = set()
+        for line_id, line in lines.items():
+            if any(
+                    s.get("role") == TextRole.BODY.value and not s.get("_tts_excluded", False)
+                    for s in line["spans"]
+            ):
+                viable_line_ids.add(line_id)
+
+        rescued_count = 0
+        for span in spans_for_text:
+            if span.get("_tts_excluded", False):
+                if span.get("line_id") in viable_line_ids:
+                    span["_tts_excluded"] = False
+                    span["_tts_rescued"] = True
+                    span["_tts_rescue_reason"] = "line_has_body_content"
+                    rescued_count += 1
+
+                    # ===========================================================================
+                    # PHASE 1.3 HARDEN: Document-Adaptive Inline Detection + Full Normalization (E3-v8)
+                    # ===========================================================================
+                    span_role = span.get("role", "")
+                    span_layout = span.get("layout_stream", "")
+
+                    is_margin_classified = (
+                            span_role == TextRole.SIDEBAR.value or
+                            (isinstance(span_layout, str) and span_layout.startswith("margin"))
+                    )
+
+                    # IMPORTANT: define unconditionally
+                    is_traditional_inline = False
+                    is_adaptive_inline = False
+                    is_ratio_fallback_inline = False
+                    detection_method = None
+
+                    if is_margin_classified:
+                        # Signal 1: traditional
+                        is_traditional_inline = span.get("span_index_in_line", 0) > 0
+                        if is_traditional_inline:
+                            detection_method = "traditional"
+
+                        # Signal 2/3: adaptive / ratio fallback (dominant stream, column-safe)
+                        if not is_traditional_inline:
+                            line_id = span.get("line_id")
+                            line = lines.get(line_id) if isinstance(lines, dict) else None
+
+                            if line and line.get("spans"):
+                                body_spans_by_stream = {}
+                                for s in line["spans"]:
+                                    if (
+                                            s is not span and
+                                            s.get("role") == TextRole.BODY.value and
+                                            not s.get("_tts_excluded", False)
+                                    ):
+                                        ls = s.get("layout_stream", "")
+                                        if isinstance(ls, str) and ls.startswith("body_col"):
+                                            body_spans_by_stream.setdefault(ls, []).append(s)
+
+                                if body_spans_by_stream:
+                                    dominant_stream = sorted(
+                                        body_spans_by_stream.keys(),
+                                        key=lambda k: (-len(body_spans_by_stream[k]),
+                                                       _extract_column_number(k))
+                                    )[0]
+
+                                    body_spans = body_spans_by_stream[dominant_stream]
+
+                                    span_bbox = span.get("bbox") or [0, 0, 0, 0]
+                                    span_x0, span_x1 = span_bbox[0], span_bbox[2]
+
+                                    xs = []
+                                    for b in body_spans:
+                                        bb = b.get("bbox") or [0, 0, 0, 0]
+                                        xs.extend([bb[0], bb[2]])
+                                    body_x_min, body_x_max = min(xs), max(xs)
+                                    has_x_overlap = (span_x0 < body_x_max and span_x1 > body_x_min)
+
+                                    nearest_dist = float("inf")
+                                    for b in body_spans:
+                                        b_bbox = b.get("bbox") or [0, 0, 0, 0]
+                                        b_x0, b_x1 = b_bbox[0], b_bbox[2]
+                                        if span_x1 <= b_x0:
+                                            dist = b_x0 - span_x1
+                                        elif span_x0 >= b_x1:
+                                            dist = span_x0 - b_x1
+                                        else:
+                                            dist = 0.0
+                                        nearest_dist = min(nearest_dist, dist)
+
+                                    # Adaptive (2+ body peers): median gap * multiplier, BUT CAPPED by page-width ratio
+                                    if len(body_spans) >= 2:
+                                        body_spans_sorted = sorted(
+                                            body_spans,
+                                            key=lambda s: (s.get("bbox") or [0, 0, 0, 0])[0]
+                                        )
+                                        gaps = []
+                                        for i in range(len(body_spans_sorted) - 1):
+                                            left = body_spans_sorted[i].get("bbox") or [0, 0, 0, 0]
+                                            right = body_spans_sorted[i + 1].get("bbox") or [0, 0,
+                                                                                             0, 0]
+                                            gap = right[0] - left[2]
+                                            if gap > 0:
+                                                gaps.append(gap)
+
+                                        if gaps:
+                                            gaps_sorted = sorted(gaps)
+                                            median_gap = gaps_sorted[len(gaps_sorted) // 2]
+
+                                            page_width = page_data.get("metadata", {}).get("width",
+                                                                                           _LAYOUT_DEFAULT_PAGE_WIDTH)
+                                            adaptive_threshold = min(
+                                                median_gap * _HARDEN_GAP_TOLERANCE_MULTIPLIER,
+                                                page_width * _HARDEN_MAX_INLINE_WIDTH_RATIO,
+                                            )
+
+                                            if has_x_overlap and nearest_dist <= adaptive_threshold:
+                                                is_adaptive_inline = True
+                                                detection_method = "adaptive"
+
+                                    # Single-peer fallback: ratio-based threshold
+                                    if (not is_adaptive_inline) and len(body_spans) == 1:
+                                        page_width = page_data.get("metadata", {}).get("width",
+                                                                                       _LAYOUT_DEFAULT_PAGE_WIDTH)
+                                        ratio_threshold = page_width * _HARDEN_SINGLE_PEER_WIDTH_RATIO
+
+                                        if has_x_overlap and nearest_dist <= ratio_threshold:
+                                            is_ratio_fallback_inline = True
+                                            detection_method = "ratio_fallback"
+
+                    # --- NORMALIZATION (applied if any inline signal fires) ---
+                    if is_margin_classified and (
+                            is_traditional_inline or is_adaptive_inline or is_ratio_fallback_inline):
+                        line_id = span.get("line_id")
+
+                        body_peer_stream = None
+                        body_peer_column = None
+                        dominant_body_stream = None
+
+                        try:
+                            line = lines.get(line_id) if isinstance(lines, dict) else None
+                            if line and line.get("spans"):
+                                # Step 1: dominant body stream on this line
+                                stream_counts = {}
+                                for s in line["spans"]:
+                                    if (
+                                            s.get("role") == TextRole.BODY.value and
+                                            not s.get("_tts_excluded", False)
+                                    ):
+                                        ls = s.get("layout_stream", "")
+                                        if isinstance(ls, str) and ls.startswith("body_col"):
+                                            stream_counts[ls] = stream_counts.get(ls, 0) + 1
+
+                                if stream_counts:
+                                    max_count = max(stream_counts.values())
+                                    candidates = [k for k, v in stream_counts.items() if
+                                                  v == max_count]
+                                    dominant_body_stream = \
+                                    sorted(candidates, key=_extract_column_number)[0]
+
+                                # Step 2: v7 best-peer selection:
+                                # dominant match > bbox distance > span_index_in_line distance
+                                span_bbox = span.get("bbox") or [0, 0, 0, 0]
+                                span_x0, span_x1 = span_bbox[0], span_bbox[2]
+                                span_sil = span.get("span_index_in_line", 0)
+
+                                best_peer = None
+                                best_peer_matches_dominant = False
+                                best_peer_box_distance = float("inf")
+                                best_peer_sil_distance = float("inf")
+
+                                for peer in line["spans"]:
+                                    if (
+                                            peer is not span and
+                                            peer.get("role") == TextRole.BODY.value and
+                                            not peer.get("_tts_excluded", False)
+                                    ):
+                                        ls = peer.get("layout_stream", "")
+                                        if not (isinstance(ls, str) and ls.startswith("body_col")):
+                                            continue
+                                        if dominant_body_stream and ls != dominant_body_stream:
+                                            continue
+
+                                        peer_matches_dominant = (
+                                                    ls == dominant_body_stream) if dominant_body_stream else False
+
+                                        peer_bbox = peer.get("bbox") or [0, 0, 0, 0]
+                                        peer_x0, peer_x1 = peer_bbox[0], peer_bbox[2]
+
+                                        if span_x1 <= peer_x0:
+                                            box_dist = peer_x0 - span_x1
+                                        elif span_x0 >= peer_x1:
+                                            box_dist = span_x0 - peer_x1
+                                        else:
+                                            box_dist = 0.0
+
+                                        peer_sil = peer.get("span_index_in_line", 0)
+                                        sil_dist = abs(peer_sil - span_sil)
+
+                                        is_better = False
+                                        if peer_matches_dominant and not best_peer_matches_dominant:
+                                            is_better = True
+                                        elif peer_matches_dominant == best_peer_matches_dominant:
+                                            if box_dist < best_peer_box_distance:
+                                                is_better = True
+                                            elif box_dist == best_peer_box_distance:
+                                                if sil_dist < best_peer_sil_distance:
+                                                    is_better = True
+
+                                        if is_better:
+                                            best_peer = peer
+                                            best_peer_matches_dominant = peer_matches_dominant
+                                            best_peer_box_distance = box_dist
+                                            best_peer_sil_distance = sil_dist
+
+                                if best_peer:
+                                    body_peer_stream = best_peer.get("layout_stream")
+                                    body_peer_column = best_peer.get("column_index")
+
+                        except Exception:
+                            body_peer_stream = None
+                            body_peer_column = None
+                            dominant_body_stream = None
+
+                        # Apply full normalization (NO hardcoded column fallback)
+                        if body_peer_stream:
+                            span["role"] = TextRole.BODY.value
+                            span["layout_stream"] = body_peer_stream
+                            span["is_margin_content"] = False
+
+                            if body_peer_column is not None:
+                                span["column_index"] = body_peer_column
+                                span.pop("_tts_promotion_incomplete_reason", None)
+                            else:
+                                span[
+                                    "_tts_promotion_incomplete_reason"] = "peer_column_index_unavailable"
+
+                            span["_tts_promotion_reason"] = "inline_sidebar_promoted_to_body"
+                            span["_tts_promoted_to_body_stream"] = True
+                            span["_tts_inline_detection_method"] = detection_method
+
+        if trace_id and rescued_count:
+            logger.info(
+                "[%s] Phase 1.3: Rescued %d inline spans via line coherence",
+                trace_id, rescued_count
+            )
+
+        # Continue with filtering (rescued spans now included)
+        spans_for_text = [s for s in spans_for_text if not s.get("_tts_excluded", False)]
+
+        # Cache the processed spans for Pass 2
+        page_span_cache[page_idx] = spans_for_text
+        page_metadata_cache[page_idx] = {
+            "page_num": page_num,
+            "continuity": page_data.get("continuity", {}),
+        }
+    all_sentences: List[Dict] = []
+    global_sentence_index = 0
+
+    for page_idx in range(len(raw_data_list)):
+        spans_for_text = page_span_cache.get(page_idx, [])
+
+        if not spans_for_text:
             continue
 
-        full_text, span_map, char_to_span = _reconstruct_text_for_segmentation(
-            filtered_spans, trace_id
+        metadata = page_metadata_cache.get(page_idx, {})
+        page_num = metadata.get("page_num")
+        continuity = metadata.get("continuity", {})
+
+        # =====================================================================
+        # PHASE 2.0: Build sliding window from cache
+        # Window includes prev_tail + current + next_head
+        # All spans are deep copies with _page_local_idx tags
+        # =====================================================================
+        window_spans, page_span_range = _build_sliding_window_spans(
+            page_span_cache, page_idx, trace_id
         )
 
-        page_sentences = _segment_sentences(
-            full_text, char_to_span, filtered_spans, trace_id
+        if not window_spans:
+            continue
+
+        # Reconstruct text from window (cross-page aware)
+        window_text, window_span_map, window_char_to_span = _reconstruct_text_for_segmentation(
+            window_spans, trace_id
         )
 
-        # Detect structural continuity
-        continuity = page_data.get("continuity", {})
+        # Segment on full window text
+        window_sentences = _segment_sentences(
+            window_text, window_char_to_span, window_spans, trace_id
+        )
 
-        # Tag sentences with page info and continuity
+        # Filter to sentences starting in current page, remap indices
+        page_sentences = _filter_sentences_to_page(
+            window_sentences, window_spans, page_span_range,
+            page_idx, page_num, trace_id
+        )
+
+        # Tag sentences with continuity info (page_number already set by filter)
         for sent in page_sentences:
-            sent["page_number"] = page_num
             sent["in_continued_table"] = continuity.get("has_continued_table", False)
             sent["in_continued_figure"] = continuity.get("has_continued_figure", False)
 
             # Inject role from dominant span
+            # =================================================================
+            # PHASE 2.8: Role Injection from Dominant Span
+            #
+            # CRITICAL FIX: Use spans_for_text (the list that produced indices),
+            # not filtered_spans (which includes non-viable roles like sidebar).
+            #
+            # Proof chain:
+            #   1. _segment_sentences receives spans_for_text as all_spans param
+            #   2. char_to_span maps chars to indices in that list
+            #   3. span_start_index = sorted_spans[0] from char_to_span
+            #   4. Therefore span_start_index indexes spans_for_text
+            #
+            # Bug: filtered_spans[idx] != spans_for_text[idx] when non-viable
+            #      roles are excluded. 51.6% of sentences had wrong role.
+            # =================================================================
             start_idx = sent.get("span_start_index", 0)
-            if start_idx < len(filtered_spans):
-                sent["role"] = filtered_spans[start_idx].get("role", TextRole.BODY.value)
-            else:
+
+            # Defense-in-depth: Validate index type and bounds
+            if not isinstance(start_idx, int) or start_idx < 0:
+                if trace_id:
+                    logger.warning(
+                        "[%s] Invalid span_start_index: %r, defaulting to BODY",
+                        trace_id, start_idx
+                    )
                 sent["role"] = TextRole.BODY.value
+            elif start_idx >= len(spans_for_text):
+                if trace_id:
+                    logger.warning(
+                        "[%s] span_start_index %d >= len(spans_for_text) %d, defaulting to BODY",
+                        trace_id, start_idx, len(spans_for_text)
+                    )
+                sent["role"] = TextRole.BODY.value
+            else:
+                role_from_span = spans_for_text[start_idx].get("role", TextRole.BODY.value)
+
+                # =============================================================
+                # PHASE 2.8.1: Caption Continuity Guard
+                #
+                # Caption is unique: stitch-skipped but TTS-viable.
+                # Captions containing body-like prose should not break stitch.
+                #
+                # Rationale:
+                #   - _STITCH_SKIP_ROLES includes caption (breaks stitch)
+                #   - _TTS_NON_VIABLE_ROLES excludes caption (passes TTS)
+                #   - Body prose mislabeled as caption would fragment output
+                #
+                # Heuristic: Body-like text is substantial (>40 chars) and
+                # has sentence termination punctuation.
+                # =============================================================
+                if role_from_span == TextRole.CAPTION.value:
+                    sent_text = sent.get("text", "")
+                    has_body_characteristics = (
+                            len(sent_text) > 40 and
+                            sent_text.rstrip()[-1:] in ".!?"
+                    )
+                    if has_body_characteristics:
+                        role_from_span = TextRole.BODY.value
+
+                sent["role"] = role_from_span
 
             all_sentences.append(sent)
 

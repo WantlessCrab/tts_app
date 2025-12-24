@@ -1,0 +1,60 @@
+{
+  "agent_configs": {
+    "ChatGPT": {
+      "target_agents": [
+        "Claude"
+      ],
+      "send_next_only": true,
+      "auto_stream": false,
+      "recursive_loop": false,
+      "use_wrapper": false,
+      "persona_name": "AI Assistant",
+      "wrapper_style": "Standard"
+    },
+    "Claude": {
+      "target_agents": [
+        "ChatGPT"
+      ],
+      "send_next_only": false,
+      "auto_stream": false,
+      "recursive_loop": false,
+      "use_wrapper": false,
+      "persona_name": "AI Assistant",
+      "wrapper_style": "Standard"
+    },
+    "Gemini": {
+      "target_agents": [
+        "Claude"
+      ],
+      "send_next_only": true,
+      "auto_stream": false,
+      "recursive_loop": false,
+      "use_wrapper": false,
+      "persona_name": "AI Assistant",
+      "wrapper_style": "Standard"
+    }
+  },
+  "connected_agents": {
+    "ChatGPT": {
+      "agent_id": "ChatGPT",
+      "state": "idle",
+      "active_url": "https://chatgpt.com/",
+      "tab_id": 0
+    },
+    "Claude": {
+      "agent_id": "Claude",
+      "state": "idle",
+      "active_url": "https://claude.ai/chat/14a81306-3409-4e57-8d01-e6a3e1e3b8fd",
+      "tab_id": 0
+    },
+    "Gemini": {
+      "agent_id": "Gemini",
+      "state": "idle",
+      "active_url": "https://gemini.google.com/app",
+      "tab_id": 0
+    }
+  },
+  "max_iterations": 10,
+  "is_active": true,
+  "assembly_queues": {}
+}
