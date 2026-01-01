@@ -25,7 +25,9 @@ import pysbd
 import ftfy
 import math
 import sys
+import copy
 from typing import List, Dict, Tuple, Optional, Set
+from typing_extensions import Literal
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import TYPE_CHECKING
@@ -61,9 +63,11 @@ class TextRole(str, Enum):
     CODE = "code"
     HYPERLINK = "hyperlink"
     INLINE_EQUATION = "inline_equation"
+    PAGE_NUMBER = "page_number"
 
     # Structural/Layout Roles
     HEADER_ARTIFACT = "header_artifact"
+    FOOTER_ARTIFACT = "footer_artifact"
     EMPTY = "empty"
     INSIDE_FIGURE = "inside_figure"
     FIGURE_LABEL = "figure_label"
@@ -90,6 +94,20 @@ class PyMuPDFFlag(IntEnum):
     SUPERSCRIPT = 1
     ITALIC = 2
     MONOSPACE = 8
+
+
+class InterruptionBehavior(str, Enum):
+    SKIP = "skip"
+    ANNOUNCE = "announce"
+    BREAK = "break"
+
+
+@dataclass
+class InterruptionConfig:
+    figure_behavior: InterruptionBehavior = InterruptionBehavior.SKIP
+    table_behavior: InterruptionBehavior = InterruptionBehavior.BREAK
+    sidebar_behavior: InterruptionBehavior = InterruptionBehavior.SKIP
+    caption_format: str = "[Figure {index}: {text}]"
 
 
 # ✦───────────── 2 PYDANTIC CONFIG MODELS ─────────────✦
@@ -354,6 +372,10 @@ _REASON_NOISE_PUNCTUATION: str = "noise_punctuation"
 _REASON_NOISE_FRAGMENT: str = "noise_fragment"
 _REASON_VISUAL_OVERLAP: str = "visual_overlap"
 
+# STAGE 1 SOFT CLASSIFICATION CONSTANTS (Schema v2.0)
+_SOFT_CLASSIFY_NEAR_THRESHOLD_RATIO: float = 0.02  # 2% of page dimension
+_SOFT_CLASSIFY_OVERLAP_THRESHOLD: float = 0.50  # 50% overlap = "inside"
+
 # --- Filter Threshold Constants ---
 
 _FILTER_DEFAULT_PAGE_HEIGHT: float = 792.0  # US Letter
@@ -575,7 +597,7 @@ _CONTINUITY_TERMINAL_CHARS: str = ".!?"
 
 # Number of spans to include from adjacent pages in the window
 _WINDOW_TAIL_SPAN_COUNT: int = 10  # Last N spans from previous page
-_WINDOW_HEAD_SPAN_COUNT: int = 10  # First N spans from next page
+_WINDOW_HEAD_SPAN_COUNT: int = 35  # First N spans from next page
 
 # --- TTS Sanitization Thresholds ---
 
@@ -594,6 +616,8 @@ _TTS_NON_VIABLE_ROLES: frozenset[str] = frozenset({
     TextRole.HYPERLINK.value,
     TextRole.EMPTY.value,
     TextRole.HEADER_ARTIFACT.value,
+    TextRole.FOOTER_ARTIFACT.value,
+    TextRole.PAGE_NUMBER.value,
 })
 
 # --- TTS Viability: Punctuation Noise ---
@@ -757,6 +781,22 @@ _MARGIN_EXCLUDE_ROLES: frozenset[TextRole] = frozenset({
     TextRole.TABLE_CELL,
 })
 
+# ============================================================================
+# STAGE 2 SEMANTIC ENGINE CONSTANTS
+# ============================================================================
+
+_SEMANTIC_NEVER_OVERRIDE_ROLES: frozenset = frozenset({
+    TextRole.PAGE_NUMBER.value,
+    TextRole.HEADER_ARTIFACT.value,
+    TextRole.FOOTER_ARTIFACT.value,
+})
+
+# Disposition vocabulary (E2 P0 alignment)
+_SEM_DISP_INCLUDED: str = "included"
+_SEM_DISP_EXCLUDED: str = "excluded"
+_SEM_DISP_INTERRUPTION: str = "interruption"
+_SEM_DISP_PENDING: str = "pending"
+
 # --- Title Case Conversion ---
 
 _TITLE_CASE_UPPERCASE_THRESHOLD: float = 0.70
@@ -917,6 +957,9 @@ _GLOBAL_BAND_MIN_PAGE_FRACTION: float = 0.25
 _GLOBAL_BAND_ROUNDING_PRECISION: int = -1  # round(y, -1) → nearest 10
 _GLOBAL_TEXT_MIN_PAGE_FRACTION: float = 0.5  # Text must appear on 50%+ of pages (NEW)
 
+# Global band matching tolerance (used when comparing spans to bands)
+_GLOBAL_BAND_MATCH_TOLERANCE: float = _GLOBAL_BAND_MERGE_TOLERANCE
+
 # --- Region Detection ---
 
 _REGION_FIGURE_EXPAND_PADDING: int = 15  # Pixels to expand figure rects
@@ -943,7 +986,9 @@ _LAYOUT_FOOTER_THRESHOLD_Y: float = 0.80
 
 _PARA_MAX_LINE_GAP: float = 50.0  # Maximum reasonable line gap
 _PARA_DEFAULT_LINE_HEIGHT: float = 12.0
-_PARA_GAP_MULTIPLIER: float = 1.8  # Gap > this * line_height = new para
+_PARA_GAP_MULTIPLIER: float = 1.25  # Gap > this * line_height = new para
+
+
 
 # --- Code Detection ---
 
@@ -1262,6 +1307,7 @@ _PARA_ABBREVIATIONS = {
     "st", "vs", "etc", "e.g", "i.e", "cf", "al"
 }
 
+
 # --- Layout Detection ---
 
 _CAPTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -1327,7 +1373,7 @@ _ROLE_CODE_PUNCT_PATTERN: re.Pattern[str] = re.compile(r"[{}[\]()<>;=+\-*/&|^~]"
 # --- Cross-Page Stitching Patterns ---
 
 _STITCH_TERMINAL_PUNCT_PATTERN: re.Pattern[str] = re.compile(
-    r'[.!?]["\'""'')\]]*$'
+    r"[.!?][\"')\]]*$"
 )
 
 _CAPTION_START_PATTERN: re.Pattern[str] = re.compile(
@@ -1437,6 +1483,7 @@ _COMPILED_CAPTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     ]
 )
 
+
 # Prose continuation check (for bare caption filtering)
 _CAPTION_PROSE_CONTINUATION_PATTERN: re.Pattern[str] = re.compile(
     r"[:\.]\s+\S"
@@ -1454,10 +1501,2320 @@ _SUPERSCRIPT_TABLE: dict[int, str] = str.maketrans(SUPERSCRIPT_DIGITS)
 # Lazy-loaded sentence segmenter (initialized on first use)
 _SENTENCE_SEGMENTER: Optional[pysbd.Segmenter] = None
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RONC v1.0 — Reading Order Normalization Contract
+# ═══════════════════════════════════════════════════════════════════════════
+
+_RONC_MIN_CHAIN_LENGTH = 2  # Minimum spans to form atomic unit
+_RONC_ANCHOR_PROTECTION_ENABLED = True  # Master toggle
+_RONC_MAX_RESCUE_PER_PAGE = 50  # Throttle guard (Phase 3)
+
+# Boundary profiling thresholds
+_RONC_V2_NEEDS_PREDECESSOR_SCORE = 0.30
+_RONC_V2_NEEDS_SUCCESSOR_SCORE = 0.25
+
+# Signal weights (start boundary)
+_RONC_V2_WEIGHT_LOWERCASE = 0.35
+_RONC_V2_WEIGHT_DEPENDENT_TOKEN = 0.30
+_RONC_V2_WEIGHT_CONTINUATION_PUNCT = 0.25
+_RONC_V2_WEIGHT_A2_FROM = 0.40
+
+# Signal weights (end boundary)
+_RONC_V2_WEIGHT_SENTENCE_TERMINAL = -0.40  # Negative: reduces truncation score
+_RONC_V2_WEIGHT_TRAILING_COMMA = 0.30
+_RONC_V2_WEIGHT_TRAILING_SEMICOLON = 0.25
+_RONC_V2_WEIGHT_TRAILING_COLON = 0.20
+_RONC_V2_WEIGHT_TRAILING_DASH = 0.35
+_RONC_V2_WEIGHT_UNBALANCED_OPEN = 0.40
+_RONC_V2_WEIGHT_A2_TO = 0.40
+
+# Dependent tokens that suggest continuation from previous context
+_RONC_V2_DEPENDENT_TOKENS = frozenset({
+    "and", "or", "but", "nor", "yet", "so",
+    "which", "that", "who", "whom", "whose", "where", "when",
+    "however", "therefore", "thus", "hence",
+    "moreover", "furthermore", "additionally", "consequently",
+    "nevertheless", "nonetheless", "although", "though",
+    "whereas", "while", "since", "because", "unless", "until",
+    "after", "before", "if", "as",
+})
+
+# Roles excluded from candidate pools (low semantic value)
+_RONC_V2_EXCLUDED_ROLES = frozenset({
+    "page_number",
+    "header",
+    "footer",
+    "header_artifact",
+    "footer_artifact",
+})
+
+# Roles that CAN be candidates but with reduced priority (Phase 3 scoring)
+_RONC_V2_DEPRIORITIZED_ROLES = frozenset({
+    "table_cell",
+    "diagram_label",
+    "figure_label",
+    "caption",
+})
+
+# Maximum window distance for candidate consideration
+# Spans further apart than this are not considered candidates
+_RONC_V2_MAX_CANDIDATE_DISTANCE = 15
+
+# Window positions eligible for cross-page linking
+_RONC_V2_CROSS_PAGE_POSITIONS = frozenset({
+    "prev_tail",  # Previous page spans can link TO current
+    "current",  # Current page spans (primary)
+    "next_head",  # Next page spans can link FROM current
+})
+
+# Minimum score required to create a link
+_RONC_V2_MIN_LINK_CONFIDENCE = 0.50
+
+# Score threshold for "strong" links (skip mutual check)
+_RONC_V2_STRONG_LINK_CONFIDENCE = 0.80
+
+# Confidence boost when link is mutual (bidirectional)
+_RONC_V2_MUTUAL_BOOST = 0.10
+
+# Maximum confidence after boost (cap at 1.0)
+_RONC_V2_MAX_CONFIDENCE = 1.0
+
+# Minimum link confidence to trigger protection
+_RONC_V2_PROTECTION_THRESHOLD = 0.60
+
+# Protection reasons (for audit trail)
+_RONC_V2_PROTECTION_ANCHOR = "anchor"  # Has outgoing link
+_RONC_V2_PROTECTION_CONTINUATION = "continuation"  # Has incoming link
+_RONC_V2_PROTECTION_MUTUAL = "mutual_link"  # Bidirectional link
+
+# Minimum linked unit size to assign unit ID
+# Single-span "units" don't need atomic grouping
+_RONC_V2_MIN_UNIT_SIZE = 2
+
+# Legacy role values (for backward compatibility)
+_RONC_V2_LEGACY_ROLE_ANCHOR = "anchor"
+_RONC_V2_LEGACY_ROLE_MEMBER = "member"
+_RONC_V2_LEGACY_ROLE_TAIL = "tail"
+
+# Add to constants block (if not present)
+_RONC_V2_TOP_K_CANDIDATES = 3
+
+# Scoring weights (per spec)
+_RONC_V2_WEIGHT_SEMANTIC_FLOW = 0.65
+_RONC_V2_WEIGHT_PROXIMITY = 0.35
 
 # ✦────────────────────✦────────────────────✦
 #                ✿   METHODS  ✿
 # ✦────────────────────✦────────────────────✦
+
+
+# ✦                  ✦                  ✦                  ✦
+# ✦───────────── 1 rocn ─────────────✦
+# ✦                  ✦                  ✦                  ✦
+
+def _build_ronc_contract(
+        window_spans: List[Dict],
+        trace_id: str = None
+) -> None:
+    """
+    RONC Phase 4.5 — Build atomic unit contracts from continuation signals.
+
+    AUTHORITY BOUNDARY:
+      - Consumes: a2_continues_to_next, a2_continues_from_previous (Phase 1)
+      - Produces: _ronc_atomic_unit_id, _ronc_atomic_role, _ronc_break_after
+      - Does NOT: apply veto logic
+      - Does NOT: make exclusion decisions
+
+    NOTE:
+      This function is SAFE to exist without being called.
+      No behavior changes occur until it is wired into the pipeline.
+    """
+    if not window_spans:
+        return
+    # -------------------------------------------------------------
+    # Phase 5 FIX: Normalize iteration order for RONC construction
+    #
+    # a2_continues_to_next is defined in READING ORDER, not array order.
+    # window_spans is NOT guaranteed to be reading-ordered.
+    #
+    # We sort a VIEW of spans for iteration only.
+    # Dicts are mutated in-place, so original references are preserved.
+    # -------------------------------------------------------------
+    window_spans_sorted = sorted(
+        window_spans,
+        key=lambda sp: (
+            sp.get("page_number", 0),
+            sp.get("block_id", 0),
+            sp.get("line_index", 0),
+            sp.get("span_index_in_line", 0),
+        )
+    )
+
+    unit_id = 0
+    current_chain: List[Dict] = []
+
+    def _flush_chain(chain: List[Dict]) -> None:
+        nonlocal unit_id
+
+        if not chain:
+            return
+
+        if len(chain) >= _RONC_MIN_CHAIN_LENGTH:
+            _assign_atomic_unit_roles(chain, unit_id)
+            unit_id += 1
+        else:
+            # Chains too short — explicitly mark as standalone
+            for sp in chain:
+                sp["_ronc_atomic_unit_id"] = None
+                sp["_ronc_atomic_role"] = None
+                sp["_ronc_break_after"] = True
+
+        chain.clear()
+
+    prev_continues_to_next = False
+
+    for sp in window_spans_sorted:
+        continues_to_next = sp.get("a2_continues_to_next", False)
+
+        if prev_continues_to_next and current_chain:
+            # Previous span's a2_continues_to_next=True → this span is continuation
+            current_chain.append(sp)
+        else:
+            _flush_chain(current_chain)
+            current_chain.append(sp)
+
+        if not continues_to_next:
+            _flush_chain(current_chain)
+
+        prev_continues_to_next = continues_to_next
+
+    # Flush any trailing chain
+    _flush_chain(current_chain)
+
+    if trace_id:
+        unit_ids = {
+            sp.get("_ronc_atomic_unit_id")
+            for sp in window_spans
+            if sp.get("_ronc_atomic_unit_id") is not None
+        }
+        unit_count = len(unit_ids)
+
+        anchor_count = sum(
+            1 for sp in window_spans
+            if sp.get("_ronc_atomic_role") == "anchor"
+        )
+
+        logger.debug(
+            "[%s] RONC contract built: %d atomic units, %d anchors",
+            trace_id, unit_count, anchor_count
+        )
+
+
+def _assign_atomic_unit_roles(
+        unit_spans: List[Dict],
+        unit_id: int
+) -> None:
+    """
+    Assign anchor / member / tail roles within an atomic unit.
+
+    ROLE DEFINITIONS:
+      - anchor: first span (protected in Phase 3)
+      - member: interior spans
+      - tail: final span (only safe break point)
+    """
+    last_idx = len(unit_spans) - 1
+
+    for idx, sp in enumerate(unit_spans):
+        sp["_ronc_atomic_unit_id"] = unit_id
+
+        if idx == 0:
+            sp["_ronc_atomic_role"] = "anchor"
+            sp["_ronc_break_after"] = False
+            sp["_ronc_contract"] = {
+                "protection": {
+                    "must_include": True,
+                    "reason": "ronc_anchor",
+                },
+                "links": {},
+            }
+        elif idx == last_idx:
+            sp["_ronc_atomic_role"] = "tail"
+            sp["_ronc_break_after"] = True
+            sp["_ronc_contract"] = {
+                "protection": {
+                    "must_include": True,
+                    "reason": "ronc_tail",
+                },
+                "links": {},
+            }
+        else:
+            sp["_ronc_atomic_role"] = "member"
+            sp["_ronc_break_after"] = False
+            sp["_ronc_contract"] = {
+                "protection": {
+                    "must_include": True,
+                    "reason": "ronc_member",
+                },
+                "links": {},
+            }
+
+
+def _would_orphan_continuations(span: Dict, window_spans: List[Dict]) -> bool:
+    """
+    Return True if excluding this anchor would orphan downstream spans
+    in the same atomic unit.
+
+    PHASE 5 FIX: Check A2 signal, not just current exclusion state.
+
+    Reason: Guards are applied in array order. When an anchor is evaluated,
+    its continuations may not have been processed yet. If a continuation
+    has a2_continues_from_previous=True, Guard 0 WILL promote it later,
+    so the anchor should be rescued regardless of current exclusion state.
+    """
+    unit_id = span.get("_ronc_atomic_unit_id")
+    if unit_id is None:
+        return False
+
+    # Ensure reading-order traversal (window_spans is not guaranteed ordered)
+    window_spans_sorted = sorted(
+        window_spans,
+        key=lambda sp: (
+            sp.get("page_number", 0),
+            sp.get("block_id", 0),
+            sp.get("line_index", 0),
+            sp.get("span_index_in_line", 0),
+        )
+    )
+
+    seen_anchor = False
+    for sp in window_spans_sorted:
+        if sp is span:
+            seen_anchor = True
+            continue
+
+        if not seen_anchor:
+            continue
+
+        # RONC atomic linkage implies unconditional orphan risk.
+        # If any downstream span shares the atomic unit, the anchor must be preserved.
+        if sp.get("_ronc_atomic_unit_id") == unit_id:
+            return True
+
+    return False
+
+
+# ✦                  ✦                  ✦                  ✦
+# ✦──────── 1 RONC v2.0 — Contract-Maker Architecture ───────✦
+# ✦                  ✦                  ✦                  ✦
+
+def _ronc_v2_profile_start_boundary(
+        span: Dict,
+        prev_span: Optional[Dict] = None,
+        trace_id: Optional[str] = None,
+) -> Dict:
+    """
+    Profile how a span BEGINS to determine if it needs a predecessor.
+
+    RONC v2.0 Phase 1: Semantic Boundary Profiling (Node Analysis)
+
+    Analyzes lexical and structural signals at span start to determine
+    whether this span is likely a continuation of prior content.
+
+    Args:
+        span: Span dict with cleaned_text or text field
+        prev_span: Previous span in window (optional, for future use)
+        trace_id: Trace ID for logging
+
+    Returns:
+        Dict with keys:
+            label: "clean" | "continuation" | "fragment" | "unknown"
+            score: float 0.0-1.0 (higher = more likely continuation)
+            signals: list of signal names that fired
+    """
+    text = (span.get("cleaned_text") or span.get("text") or "").strip()
+    signals = []
+    score = 0.0
+
+    # Empty span: unknown boundary
+    if not text:
+        return {"label": "unknown", "score": 0.0, "signals": []}
+
+    first_char = text[0]
+    words = text.split()
+    first_word = words[0].lower().rstrip(",.;:") if words else ""
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Lowercase start
+    # A span starting with lowercase letter suggests mid-sentence entry
+    # ─────────────────────────────────────────────────────────────────
+    if first_char.isalpha() and first_char.islower():
+        signals.append("lowercase")
+        score += _RONC_V2_WEIGHT_LOWERCASE
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Dependent token
+    # Conjunctions, relative pronouns, and transitional words suggest
+    # this span continues a thought from a previous span
+    # ─────────────────────────────────────────────────────────────────
+    if first_word in _RONC_V2_DEPENDENT_TOKENS:
+        signals.append("dependent_token")
+        score += _RONC_V2_WEIGHT_DEPENDENT_TOKEN
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Continuation punctuation
+    # Starting with comma, semicolon, closing bracket, etc.
+    # ─────────────────────────────────────────────────────────────────
+    if first_char in ",;:—–)]\"}'>":
+        signals.append("continuation_punct")
+        score += _RONC_V2_WEIGHT_CONTINUATION_PUNCT
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: A2 continuation flag (from existing pipeline)
+    # Highest confidence signal when present
+    # ─────────────────────────────────────────────────────────────────
+    if span.get("a2_continues_from_previous"):
+        signals.append("a2_continues_from")
+        score += _RONC_V2_WEIGHT_A2_FROM
+
+    # Cap score at 1.0
+    score = min(score, 1.0)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Label assignment based on score thresholds
+    # ─────────────────────────────────────────────────────────────────
+    if score >= 0.6:
+        label = "continuation"
+    elif score >= 0.3:
+        label = "fragment"
+    elif not signals:
+        label = "clean"
+    else:
+        label = "unknown"
+
+    return {"label": label, "score": round(score, 3), "signals": signals}
+
+
+def _ronc_v2_profile_end_boundary(
+        span: Dict,
+        next_span: Optional[Dict] = None,
+        trace_id: Optional[str] = None,
+) -> Dict:
+    """
+    Profile how a span ENDS to determine if it needs a successor.
+
+    RONC v2.0 Phase 1: Semantic Boundary Profiling (Node Analysis)
+
+    Analyzes lexical and structural signals at span end to determine
+    whether this span is likely truncated or continues to next content.
+
+    Args:
+        span: Span dict with cleaned_text or text field
+        next_span: Next span in window (optional, for future use)
+        trace_id: Trace ID for logging
+
+    Returns:
+        Dict with keys:
+            label: "complete" | "truncated" | "mid_sentence" | "unknown"
+            score: float 0.0-1.0 (higher = more likely truncated)
+            signals: list of signal names that fired
+    """
+    text = (span.get("cleaned_text") or span.get("text") or "").strip()
+    signals = []
+    score = 0.0
+
+    # Empty span: unknown boundary
+    if not text:
+        return {"label": "unknown", "score": 0.0, "signals": []}
+
+    last_char = text[-1]
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Sentence terminal (NEGATIVE weight)
+    # Period, exclamation, question mark suggest completion
+    # ─────────────────────────────────────────────────────────────────
+    if last_char in ".!?":
+        signals.append("sentence_terminal")
+        score += _RONC_V2_WEIGHT_SENTENCE_TERMINAL  # Negative value
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Trailing comma
+    # Strong indicator of incomplete clause
+    # ─────────────────────────────────────────────────────────────────
+    if last_char == ",":
+        signals.append("trailing_comma")
+        score += _RONC_V2_WEIGHT_TRAILING_COMMA
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Trailing semicolon
+    # Suggests clause boundary but continuation expected
+    # ─────────────────────────────────────────────────────────────────
+    if last_char == ";":
+        signals.append("trailing_semicolon")
+        score += _RONC_V2_WEIGHT_TRAILING_SEMICOLON
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Trailing colon
+    # Often precedes list or elaboration
+    # ─────────────────────────────────────────────────────────────────
+    if last_char == ":":
+        signals.append("trailing_colon")
+        score += _RONC_V2_WEIGHT_TRAILING_COLON
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Trailing dash
+    # Interrupted thought or em-dash continuation
+    # ─────────────────────────────────────────────────────────────────
+    if last_char in "—–-":
+        signals.append("trailing_dash")
+        score += _RONC_V2_WEIGHT_TRAILING_DASH
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: Unbalanced parentheses or quotes
+    # Open paren/quote without close suggests truncation
+    # ─────────────────────────────────────────────────────────────────
+    open_parens = text.count("(") - text.count(")")
+    open_quotes = text.count('"') % 2  # Odd count = unbalanced
+
+    if open_parens > 0 or open_quotes:
+        signals.append("unbalanced_open")
+        score += _RONC_V2_WEIGHT_UNBALANCED_OPEN
+
+    # ─────────────────────────────────────────────────────────────────
+    # Signal: A2 continuation flag (from existing pipeline)
+    # Highest confidence signal when present
+    # ─────────────────────────────────────────────────────────────────
+    if span.get("a2_continues_to_next"):
+        signals.append("a2_continues_to")
+        score += _RONC_V2_WEIGHT_A2_TO
+
+    # Clamp to valid range
+    score = max(0.0, min(score, 1.0))
+
+    # ─────────────────────────────────────────────────────────────────
+    # Label assignment based on score thresholds
+    # ─────────────────────────────────────────────────────────────────
+    if score >= 0.5:
+        label = "truncated"
+    elif score >= 0.25:
+        label = "mid_sentence"
+    elif "sentence_terminal" in signals:
+        label = "complete"
+    else:
+        label = "unknown"
+
+    return {"label": label, "score": round(score, 3), "signals": signals}
+
+
+def _ronc_v2_init_contract(
+        span: Dict,
+        prev_span: Optional[Dict] = None,
+        next_span: Optional[Dict] = None,
+        trace_id: Optional[str] = None,
+) -> Dict:
+    """
+    Initialize a RONC v2.0 contract for a span with boundary profiling.
+
+    RONC v2.0 Phase 1: Contract Initialization
+
+    Creates the full contract structure with boundary analysis populated.
+    Affinity, links, and protection sections are initialized to defaults
+    and will be populated by subsequent phases.
+
+    Args:
+        span: Span dict to analyze
+        prev_span: Previous span in window order
+        next_span: Next span in window order
+        trace_id: Trace ID for logging
+
+    Returns:
+        Complete contract dict ready for attachment to span
+    """
+    # Run boundary profiling
+    start_profile = _ronc_v2_profile_start_boundary(span, prev_span, trace_id)
+    end_profile = _ronc_v2_profile_end_boundary(span, next_span, trace_id)
+
+    # Derive need flags from scores
+    needs_predecessor = start_profile["score"] >= _RONC_V2_NEEDS_PREDECESSOR_SCORE
+    needs_successor = end_profile["score"] >= _RONC_V2_NEEDS_SUCCESSOR_SCORE
+
+    contract = {
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION A: Semantic Boundary Profiling (Phase 1)
+        # ═══════════════════════════════════════════════════════════════
+        "boundary": {
+            "start": start_profile,
+            "end": end_profile,
+            "needs_predecessor": needs_predecessor,
+            "needs_successor": needs_successor,
+        },
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION B: Affinity Ranking (Phase 2-3, initialized empty)
+        # ═══════════════════════════════════════════════════════════════
+        "affinity": {
+            "prev_candidates": [],
+            "next_candidates": [],
+        },
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION C: Resolved Instructions (Phase 4, initialized empty)
+        # ═══════════════════════════════════════════════════════════════
+        "links": {
+            "prev": {
+                "cid": None,
+                "confidence": 0.0,
+                "reason": None,
+                "mutual": False,
+            },
+            "next": {
+                "cid": None,
+                "confidence": 0.0,
+                "reason": None,
+                "mutual": False,
+            },
+        },
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION D: Protection Semantics (Phase 5, initialized empty)
+        # ═══════════════════════════════════════════════════════════════
+        "protection": {
+            "must_include": False,
+            "reason": None,
+            "linked_unit_cids": [],
+        },
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECTION E: Metadata
+        # ═══════════════════════════════════════════════════════════════
+        "meta": {
+            "contract_version": "2.0",
+            "trace_id": trace_id,
+        },
+    }
+
+    return contract
+
+
+def _ronc_v2_empty_contract(trace_id: Optional[str] = None) -> Dict:
+    """
+    Return an empty/safe contract for error recovery.
+
+    Used when contract generation fails for a span to ensure
+    pipeline continues without interruption.
+    """
+    return {
+        "boundary": {
+            "start": {"label": "unknown", "score": 0.0, "signals": []},
+            "end": {"label": "unknown", "score": 0.0, "signals": []},
+            "needs_predecessor": False,
+            "needs_successor": False,
+        },
+        "affinity": {
+            "prev_candidates": [],
+            "next_candidates": [],
+        },
+        "links": {
+            "prev": {"cid": None, "confidence": 0.0, "reason": None, "mutual": False},
+            "next": {"cid": None, "confidence": 0.0, "reason": None, "mutual": False},
+        },
+        "protection": {
+            "must_include": False,
+            "reason": None,
+            "linked_unit_cids": [],
+        },
+        "meta": {
+            "contract_version": "2.0",
+            "trace_id": trace_id,
+            "error": True,
+        },
+    }
+
+
+def _ronc_v2_is_candidate_eligible(
+        span: Dict,
+        exclude_excluded: bool = False,  # CHANGED: Safe default for MVP
+        trace_id: Optional[str] = None,
+) -> bool:
+    """
+    Determine if a span is eligible to be a link candidate.
+
+    RONC v2.0 Phase 2: Candidate Eligibility Filter
+
+    A span is eligible if:
+    - It has meaningful text content
+    - Its role is not in the excluded set (page numbers, headers, etc.)
+    - It is not already marked for TTS exclusion (optional, disabled by default)
+
+    Args:
+        span: Span dict to evaluate
+        exclude_excluded: If True, spans with _tts_excluded=True are ineligible.
+                         Default False because RONC runs before exclusion translation.
+        trace_id: Trace ID for logging
+
+    Returns:
+        True if span can be a candidate, False otherwise
+    """
+    # Must have text content
+    text = (span.get("cleaned_text") or span.get("text") or "").strip()
+    if not text:
+        return False
+
+    # Exclude certain roles entirely
+    role = span.get("role")
+    if role in _RONC_V2_EXCLUDED_ROLES:
+        return False
+
+    # Optional: exclude spans already marked for TTS exclusion
+    # NOTE: Disabled by default because RONC runs BEFORE exclusion translation.
+    # Enable in Phase 5+ when exclusion state is reliable.
+    if exclude_excluded and span.get("_tts_excluded"):
+        return False
+
+    # Must have valid window position
+    window_pos = span.get("_window_position")
+    if window_pos is None:
+        # Defensive: missing window metadata means we cannot safely link.
+        return False
+    if window_pos not in _RONC_V2_CROSS_PAGE_POSITIONS:
+        return False
+
+    return True
+
+
+def _ronc_v2_build_candidate_pools(
+        window_spans: List[Dict],
+        current_idx: int,
+        trace_id: Optional[str] = None,
+) -> Tuple[List[Tuple[int, Dict]], List[Tuple[int, Dict]]]:
+    """
+    Build predecessor and successor candidate pools for a span.
+
+    RONC v2.0 Phase 2: Candidate Pool Construction
+
+    For the span at current_idx, identifies:
+    - prev_pool: Eligible spans BEFORE current in window order
+    - next_pool: Eligible spans AFTER current in window order
+
+    Pools are filtered by:
+    - Eligibility (role, text content, exclusion status)
+    - Maximum distance (prevents linking to distant spans)
+    - Window position (enables controlled cross-page candidates)
+
+    Args:
+        window_spans: Full window span list with contracts attached
+        current_idx: Index of span being analyzed
+        trace_id: Trace ID for logging
+
+    Returns:
+        Tuple of (prev_pool, next_pool) where each pool is a list of
+        (index, span) tuples ordered by distance from current span.
+    """
+    if current_idx < 0 or current_idx >= len(window_spans):
+        return [], []
+
+    current_span = window_spans[current_idx]
+    current_page = current_span.get("_source_page_idx")
+    current_pos = current_span.get("_window_position")
+
+    prev_pool = []
+    next_pool = []
+
+    # ─────────────────────────────────────────────────────────────────
+    # Build PREV pool (spans before current)
+    # Iterate backward from current, closest first
+    # ─────────────────────────────────────────────────────────────────
+    for i in range(current_idx - 1, -1, -1):
+        # Enforce maximum distance
+        distance = current_idx - i
+        if distance > _RONC_V2_MAX_CANDIDATE_DISTANCE:
+            break
+
+        candidate = window_spans[i]
+
+        # Check eligibility
+        if not _ronc_v2_is_candidate_eligible(candidate, trace_id=trace_id):
+            continue
+
+        # Cross-page rules:
+        # - prev_tail spans CAN be predecessors for current spans
+        # - current spans CAN be predecessors for other current spans
+        candidate_pos = candidate.get("_window_position")
+        candidate_page = candidate.get("_source_page_idx")
+
+        # Same page: always allowed
+        # Different page: only if candidate is prev_tail
+        if candidate_page != current_page:
+            if candidate_pos != "prev_tail":
+                continue
+
+        prev_pool.append((i, candidate))
+
+    # ─────────────────────────────────────────────────────────────────
+    # Build NEXT pool (spans after current)
+    # Iterate forward from current, closest first
+    # ─────────────────────────────────────────────────────────────────
+    for i in range(current_idx + 1, len(window_spans)):
+        # Enforce maximum distance
+        distance = i - current_idx
+        if distance > _RONC_V2_MAX_CANDIDATE_DISTANCE:
+            break
+
+        candidate = window_spans[i]
+
+        # Check eligibility
+        if not _ronc_v2_is_candidate_eligible(candidate, trace_id=trace_id):
+            continue
+
+        # Cross-page rules:
+        # - current spans CAN be successors for other current spans
+        # - next_head spans CAN be successors for current spans
+        candidate_pos = candidate.get("_window_position")
+        candidate_page = candidate.get("_source_page_idx")
+
+        # Same page: always allowed
+        # Different page: only if candidate is next_head
+        if candidate_page != current_page:
+            if candidate_pos != "next_head":
+                continue
+
+        next_pool.append((i, candidate))
+
+    return prev_pool, next_pool
+
+def _ronc_v2_populate_candidate_pools(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Populate candidate pools for all spans in window.
+
+    RONC v2.0 Phase 2: Batch Candidate Pool Population
+
+    Iterates through all window spans and populates the
+    affinity.prev_candidates and affinity.next_candidates
+    fields with raw candidate lists (unscored).
+
+    Candidates are stored as lightweight references:
+    - cid: canonical span ID
+    - idx: window index (for Phase 3 scoring)
+    - distance: window distance from current span
+
+    Args:
+        window_spans: Full window span list with contracts attached
+        trace_id: Trace ID for logging
+
+    Returns:
+        Audit dict with counts:
+        - total_spans: spans processed
+        - spans_with_prev: spans with at least one prev candidate
+        - spans_with_next: spans with at least one next candidate
+        - total_prev_candidates: sum of all prev candidates
+        - total_next_candidates: sum of all next candidates
+    """
+    audit = {
+        "total_spans": len(window_spans),
+        "spans_with_prev": 0,
+        "spans_with_next": 0,
+        "total_prev_candidates": 0,
+        "total_next_candidates": 0,
+    }
+
+    for i, span in enumerate(window_spans):
+        contract = span.get("_ronc_contract")
+        if not contract:
+            # No contract = Phase 1 didn't run or failed
+            continue
+
+        # Build pools
+        prev_pool, next_pool = _ronc_v2_build_candidate_pools(
+            window_spans, i, trace_id
+        )
+
+        # ─────────────────────────────────────────────────────────────
+        # Populate prev_candidates (unscored)
+        # ─────────────────────────────────────────────────────────────
+        prev_candidates = []
+        for idx, candidate in prev_pool:
+            cid = candidate.get("_canonical_span_id")
+            if not cid:
+                continue
+
+            prev_candidates.append({
+                "cid": cid,
+                "idx": idx,
+                "distance": i - idx,
+                "score": 0.0,  # Phase 3 will populate
+                "reason": None,  # Phase 3 will populate
+                "components": {},  # Phase 3 will populate
+            })
+
+        contract["affinity"]["prev_candidates"] = prev_candidates
+
+        if prev_candidates:
+            audit["spans_with_prev"] += 1
+            audit["total_prev_candidates"] += len(prev_candidates)
+
+        # ─────────────────────────────────────────────────────────────
+        # Populate next_candidates (unscored)
+        # ─────────────────────────────────────────────────────────────
+        next_candidates = []
+        for idx, candidate in next_pool:
+            cid = candidate.get("_canonical_span_id")
+            if not cid:
+                continue
+
+            next_candidates.append({
+                "cid": cid,
+                "idx": idx,
+                "distance": idx - i,
+                "score": 0.0,  # Phase 3 will populate
+                "reason": None,  # Phase 3 will populate
+                "components": {},  # Phase 3 will populate
+            })
+
+        contract["affinity"]["next_candidates"] = next_candidates
+
+        if next_candidates:
+            audit["spans_with_next"] += 1
+            audit["total_next_candidates"] += len(next_candidates)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Logging
+    # ─────────────────────────────────────────────────────────────────
+    if trace_id:
+        logger.debug(
+            "[%s] RONC v2.0 Phase 2: pools built for %d spans "
+            "(prev: %d spans / %d candidates, next: %d spans / %d candidates)",
+            trace_id,
+            audit["total_spans"],
+            audit["spans_with_prev"],
+            audit["total_prev_candidates"],
+            audit["spans_with_next"],
+            audit["total_next_candidates"],
+        )
+
+    return audit
+
+
+def _ronc_v2_select_link(
+        candidates: List[Dict],
+        direction: str,
+        needs_link: bool,
+        trace_id: Optional[str] = None,
+) -> Dict:
+    """
+    Select best link from scored candidates.
+
+    RONC v2.0 Phase 4: Single Link Selection
+
+    Selects the top candidate if:
+    - Candidate list is non-empty
+    - Top candidate score >= MIN_LINK_CONFIDENCE
+    - Span actually needs this link (needs_predecessor/needs_successor)
+
+    Args:
+        candidates: Scored and ranked candidate list (best first)
+        direction: "prev" or "next"
+        needs_link: Whether span's boundary profile indicates need
+        trace_id: Trace ID for logging
+
+    Returns:
+        Link dict with:
+            cid: str | None (canonical span ID of selected link)
+            confidence: float (score, possibly boosted later)
+            reason: str | None (selection reason)
+            mutual: bool (will be set in second pass)
+    """
+    # Default: no link
+    empty_link = {
+        "cid": None,
+        "confidence": 0.0,
+        "reason": None,
+        "mutual": False,
+    }
+
+    # No candidates available
+    if not candidates:
+        return empty_link
+
+    # Get top candidate
+    top = candidates[0]
+    score = top.get("score", 0.0)
+    cid = top.get("cid")
+
+    # Must have valid CID
+    if not cid:
+        return empty_link
+
+    # ─────────────────────────────────────────────────────────────────
+    # Decision Logic
+    # ─────────────────────────────────────────────────────────────────
+    #
+    # Case 1: Strong score (>= 0.80) - link regardless of need
+    #   Rationale: High confidence overrides boundary uncertainty
+    #
+    # Case 2: Moderate score (>= 0.50) AND needs_link - create link
+    #   Rationale: Boundary profile confirms semantic need
+    #
+    # Case 3: Moderate score but no need - no link
+    #   Rationale: Score alone is insufficient without semantic evidence
+    #
+    # Case 4: Weak score (< 0.50) - no link
+    #   Rationale: Below threshold, likely false positive
+    # ─────────────────────────────────────────────────────────────────
+
+    # Case 1: Strong score overrides need check
+    if score >= _RONC_V2_STRONG_LINK_CONFIDENCE:
+        return {
+            "cid": cid,
+            "confidence": score,
+            "reason": f"strong_score({score:.3f})",
+            "mutual": False,
+        }
+
+    # Case 2: Moderate score with semantic need
+    if score >= _RONC_V2_MIN_LINK_CONFIDENCE and needs_link:
+        return {
+            "cid": cid,
+            "confidence": score,
+            "reason": f"needs_{direction}({score:.3f})",
+            "mutual": False,
+        }
+
+    # Case 3 & 4: No link
+    return empty_link
+
+
+def _ronc_v2_build_linked_unit_cids(
+        span: Dict,
+        trace_id: Optional[str] = None,
+) -> List[str]:
+    """
+    Build list of CIDs in this span's linked unit.
+
+    RONC v2.0 Phase 5: Linked Unit Construction (MVP)
+
+    For MVP, linked unit contains DIRECT links only:
+    - Self CID
+    - Prev link CID (if exists)
+    - Next link CID (if exists)
+
+    Transitive closure (A→B→C means A,B,C are all linked) is deferred
+    to future phase.
+
+    Args:
+        span: Span dict with _ronc_contract and _canonical_span_id
+        trace_id: Trace ID for logging
+
+    Returns:
+        Sorted list of canonical span IDs in linked unit
+    """
+    unit_cids = set()
+
+    # Add self
+    self_cid = span.get("_canonical_span_id")
+    if self_cid:
+        unit_cids.add(self_cid)
+
+    # Get contract
+    contract = span.get("_ronc_contract", {})
+    links = contract.get("links", {})
+
+    # Add prev link target
+    prev_cid = links.get("prev", {}).get("cid")
+    if prev_cid:
+        unit_cids.add(prev_cid)
+
+    # Add next link target
+    next_cid = links.get("next", {}).get("cid")
+    if next_cid:
+        unit_cids.add(next_cid)
+
+    return sorted(unit_cids)
+
+
+def _ronc_v2_assign_protection(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Assign protection flags based on link graph.
+
+    RONC v2.0 Phase 5: Protection Assignment
+
+    A span receives protection (must_include=True) if:
+
+    1. ANCHOR: Has strong outgoing NEXT link
+       - Something depends on this span
+       - Excluding it would orphan the continuation
+
+    2. CONTINUATION: Has strong incoming PREV link
+       - This span depends on something
+       - Excluding it would waste the anchor's inclusion
+
+    3. MUTUAL: Has bidirectional link (both directions)
+       - Strongest evidence of semantic unity
+       - Both spans in pair are critical
+
+    Protection threshold is intentionally conservative (0.60) to avoid
+    over-protecting low-confidence links.
+
+    Args:
+        window_spans: Window spans with reconciled links
+        trace_id: Trace ID for logging
+
+    Returns:
+        Audit dict with counts:
+        - total_spans: spans processed
+        - anchors_protected: spans protected as anchors
+        - continuations_protected: spans protected as continuations
+        - mutual_protected: spans protected via mutual links
+        - total_protected: unique spans protected
+    """
+    audit = {
+        "total_spans": len(window_spans),
+        "anchors_protected": 0,
+        "continuations_protected": 0,
+        "mutual_protected": 0,
+        "total_protected": 0,
+    }
+
+    for span in window_spans:
+        contract = span.get("_ronc_contract")
+        if not contract:
+            continue
+
+        links = contract.get("links", {})
+        protection = contract.get("protection", {})
+
+        # Reset protection (in case of re-run)
+        protection["must_include"] = False
+        protection["reason"] = None
+
+        # Get link details
+        prev_link = links.get("prev", {})
+        next_link = links.get("next", {})
+
+        prev_cid = prev_link.get("cid")
+        prev_conf = prev_link.get("confidence", 0.0)
+        prev_mutual = prev_link.get("mutual", False)
+
+        next_cid = next_link.get("cid")
+        next_conf = next_link.get("confidence", 0.0)
+        next_mutual = next_link.get("mutual", False)
+
+        # ─────────────────────────────────────────────────────────────
+        # Protection Logic (Priority Order)
+        # ─────────────────────────────────────────────────────────────
+
+        protection_applied = False
+        reasons = []
+
+        # Check 1: Mutual link (highest priority)
+        if (next_cid and next_mutual and next_conf >= _RONC_V2_PROTECTION_THRESHOLD):
+            protection_applied = True
+            reasons.append(f"{_RONC_V2_PROTECTION_MUTUAL}:{next_cid}")
+            audit["mutual_protected"] += 1
+
+        elif (prev_cid and prev_mutual and prev_conf >= _RONC_V2_PROTECTION_THRESHOLD):
+            protection_applied = True
+            reasons.append(f"{_RONC_V2_PROTECTION_MUTUAL}:{prev_cid}")
+            audit["mutual_protected"] += 1
+
+        # Check 2: Anchor (has outgoing NEXT link)
+        elif next_cid and next_conf >= _RONC_V2_PROTECTION_THRESHOLD:
+            protection_applied = True
+            reasons.append(f"{_RONC_V2_PROTECTION_ANCHOR}:{next_cid}")
+            audit["anchors_protected"] += 1
+
+        # Check 3: Continuation (has incoming PREV link)
+        elif prev_cid and prev_conf >= _RONC_V2_PROTECTION_THRESHOLD:
+            protection_applied = True
+            reasons.append(f"{_RONC_V2_PROTECTION_CONTINUATION}:{prev_cid}")
+            audit["continuations_protected"] += 1
+
+        # Apply protection
+        if protection_applied:
+            protection["must_include"] = True
+            protection["reason"] = "+".join(reasons)
+            audit["total_protected"] += 1
+
+        # ─────────────────────────────────────────────────────────────
+        # Build linked unit CIDs (always, for audit)
+        # ─────────────────────────────────────────────────────────────
+        protection["linked_unit_cids"] = _ronc_v2_build_linked_unit_cids(
+            span, trace_id
+        )
+
+    # ─────────────────────────────────────────────────────────────────
+    # Logging
+    # ─────────────────────────────────────────────────────────────────
+    if trace_id:
+        logger.info(
+            "[%s] RONC v2.0 Phase 5: %d spans protected "
+            "(anchors=%d, continuations=%d, mutual=%d)",
+            trace_id,
+            audit["total_protected"],
+            audit["anchors_protected"],
+            audit["continuations_protected"],
+            audit["mutual_protected"],
+        )
+
+    return audit
+
+
+def _ronc_v2_build_unit_groups(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> List[List[int]]:
+    """
+    Build atomic unit groups from link graph using connected components.
+
+    RONC v2.0 Phase 6: Unit Group Construction (REVISED)
+
+    Treats the link graph as UNDIRECTED and finds connected components:
+    - Each span is a node
+    - Each prev/next link is an undirected edge
+    - Connected components become atomic units
+    - Each span belongs to EXACTLY ONE unit
+
+    Within each component, spans are ordered by window index
+    for consistent role assignment (first=anchor, last=tail).
+
+    Args:
+        window_spans: Window spans with reconciled links
+        trace_id: Trace ID for logging
+
+    Returns:
+        List of unit groups, where each group is a list of span indices
+        ordered by window position (for role assignment)
+    """
+    # Build CID → index map
+    cid_to_idx = {}
+    for i, sp in enumerate(window_spans):
+        cid = sp.get("_canonical_span_id")
+        if cid:
+            cid_to_idx[cid] = i
+
+    # Track visited spans
+    visited = set()
+    unit_groups = []
+
+    # ─────────────────────────────────────────────────────────────────
+    # Find connected components via DFS
+    # ─────────────────────────────────────────────────────────────────
+    for start_idx in range(len(window_spans)):
+        if start_idx in visited:
+            continue
+
+        sp = window_spans[start_idx]
+        contract = sp.get("_ronc_contract", {})
+        links = contract.get("links", {})
+
+        prev_cid = links.get("prev", {}).get("cid")
+        next_cid = links.get("next", {}).get("cid")
+
+        # No edges: treat as standalone node.
+        # Mark visited to ensure stability across overlapping windows.
+        if not prev_cid and not next_cid:
+            visited.add(start_idx)
+            continue
+
+        # DFS to collect connected component
+        stack = [start_idx]
+        component = []
+
+        while stack:
+            idx = stack.pop()
+
+            if idx in visited:
+                continue
+
+            visited.add(idx)
+            component.append(idx)
+
+            # Get this span's links
+            sp = window_spans[idx]
+            contract = sp.get("_ronc_contract", {})
+            links = contract.get("links", {})
+
+            # Add neighbors (treat links as undirected edges)
+            for direction in ("prev", "next"):
+                neighbor_cid = links.get(direction, {}).get("cid")
+                if neighbor_cid:
+                    neighbor_idx = cid_to_idx.get(neighbor_cid)
+                    if neighbor_idx is not None and neighbor_idx not in visited:
+                        stack.append(neighbor_idx)
+
+        # ─────────────────────────────────────────────────────────────
+        # Only keep components meeting minimum size
+        # Sort by window index for consistent role assignment
+        # ─────────────────────────────────────────────────────────────
+        if len(component) >= _RONC_V2_MIN_UNIT_SIZE:
+            unit_groups.append(sorted(component))
+
+    return unit_groups
+
+
+def _ronc_v2_derive_legacy_fields(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Derive legacy RONC fields from contract link graph.
+
+    RONC v2.0 Phase 6: Legacy Field Derivation
+
+    Populates for backward compatibility:
+    - _ronc_atomic_unit_id: Numeric group identifier
+    - _ronc_atomic_role: "anchor" | "member" | "tail" | None
+    - _ronc_break_after: True if TTS should pause after this span
+
+    Role assignment:
+    - First span in chain: "anchor"
+    - Last span in chain: "tail"
+    - Middle spans: "member"
+    - Unlinked spans: None
+
+    Break logic:
+    - Tail spans: break_after = True (end of semantic unit)
+    - Anchor/member spans: break_after = False (unit continues)
+    - Unlinked spans: break_after = True (standalone)
+
+    Args:
+        window_spans: Window spans with reconciled links and protection
+        trace_id: Trace ID for logging
+
+    Returns:
+        Audit dict with counts:
+        - total_spans: spans processed
+        - units_created: number of atomic units
+        - anchors: spans assigned anchor role
+        - members: spans assigned member role
+        - tails: spans assigned tail role
+        - unlinked: spans with no role
+    """
+    audit = {
+        "total_spans": len(window_spans),
+        "units_created": 0,
+        "anchors": 0,
+        "members": 0,
+        "tails": 0,
+        "unlinked": 0,
+    }
+
+    # ─────────────────────────────────────────────────────────────────
+    # Step 1: Initialize all spans with default (no unit)
+    # ─────────────────────────────────────────────────────────────────
+    for sp in window_spans:
+        sp["_ronc_atomic_unit_id"] = None
+        sp["_ronc_atomic_role"] = None
+        sp["_ronc_break_after"] = True  # Default: break after standalone
+
+    # ─────────────────────────────────────────────────────────────────
+    # Step 2: Build unit groups from link graph
+    # ─────────────────────────────────────────────────────────────────
+    unit_groups = _ronc_v2_build_unit_groups(window_spans, trace_id)
+
+    audit["units_created"] = len(unit_groups)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Step 3: Assign unit IDs and roles
+    # ─────────────────────────────────────────────────────────────────
+    for unit_id, group in enumerate(unit_groups):
+        group_size = len(group)
+
+        for position, span_idx in enumerate(group):
+            sp = window_spans[span_idx]
+
+            # Assign unit ID
+            sp["_ronc_atomic_unit_id"] = unit_id
+
+            # Assign role based on position
+            if position == 0:
+                # First in chain: anchor
+                sp["_ronc_atomic_role"] = _RONC_V2_LEGACY_ROLE_ANCHOR
+                sp["_ronc_break_after"] = False
+                audit["anchors"] += 1
+
+            elif position == group_size - 1:
+                # Last in chain: tail
+                sp["_ronc_atomic_role"] = _RONC_V2_LEGACY_ROLE_TAIL
+                sp["_ronc_break_after"] = True  # Break after unit ends
+                audit["tails"] += 1
+
+            else:
+                # Middle: member
+                sp["_ronc_atomic_role"] = _RONC_V2_LEGACY_ROLE_MEMBER
+                sp["_ronc_break_after"] = False
+                audit["members"] += 1
+
+    # ─────────────────────────────────────────────────────────────────
+    # Step 4: Count unlinked spans
+    # ─────────────────────────────────────────────────────────────────
+    for sp in window_spans:
+        if sp.get("_ronc_atomic_unit_id") is None:
+            audit["unlinked"] += 1
+
+    # ─────────────────────────────────────────────────────────────────
+    # Logging
+    # ─────────────────────────────────────────────────────────────────
+    if trace_id:
+        logger.info(
+            "[%s] RONC v2.0 Phase 6: %d units created "
+            "(anchors=%d, members=%d, tails=%d, unlinked=%d)",
+            trace_id,
+            audit["units_created"],
+            audit["anchors"],
+            audit["members"],
+            audit["tails"],
+            audit["unlinked"],
+        )
+
+    return audit
+
+
+def _build_ronc_contract_v2(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    RONC v2.0 Main Orchestrator: Build semantic continuity contracts.
+
+    Replaces _build_ronc_contract (v1.0) with contract-driven architecture.
+
+    Pipeline:
+        Phase 1: Initialize contracts with boundary profiling
+        Phase 2: Build candidate pools
+        Phase 3: Score and rank candidates by semantic affinity
+        Phase 4: Reconcile links with thresholds and mutual agreement
+        Phase 5: Assign protection flags
+        Phase 6: Derive legacy fields for backward compatibility
+
+    Contract guarantees:
+        - Every span receives a _ronc_contract dict
+        - Every span receives legacy fields (_ronc_atomic_unit_id, etc.)
+        - Protection decisions are auditable via contract.protection
+        - Links are explicit and scored
+
+    Args:
+        window_spans: Window spans from _build_sliding_window_spans
+                     Must have _canonical_span_id, _window_position, _source_page_idx
+        trace_id: Trace ID for logging
+
+    Returns:
+        Audit dict summarizing pipeline execution:
+        - phase_1: boundary profiling stats
+        - phase_2: candidate pool stats
+        - phase_3: scoring stats
+        - phase_4: link stats
+        - phase_5: protection stats
+        - phase_6: legacy derivation stats
+        - total_spans: window size
+        - execution_time_ms: total processing time
+    """
+    import time
+    start_time = time.perf_counter()
+
+    audit = {
+        "total_spans": len(window_spans),
+        "phase_1": {},
+        "phase_2": {},
+        "phase_3": {},
+        "phase_4": {},
+        "phase_5": {},
+        "phase_6": {},
+    }
+
+    if not window_spans:
+        if trace_id:
+            logger.debug("[%s] RONC v2.0: Empty window, skipping", trace_id)
+        return audit
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 1: Initialize contracts with boundary profiling
+    # ═══════════════════════════════════════════════════════════════════════
+    phase_1_errors = 0
+    for i, sp in enumerate(window_spans):
+        prev_sp = window_spans[i - 1] if i > 0 else None
+        next_sp = window_spans[i + 1] if i < len(window_spans) - 1 else None
+
+        try:
+            sp["_ronc_contract"] = _ronc_v2_init_contract(
+                sp, prev_sp, next_sp, trace_id
+            )
+        except Exception as e:
+            # Graceful degradation: assign empty contract
+            if trace_id:
+                logger.warning(
+                    "[%s] RONC v2.0 Phase 1: Contract init failed for span %d: %s",
+                    trace_id, i, e
+                )
+            sp["_ronc_contract"] = _ronc_v2_empty_contract(trace_id)
+            phase_1_errors += 1
+
+    # Phase 1 audit
+    needs_pred = sum(
+        1 for sp in window_spans
+        if sp.get("_ronc_contract", {}).get("boundary", {}).get("needs_predecessor")
+    )
+    needs_succ = sum(
+        1 for sp in window_spans
+        if sp.get("_ronc_contract", {}).get("boundary", {}).get("needs_successor")
+    )
+    audit["phase_1"] = {
+        "needs_predecessor": needs_pred,
+        "needs_successor": needs_succ,
+        "errors": phase_1_errors,
+    }
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 2: Build candidate pools
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        audit["phase_2"] = _ronc_v2_populate_candidate_pools(window_spans, trace_id)
+    except Exception as e:
+        if trace_id:
+            logger.error("[%s] RONC v2.0 Phase 2 failed: %s", trace_id, e)
+        audit["phase_2"] = {"error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 3: Score and rank candidates
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        audit["phase_3"] = _ronc_v2_score_and_rank_candidates(window_spans, trace_id)
+    except Exception as e:
+        if trace_id:
+            logger.error("[%s] RONC v2.0 Phase 3 failed: %s", trace_id, e)
+        audit["phase_3"] = {"error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 4: Reconcile links
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        audit["phase_4"] = _ronc_v2_reconcile_links(window_spans, trace_id)
+    except Exception as e:
+        if trace_id:
+            logger.error("[%s] RONC v2.0 Phase 4 failed: %s", trace_id, e)
+        audit["phase_4"] = {"error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 5: Assign protection
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        audit["phase_5"] = _ronc_v2_assign_protection(window_spans, trace_id)
+    except Exception as e:
+        if trace_id:
+            logger.error("[%s] RONC v2.0 Phase 5 failed: %s", trace_id, e)
+        audit["phase_5"] = {"error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 6: Derive legacy fields
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        audit["phase_6"] = _ronc_v2_derive_legacy_fields(window_spans, trace_id)
+    except Exception as e:
+        if trace_id:
+            logger.error("[%s] RONC v2.0 Phase 6 failed: %s", trace_id, e)
+        audit["phase_6"] = {"error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Execution summary
+    # ═══════════════════════════════════════════════════════════════════════
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    audit["execution_time_ms"] = round(elapsed_ms, 2)
+
+    if trace_id:
+        protected = audit.get("phase_5", {}).get("total_protected", 0)
+        units = audit.get("phase_6", {}).get("units_created", 0)
+        logger.info(
+            "[%s] RONC v2.0: Complete in %.1fms — %d spans, %d protected, %d units",
+            trace_id, elapsed_ms, len(window_spans), protected, units
+        )
+
+    return audit
+
+
+def _ronc_v2_check_mutual_agreement(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> int:
+    """
+    Check for mutual agreement and boost confidence.
+
+    RONC v2.0 Phase 4: Mutual Agreement Detection
+
+    A mutual link exists when:
+    - Span A links to Span B as NEXT
+    - Span B links to Span A as PREV
+
+    Mutual links receive a confidence boost because bidirectional
+    evidence is stronger than unidirectional.
+
+    Args:
+        window_spans: Window spans with links.prev and links.next populated
+        trace_id: Trace ID for logging
+
+    Returns:
+        Count of mutual agreements detected
+    """
+    # Build CID → span index map for fast lookup
+    cid_to_idx = {}
+    for i, sp in enumerate(window_spans):
+        cid = sp.get("_canonical_span_id")
+        if cid:
+            cid_to_idx[cid] = i
+
+    mutual_count = 0
+
+    for i, span in enumerate(window_spans):
+        contract = span.get("_ronc_contract")
+        if not contract:
+            continue
+
+        my_cid = span.get("_canonical_span_id")
+        if not my_cid:
+            continue
+
+        links = contract.get("links", {})
+
+        # ─────────────────────────────────────────────────────────────
+        # Check NEXT link for mutual agreement
+        # ─────────────────────────────────────────────────────────────
+        next_link = links.get("next", {})
+        next_cid = next_link.get("cid")
+
+        if next_cid:
+            target_idx = cid_to_idx.get(next_cid)
+
+            if target_idx is None and trace_id:
+                logger.debug("[%s] RONC v2.0 mutual check: target CID not in window: %s", trace_id,
+                             next_cid)
+
+            if target_idx is not None:
+                target_span = window_spans[target_idx]
+                target_contract = target_span.get("_ronc_contract", {})
+                target_prev = target_contract.get("links", {}).get("prev", {})
+
+                # Mutual: my NEXT target has me as their PREV
+                if target_prev.get("cid") == my_cid:
+                    # Guard: avoid double-boosting if this function is re-run
+                    # or if window overlap syncing re-invokes mutual checks.
+                    if not next_link.get("mutual"):
+                        next_link["mutual"] = True
+
+                        # Boost confidence
+                        boosted = min(
+                            _RONC_V2_MAX_CONFIDENCE,
+                            next_link.get("confidence", 0.0) + _RONC_V2_MUTUAL_BOOST
+                        )
+                        next_link["confidence"] = round(boosted, 3)
+
+                        base_reason = next_link.get("reason") or ""
+                        next_link["reason"] = (base_reason + "+mutual") if base_reason else "mutual"
+
+                        mutual_count += 1
+                    else:
+                        # Already mutual; ensure reason is tagged for audit consistency
+                        base_reason = next_link.get("reason") or ""
+                        if "+mutual" not in base_reason and base_reason != "mutual":
+                            next_link["reason"] = base_reason + "+mutual"
+
+        # ─────────────────────────────────────────────────────────────
+        # Check PREV link for mutual agreement
+        # (Note: we only count once per pair, so only increment for NEXT)
+        # ─────────────────────────────────────────────────────────────
+        prev_link = links.get("prev", {})
+        prev_cid = prev_link.get("cid")
+
+        if prev_cid:
+            target_idx = cid_to_idx.get(prev_cid)
+
+            if target_idx is not None:
+                target_span = window_spans[target_idx]
+                target_contract = target_span.get("_ronc_contract", {})
+                target_next = target_contract.get("links", {}).get("next", {})
+
+                # Mutual: my PREV target has me as their NEXT
+                if target_next.get("cid") == my_cid:
+                    # Guard: avoid double-boosting if re-run
+                    if not prev_link.get("mutual"):
+                        prev_link["mutual"] = True
+
+                        # Boost confidence
+                        boosted = min(
+                            _RONC_V2_MAX_CONFIDENCE,
+                            prev_link.get("confidence", 0.0) + _RONC_V2_MUTUAL_BOOST
+                        )
+                        prev_link["confidence"] = round(boosted, 3)
+
+                        base_reason = prev_link.get("reason") or ""
+                        prev_link["reason"] = (base_reason + "+mutual") if base_reason else "mutual"
+                    else:
+                        base_reason = prev_link.get("reason") or ""
+                        if "+mutual" not in base_reason and base_reason != "mutual":
+                            prev_link["reason"] = base_reason + "+mutual"
+
+    return mutual_count
+
+
+def _ronc_v2_reconcile_links(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Reconcile scored candidates into final link selections.
+
+    RONC v2.0 Phase 4: Batch Link Reconciliation
+
+    Two-pass process:
+    1. Select best candidate for each span's prev/next links
+    2. Detect mutual agreements and boost confidence
+
+    Args:
+        window_spans: Window spans with scored candidates
+        trace_id: Trace ID for logging
+
+    Returns:
+        Audit dict with counts:
+        - total_spans: spans processed
+        - prev_links_created: count of prev links
+        - next_links_created: count of next links
+        - mutual_agreements: count of bidirectional links
+        - strong_links: links created via strong score override
+        - need_based_links: links created via boundary need
+    """
+    audit = {
+        "total_spans": len(window_spans),
+        "prev_links_created": 0,
+        "next_links_created": 0,
+        "mutual_agreements": 0,
+        "strong_links": 0,
+        "need_based_links": 0,
+    }
+
+    # ─────────────────────────────────────────────────────────────────
+    # PASS 1: Select best candidates
+    # ─────────────────────────────────────────────────────────────────
+    for span in window_spans:
+        contract = span.get("_ronc_contract")
+        if not contract:
+            continue
+
+        boundary = contract.get("boundary", {})
+        affinity = contract.get("affinity", {})
+
+        # ─────────────────────────────────────────────────────────────
+        # Select PREV link
+        # ─────────────────────────────────────────────────────────────
+        prev_candidates = affinity.get("prev_candidates", [])
+        needs_pred = boundary.get("needs_predecessor", False)
+
+        prev_link = _ronc_v2_select_link(
+            prev_candidates,
+            direction="prev",
+            needs_link=needs_pred,
+            trace_id=trace_id,
+        )
+
+        contract["links"]["prev"] = prev_link
+
+        if prev_link["cid"]:
+            audit["prev_links_created"] += 1
+            if "strong_score" in (prev_link.get("reason") or ""):
+                audit["strong_links"] += 1
+            else:
+                audit["need_based_links"] += 1
+
+        # ─────────────────────────────────────────────────────────────
+        # Select NEXT link
+        # ─────────────────────────────────────────────────────────────
+        next_candidates = affinity.get("next_candidates", [])
+        needs_succ = boundary.get("needs_successor", False)
+
+        next_link = _ronc_v2_select_link(
+            next_candidates,
+            direction="next",
+            needs_link=needs_succ,
+            trace_id=trace_id,
+        )
+
+        contract["links"]["next"] = next_link
+
+        if next_link["cid"]:
+            audit["next_links_created"] += 1
+            if "strong_score" in (next_link.get("reason") or ""):
+                audit["strong_links"] += 1
+            else:
+                audit["need_based_links"] += 1
+
+    # ─────────────────────────────────────────────────────────────────
+    # PASS 2: Detect mutual agreements and boost
+    # ─────────────────────────────────────────────────────────────────
+    audit["mutual_agreements"] = _ronc_v2_check_mutual_agreement(
+        window_spans, trace_id
+    )
+
+    # ─────────────────────────────────────────────────────────────────
+    # Logging
+    # ─────────────────────────────────────────────────────────────────
+    if trace_id:
+        logger.info(
+            "[%s] RONC v2.0 Phase 4: %d prev links, %d next links, "
+            "%d mutual agreements (strong=%d, need-based=%d)",
+            trace_id,
+            audit["prev_links_created"],
+            audit["next_links_created"],
+            audit["mutual_agreements"],
+            audit["strong_links"],
+            audit["need_based_links"],
+        )
+
+    return audit
+
+
+def _ronc_v2_score_semantic_flow(
+        current_span: Dict,
+        candidate_span: Dict,
+        direction: str,
+        trace_id: Optional[str] = None,
+) -> Tuple[float, str]:
+    """
+    Score semantic boundary compatibility between two spans.
+
+    RONC v2.0 Phase 3: Semantic Flow Scoring
+
+    Evaluates how well boundaries "fit" together:
+    - For PREV candidate: Does candidate's END flow into current's START?
+    - For NEXT candidate: Does current's END flow into candidate's START?
+
+    High scores indicate strong semantic continuity evidence.
+
+    Args:
+        current_span: Span being analyzed (has _ronc_contract)
+        candidate_span: Potential link target (has _ronc_contract)
+        direction: "prev" or "next"
+        trace_id: Trace ID for logging
+
+    Returns:
+        Tuple of (score: float 0.0-1.0, reason: str)
+    """
+    # ─────────────────────────────────────────────────────────────────
+    # Extract contracts
+    # ─────────────────────────────────────────────────────────────────
+    current_contract = current_span.get("_ronc_contract", {})
+    candidate_contract = candidate_span.get("_ronc_contract", {})
+
+    current_boundary = current_contract.get("boundary", {})
+    candidate_boundary = candidate_contract.get("boundary", {})
+
+    # ─────────────────────────────────────────────────────────────────
+    # Determine which boundaries to compare based on direction
+    #
+    # PREV candidate: candidate comes BEFORE current
+    #   → Compare: candidate.end → current.start
+    #   → Good fit: candidate ends truncated, current starts as continuation
+    #
+    # NEXT candidate: candidate comes AFTER current
+    #   → Compare: current.end → candidate.start
+    #   → Good fit: current ends truncated, candidate starts as continuation
+    # ─────────────────────────────────────────────────────────────────
+    if direction == "prev":
+        # Candidate is predecessor: does candidate's END flow into my START?
+        end_profile = candidate_boundary.get("end", {})
+        start_profile = current_boundary.get("start", {})
+    elif direction == "next":
+        # Candidate is successor: does my END flow into candidate's START?
+        end_profile = current_boundary.get("end", {})
+        start_profile = candidate_boundary.get("start", {})
+    else:
+        # Defensive: invalid direction (should never occur)
+        return 0.0, "invalid_direction"
+
+    # ─────────────────────────────────────────────────────────────────
+    # Extract boundary scores and labels
+    # ─────────────────────────────────────────────────────────────────
+    end_score = end_profile.get("score", 0.0)
+    end_label = end_profile.get("label", "unknown")
+
+    start_score = start_profile.get("score", 0.0)
+    start_label = start_profile.get("label", "unknown")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Scoring Logic: Boundary Compatibility Matrix
+    #
+    # Best case: truncated END → continuation START
+    #   Both boundaries indicate incomplete semantic unit
+    #
+    # Good case: mid_sentence END → fragment/continuation START
+    #   Partial evidence on both sides
+    #
+    # Neutral case: complete END → clean START
+    #   No continuation evidence (but not incompatible)
+    #
+    # Poor case: complete END → continuation START
+    #   Conflicting signals (complete shouldn't need continuation)
+    # ─────────────────────────────────────────────────────────────────
+
+    score = 0.0
+    reasons = []
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 1: End boundary truncation (0.0 - 0.5)
+    # Higher end_score = more likely truncated = more likely needs successor
+    # ─────────────────────────────────────────────────────────────────
+    end_component = end_score * 0.5
+    score += end_component
+
+    if end_label == "truncated":
+        reasons.append("end:truncated")
+    elif end_label == "mid_sentence":
+        reasons.append("end:mid")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 2: Start boundary continuation (0.0 - 0.5)
+    # Higher start_score = more likely continuation = more likely needs predecessor
+    # ─────────────────────────────────────────────────────────────────
+    start_component = start_score * 0.5
+    score += start_component
+
+    if start_label == "continuation":
+        reasons.append("start:continuation")
+    elif start_label == "fragment":
+        reasons.append("start:fragment")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 3: Label compatibility bonus/penalty
+    # ─────────────────────────────────────────────────────────────────
+
+    # Best match: truncated → continuation
+    if end_label == "truncated" and start_label == "continuation":
+        score += 0.20
+        reasons.append("match:ideal")
+
+    # Good match: mid_sentence → continuation/fragment
+    elif end_label == "mid_sentence" and start_label in ("continuation", "fragment"):
+        score += 0.10
+        reasons.append("match:good")
+
+    # Good match: truncated → fragment
+    elif end_label == "truncated" and start_label == "fragment":
+        score += 0.10
+        reasons.append("match:good")
+
+    # Conflict: complete → continuation (suspicious)
+    elif end_label == "complete" and start_label == "continuation":
+        score -= 0.10
+        reasons.append("match:conflict")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 4: A2 signal agreement bonus
+    # If both spans have A2 continuation flags aligned, strong evidence
+    # ─────────────────────────────────────────────────────────────────
+    if direction == "prev":
+        # For prev: candidate should have a2_continues_to_next
+        #           current should have a2_continues_from_previous
+        candidate_continues_to = candidate_span.get("a2_continues_to_next", False)
+        current_continues_from = current_span.get("a2_continues_from_previous", False)
+
+        if candidate_continues_to and current_continues_from:
+            score += 0.15
+            reasons.append("a2:aligned")
+        elif candidate_continues_to or current_continues_from:
+            score += 0.05
+            reasons.append("a2:partial")
+
+    else:  # direction == "next"
+        # For next: current should have a2_continues_to_next
+        #           candidate should have a2_continues_from_previous
+        current_continues_to = current_span.get("a2_continues_to_next", False)
+        candidate_continues_from = candidate_span.get("a2_continues_from_previous", False)
+
+        if current_continues_to and candidate_continues_from:
+            score += 0.15
+            reasons.append("a2:aligned")
+        elif current_continues_to or candidate_continues_from:
+            score += 0.05
+            reasons.append("a2:partial")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Clamp to valid range
+    # ─────────────────────────────────────────────────────────────────
+    score = max(0.0, min(0.90, score))
+
+    reason = "+".join(reasons) if reasons else "neutral"
+
+    return round(score, 3), reason
+
+
+def _ronc_v2_score_proximity(
+        current_span: Dict,
+        candidate_span: Dict,
+        distance: int,
+        trace_id: Optional[str] = None,
+) -> Tuple[float, str]:
+    """
+    Score candidate based on window distance and structural factors.
+
+    RONC v2.0 Phase 3: Proximity Scoring
+
+    Closer spans are more likely to be semantically related.
+    Distance-based decay with adjustments for structural factors.
+
+    Args:
+        current_span: Span being analyzed
+        candidate_span: Potential link target
+        distance: Absolute window index distance (always positive)
+        trace_id: Trace ID for logging
+
+    Returns:
+        Tuple of (score: float 0.0-1.0, reason: str)
+    """
+    reasons = []
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 1: Distance decay (primary factor)
+    #
+    # Score decreases as distance increases:
+    #   distance=1 → 1.0 (adjacent, ideal)
+    #   distance=2 → 0.85
+    #   distance=3 → 0.70
+    #   ...
+    #   distance=15 → 0.0 (at max candidate distance)
+    #
+    # Formula: 1.0 - ((distance - 1) / (MAX_DISTANCE - 1))
+    # This gives linear decay from 1.0 at distance=1 to 0.0 at MAX_DISTANCE
+    # ─────────────────────────────────────────────────────────────────
+    if distance <= 0:
+        # Invalid distance (shouldn't happen)
+        return 0.0, "invalid_distance"
+
+    if distance == 1:
+        distance_score = 1.0
+        reasons.append("adjacent")
+    elif distance > _RONC_V2_MAX_CANDIDATE_DISTANCE:
+        distance_score = 0.0
+        reasons.append("too_far")
+    else:
+        # Linear decay
+        max_dist = _RONC_V2_MAX_CANDIDATE_DISTANCE
+        distance_score = 1.0 - ((distance - 1) / (max_dist - 1))
+        reasons.append(f"dist:{distance}")
+
+    score = distance_score
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 2: Role-based adjustment
+    #
+    # Deprioritized roles (table cells, captions, etc.) receive penalty.
+    # These are valid candidates but less likely to be primary content flow.
+    # ─────────────────────────────────────────────────────────────────
+    candidate_role = candidate_span.get("role")
+
+    if candidate_role in _RONC_V2_DEPRIORITIZED_ROLES:
+        score *= 0.70  # 30% penalty
+        reasons.append(f"deprioritized:{candidate_role}")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 3: Same-page bonus
+    #
+    # Spans on the same page are more likely to be related than
+    # cross-page candidates (which require window boundary crossing).
+    # ─────────────────────────────────────────────────────────────────
+    current_page = current_span.get("_source_page_idx")
+    candidate_page = candidate_span.get("_source_page_idx")
+
+    if current_page is not None and candidate_page is not None:
+        if current_page == candidate_page:
+            score *= 1.10  # 10% bonus for same page
+            score = min(score, 1.0)  # Cap at 1.0
+            reasons.append("same_page")
+        else:
+            # Cross-page: no penalty, but note it
+            reasons.append("cross_page")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 4: Same-block bonus
+    #
+    # Spans from the same PDF block are highly likely to be related.
+    # This is strong structural evidence of semantic unity.
+    # ─────────────────────────────────────────────────────────────────
+    current_block = current_span.get("block_id")
+    candidate_block = candidate_span.get("block_id")
+
+    if current_block is not None and candidate_block is not None:
+        if current_block == candidate_block:
+            score *= 1.15  # 15% bonus for same block
+            score = min(score, 1.0)  # Cap at 1.0
+            reasons.append("same_block")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Component 5: Line adjacency bonus
+    #
+    # If spans are on adjacent lines within same block, very strong signal.
+    # ─────────────────────────────────────────────────────────────────
+    current_line = current_span.get("line_index")
+    candidate_line = candidate_span.get("line_index")
+
+    if (current_block is not None and candidate_block is not None and
+            current_block == candidate_block and
+            current_line is not None and candidate_line is not None):
+
+        line_distance = abs(current_line - candidate_line)
+
+        if line_distance == 0:
+            # Same line (different spans on same line)
+            score *= 1.10
+            score = min(score, 1.0)
+            reasons.append("same_line")
+        elif line_distance == 1:
+            # Adjacent lines
+            score *= 1.05
+            score = min(score, 1.0)
+            reasons.append("adjacent_line")
+
+    # ─────────────────────────────────────────────────────────────────
+    # Clamp to valid range
+    # ─────────────────────────────────────────────────────────────────
+    score = max(0.0, min(0.90, score))
+
+    reason = "+".join(reasons) if reasons else "proximity"
+
+    return round(score, 3), reason
+
+
+def _ronc_v2_score_and_rank_candidates(
+        window_spans: List[Dict],
+        trace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Score and rank all candidates for all spans in window.
+
+    RONC v2.0 Phase 3: Batch Affinity Scoring & Ranking
+
+    For each span's candidate pools (prev/next):
+    1. Score each candidate on semantic flow (boundary compatibility)
+    2. Score each candidate on proximity (distance + structure)
+    3. Combine with weighted formula
+    4. Sort by score descending
+    5. Truncate to top-K candidates
+
+    Weighted formula:
+        final_score = (semantic_flow * 0.65) + (proximity * 0.35)
+
+    Args:
+        window_spans: Window spans with candidate pools populated (Phase 2)
+        trace_id: Trace ID for logging
+
+    Returns:
+        Audit dict with:
+        - total_spans: spans processed
+        - candidates_scored: total candidates scored
+        - prev_candidates_scored: prev direction count
+        - next_candidates_scored: next direction count
+        - avg_top_score: average score of top candidates
+        - high_confidence_candidates: count with score >= 0.70
+    """
+    audit = {
+        "total_spans": len(window_spans),
+        "candidates_scored": 0,
+        "prev_candidates_scored": 0,
+        "next_candidates_scored": 0,
+        "avg_top_score": 0.0,
+        "high_confidence_candidates": 0,
+    }
+
+    # Build index lookup for candidate spans
+    # (candidates store idx, we need the actual span for scoring)
+    top_scores = []
+
+    for current_idx, current_span in enumerate(window_spans):
+        contract = current_span.get("_ronc_contract")
+        if not contract:
+            continue
+
+        affinity = contract.get("affinity", {})
+
+        # ─────────────────────────────────────────────────────────────
+        # Score PREV candidates
+        # ─────────────────────────────────────────────────────────────
+        prev_candidates = affinity.get("prev_candidates", [])
+
+        for candidate_entry in prev_candidates:
+            candidate_idx = candidate_entry.get("idx")
+            distance = candidate_entry.get("distance", 1)
+
+            # Validate candidate index
+            if candidate_idx is None or candidate_idx < 0 or candidate_idx >= len(window_spans):
+                candidate_entry["score"] = 0.0
+                candidate_entry["reason"] = "invalid_idx"
+                candidate_entry["components"] = {}
+                continue
+
+            candidate_span = window_spans[candidate_idx]
+
+            # Score semantic flow
+            semantic_score, semantic_reason = _ronc_v2_score_semantic_flow(
+                current_span=current_span,
+                candidate_span=candidate_span,
+                direction="prev",
+                trace_id=trace_id,
+            )
+
+            # Score proximity
+            proximity_score, proximity_reason = _ronc_v2_score_proximity(
+                current_span=current_span,
+                candidate_span=candidate_span,
+                distance=distance,
+                trace_id=trace_id,
+            )
+
+            # Combine with weights
+            final_score = (
+                    (semantic_score * _RONC_V2_WEIGHT_SEMANTIC_FLOW) +
+                    (proximity_score * _RONC_V2_WEIGHT_PROXIMITY)
+            )
+            final_score = round(max(0.0, min(1.0, final_score)), 3)
+
+            # Populate candidate entry
+            candidate_entry["score"] = final_score
+            candidate_entry["reason"] = f"sem:{semantic_reason}|prox:{proximity_reason}"
+            candidate_entry["components"] = {
+                "semantic_flow": semantic_score,
+                "semantic_reason": semantic_reason,
+                "proximity": proximity_score,
+                "proximity_reason": proximity_reason,
+                "weights": {
+                    "semantic": _RONC_V2_WEIGHT_SEMANTIC_FLOW,
+                    "proximity": _RONC_V2_WEIGHT_PROXIMITY,
+                },
+            }
+
+            audit["candidates_scored"] += 1
+            audit["prev_candidates_scored"] += 1
+
+            if final_score >= 0.70:
+                audit["high_confidence_candidates"] += 1
+
+        # Sort prev candidates by score (descending)
+        prev_candidates.sort(
+            key=lambda c: (
+                -c.get("score", 0.0),
+                c.get("distance", 9999),
+                c.get("idx", 9999),
+            )
+        )
+
+        # Truncate to top-K
+        if len(prev_candidates) > _RONC_V2_TOP_K_CANDIDATES:
+            prev_candidates = prev_candidates[:_RONC_V2_TOP_K_CANDIDATES]
+            affinity["prev_candidates"] = prev_candidates
+
+        # Track top score for audit
+        if prev_candidates:
+            top_scores.append(prev_candidates[0].get("score", 0.0))
+
+        # ─────────────────────────────────────────────────────────────
+        # Score NEXT candidates
+        # ─────────────────────────────────────────────────────────────
+        next_candidates = affinity.get("next_candidates", [])
+
+        for candidate_entry in next_candidates:
+            candidate_idx = candidate_entry.get("idx")
+            distance = candidate_entry.get("distance", 1)
+
+            # Validate candidate index
+            if candidate_idx is None or candidate_idx < 0 or candidate_idx >= len(window_spans):
+                candidate_entry["score"] = 0.0
+                candidate_entry["reason"] = "invalid_idx"
+                candidate_entry["components"] = {}
+                continue
+
+            candidate_span = window_spans[candidate_idx]
+
+            # Score semantic flow
+            semantic_score, semantic_reason = _ronc_v2_score_semantic_flow(
+                current_span=current_span,
+                candidate_span=candidate_span,
+                direction="next",
+                trace_id=trace_id,
+            )
+
+            # Score proximity
+            proximity_score, proximity_reason = _ronc_v2_score_proximity(
+                current_span=current_span,
+                candidate_span=candidate_span,
+                distance=distance,
+                trace_id=trace_id,
+            )
+
+            # Combine with weights
+            final_score = (
+                    (semantic_score * _RONC_V2_WEIGHT_SEMANTIC_FLOW) +
+                    (proximity_score * _RONC_V2_WEIGHT_PROXIMITY)
+            )
+            final_score = round(final_score, 3)
+
+            # Populate candidate entry
+            candidate_entry["score"] = final_score
+            candidate_entry["reason"] = f"sem:{semantic_reason}|prox:{proximity_reason}"
+            candidate_entry["components"] = {
+                "semantic_flow": semantic_score,
+                "semantic_reason": semantic_reason,
+                "proximity": proximity_score,
+                "proximity_reason": proximity_reason,
+                "weights": {
+                    "semantic": _RONC_V2_WEIGHT_SEMANTIC_FLOW,
+                    "proximity": _RONC_V2_WEIGHT_PROXIMITY,
+                },
+            }
+
+            audit["candidates_scored"] += 1
+            audit["next_candidates_scored"] += 1
+
+            if final_score >= 0.70:
+                audit["high_confidence_candidates"] += 1
+
+        # Sort next candidates by score (descending)
+        next_candidates.sort(
+            key=lambda c: (
+                -c.get("score", 0.0),
+                c.get("distance", 9999),
+                c.get("idx", 9999),
+            )
+        )
+
+        # Truncate to top-K
+        if len(next_candidates) > _RONC_V2_TOP_K_CANDIDATES:
+            next_candidates = next_candidates[:_RONC_V2_TOP_K_CANDIDATES]
+            affinity["next_candidates"] = next_candidates
+
+        # Track top score for audit
+        if next_candidates:
+            top_scores.append(next_candidates[0].get("score", 0.0))
+
+    # ─────────────────────────────────────────────────────────────────
+    # Compute average top score
+    # ─────────────────────────────────────────────────────────────────
+    if top_scores:
+        audit["avg_top_score"] = round(sum(top_scores) / len(top_scores), 3)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Logging
+    # ─────────────────────────────────────────────────────────────────
+    if trace_id:
+        logger.debug(
+            "[%s] RONC v2.0 Phase 3: scored %d candidates "
+            "(prev=%d, next=%d, high_conf=%d, avg_top=%.3f)",
+            trace_id,
+            audit["candidates_scored"],
+            audit["prev_candidates_scored"],
+            audit["next_candidates_scored"],
+            audit["high_confidence_candidates"],
+            audit["avg_top_score"],
+        )
+
+    return audit
 
 # ✦                  ✦                  ✦                  ✦
 # ✦───────────── 1 Geometry & Spatial Primitives ─────────────✦
@@ -1561,6 +3918,23 @@ def _rects_intersect(r1: BboxTuple, r2: BboxTuple) -> bool:
     """
     # No overlap if: r1 is entirely left/right/above/below r2
     return not (r1[2] < r2[0] or r1[0] > r2[2] or r1[3] < r2[1] or r1[1] > r2[3])
+
+
+def _rect_area(rect: Tuple[float, float, float, float]) -> float:
+    """
+    Compute area of a rectangle defined as (x0, y0, x1, y1).
+
+    Returns 0.0 if rect is invalid or degenerate.
+    """
+    if not rect or len(rect) < 4:
+        return 0.0
+
+    x0, y0, x1, y1 = rect
+
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+
+    return width * height
 
 
 def _get_intersection_rect(r1: BboxTuple, r2: BboxTuple) -> Optional[BboxTuple]:
@@ -1682,6 +4056,11 @@ def _get_span_sort_tolerance(span: Dict) -> int:
     return _SORT_TOLERANCE_TABLE if span.get("_is_table_content") else _SORT_TOLERANCE_PROSE
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RONC v2.0 PHASE 5 — Protection Semantics
+# ═══════════════════════════════════════════════════════════════════════════
+
 # ✦────── b. Spatial Queries ──────✦
 
 def _find_bbox_for_text(
@@ -1800,6 +4179,836 @@ def _span_inside_visual_region(
 
     return False
 
+
+# ===========================================================================
+# STAGE 1 SOFT CLASSIFICATION HELPERS (Schema v2.0)
+# ===========================================================================
+
+def _translate_exclusion_flags(
+        spans: List[Dict],
+        *,
+        trace_id: str = None,
+) -> Dict[str, int]:
+    """
+    Unified Flag Translator (Post-Semantic) v1.2.1:
+      - Converts Stage 1 soft flags into authoritative exclusion decisions
+      - Writes BOTH _tts_excluded AND _semantic_disposition for reconstruction
+      - Respects EXPLICIT semantic decisions (not default inclusions)
+      - Honors Pass 1 rescued spans (HARDEN normalization already applied)
+    """
+    audit = {"included": 0, "excluded_by": {}}
+
+    def _inc(reason: str):
+        audit["excluded_by"][reason] = audit["excluded_by"].get(reason, 0) + 1
+
+    def _exclude(span: Dict, excl_reason: str):
+        span["_tts_excluded"] = True
+        span["_tts_exclude_reason"] = excl_reason
+        span["_semantic_disposition"] = _SEM_DISP_EXCLUDED
+        existing_reasons = list(span.get("_semantic_reasons") or [])
+        existing_reasons.append(f"flag_translated:{excl_reason}")
+        span["_semantic_reasons"] = existing_reasons
+        _inc(excl_reason)
+
+        if trace_id:
+            logger.debug(
+                "[%s] TTS exclusion applied: reason=%s, text='%s...'",
+                trace_id,
+                excl_reason,
+                (span.get("cleaned_text") or "")[:40]
+            )
+
+    for sp in spans:
+        if not isinstance(sp, dict):
+            continue
+
+        disp = sp.get("_semantic_disposition")
+        reasons = sp.get("_semantic_reasons") or []
+        confidence = sp.get("_semantic_confidence", 0.0)
+
+        # ------------------------------------------------------------
+        # Priority 0: Semantic explicit exclusion
+        # ------------------------------------------------------------
+        if disp == _SEM_DISP_EXCLUDED:
+            sp["_tts_excluded"] = True
+            sp["_tts_exclude_reason"] = sp.get("_tts_exclude_reason") or "semantic_excluded"
+            _inc(sp["_tts_exclude_reason"])
+            continue
+
+        # ------------------------------------------------------------
+        # Priority 1: Semantic interruption (treat as excluded for TTS)
+        # ------------------------------------------------------------
+        if disp == _SEM_DISP_INTERRUPTION:
+            _exclude(sp, "semantic_interruption")
+            continue
+
+        # ------------------------------------------------------------
+        # Priority 2: Explicit semantic include
+        # CRITICAL: default inclusion ≠ explicit include
+        # ------------------------------------------------------------
+        is_explicit_include = (
+                disp == _SEM_DISP_INCLUDED
+                and "default" not in reasons
+                and confidence >= 0.6
+        )
+
+        if is_explicit_include:
+            sp["_tts_excluded"] = False
+            sp["_tts_exclude_reason"] = None
+            sp["_tts_include_reason"] = "semantic_explicit_include"
+            sp["_has_semantic_authority"] = True
+            audit["included"] += 1
+            continue
+
+        # ════════════════════════════════════════════════════════════
+        # Priority 2.4: RONC v2.0 Contract-Based Protection
+        # ════════════════════════════════════════════════════════════
+        # Check contract protection FIRST (v2.0 takes precedence)
+        # Falls through to v1.0 logic if no contract or no protection
+        contract = sp.get("_ronc_contract")
+        if contract:
+            protection = contract.get("protection", {})
+            if protection.get("must_include"):
+                # Contract says this span must be included
+                sp["_tts_excluded"] = False
+                sp["_tts_exclude_reason"] = None
+                sp["_tts_include_reason"] = f"ronc_v2_contract:{protection.get('reason')}"
+                audit["included"] += 1
+
+                if trace_id:
+                    span_text = (
+                                        sp.get("cleaned_text")
+                                        or sp.get("text")
+                                        or sp.get("raw_text")
+                                        or ""
+                                )[:40]
+                    logger.debug(
+                        "[%s] RONC v2.0: Contract protection applied: '%s...' reason=%s",
+                        trace_id, span_text, protection.get('reason')
+                    )
+
+                continue  # Skip to next span
+
+        # ════════════════════════════════════════════════════════════
+        # Priority 2.5: RONC Atomic Anchor Protection (v1.0) - LEGACY
+        # ════════════════════════════════════════════════════════════
+        if sp.get("_ronc_atomic_role") == "anchor":
+            unit_id = sp.get("_ronc_atomic_unit_id")
+
+            if unit_id is not None:
+                span_text = (
+                        sp.get("cleaned_text")
+                        or sp.get("text")
+                        or sp.get("raw_text")
+                        or ""
+                )
+
+                # Veto: some anchors must never be protected
+                if _matches_continuity_veto_pattern(span_text):
+                    if trace_id:
+                        logger.debug(
+                            "[%s] RONC: Anchor vetoed from protection: '%s...'",
+                            trace_id, span_text[:40]
+                        )
+
+                # Protection condition
+                elif _would_orphan_continuations(sp, spans):
+                    sp["_tts_excluded"] = False
+                    sp["_tts_exclude_reason"] = None
+                    sp["_tts_include_reason"] = "ronc_anchor_protection"
+                    sp["_ronc_rescue_applied"] = True
+
+                    audit["included"] += 1
+
+                    if trace_id:
+                        logger.debug(
+                            "[%s] RONC: Protected anchor to prevent orphaning "
+                            "(unit_id=%s, text='%s...')",
+                            trace_id, unit_id, span_text[:40]
+                        )
+
+                    continue
+
+        # ------------------------------------------------------------
+        # Priority 3: Pass 1 rescued spans (HARDEN already applied)
+        # ------------------------------------------------------------
+        if sp.get("_tts_rescued", False):
+            sp["_tts_excluded"] = False
+            sp["_tts_exclude_reason"] = None
+            sp["_tts_include_reason"] = "pass1_rescued"
+            audit["included"] += 1
+            continue
+
+        # ------------------------------------------------------------
+        # Priority 3.5: inside_figure rescue (PATCH 7B authoritative)
+        # ------------------------------------------------------------
+        if sp.get("_inside_figure_rescued", False):
+            sp["_tts_excluded"] = False
+            sp["_tts_exclude_reason"] = None
+            sp["_tts_include_reason"] = "inside_figure_rescued"
+            audit["included"] += 1
+            continue
+
+        # ------------------------------------------------------------
+        # Priority 4+: Rule-based exclusion
+        # ------------------------------------------------------------
+        role = sp.get("role", "")
+
+        if role in _TTS_NON_VIABLE_ROLES:
+            # =================================================================
+            # PATCH 7B-A (E3 + E2 HARDENED)
+            # Rescue body-like inside_figure roles, INCLUDING short continuations
+            # =================================================================
+            if role == "inside_figure":
+                text = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
+                word_count = len(text.split()) if text else 0
+                has_sentence_punct = text and text[-1] in ".!?,"
+                layout_stream = sp.get("layout_stream", "")
+
+                # Short continuation heuristic (PATCH 7B-F: >= 2 words)
+                is_short_continuation = (
+                        2 <= word_count <= 5 and
+                        text and (
+                                text[0].islower() or text[0] in ",;:)"
+                        )
+                )
+
+                is_body_like = word_count >= 5 or has_sentence_punct or is_short_continuation
+                is_body_stream = isinstance(layout_stream, str) and layout_stream.startswith(
+                    "body_col")
+
+                text_lower = text.lower() if text else ""
+                is_boilerplate = (
+                        "html" in text_lower or
+                        "css" in text_lower or
+                        "examples of how to" in text_lower or
+                        text_lower.startswith("figure ") or
+                        text_lower.startswith("table ")
+                )
+
+                is_diagram_label = word_count <= 3 and text.isupper() if text else False
+
+                if is_body_like and is_body_stream and not is_boilerplate and not is_diagram_label:
+                    # --- Audit trail: preserve original classification ---
+                    if "_original_role" not in sp:
+                        sp["_original_role"] = sp.get("role")
+
+                    sp["_inside_figure_rescued"] = True
+                    sp["_tts_excluded"] = False
+                    sp["_rescue_reason"] = "inside_figure_rescued:role_body_like"
+                    continue
+                    # fall through
+                else:
+                    _exclude(sp, "non_viable_role")
+                    continue
+            else:
+                _exclude(sp, "non_viable_role")
+                continue
+
+
+
+        spatial = sp.get("_spatial_context") or {}
+        if spatial.get("inside_figure", False):
+            # =================================================================
+            # PATCH 7B-B (E3 HARDENED)
+            # Rescue body-like spans misclassified spatially as inside_figure
+            # =================================================================
+            exclusion_reasons = sp.get("_exclusion_candidate_reasons", [])
+
+            if "visual_overlap" not in exclusion_reasons:
+                text = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
+                word_count = len(text.split()) if text else 0
+                has_sentence_punct = text and text[-1] in ".!?,"
+                layout_stream = sp.get("layout_stream", "")
+
+                # PATCH 7B-F: >= 2 words minimum
+                is_short_continuation = (
+                        2 <= word_count <= 5 and
+                        text and (
+                                text[0].islower() or text[0] in ",;:)"
+                        )
+                )
+
+                is_body_like = word_count >= 5 or has_sentence_punct or is_short_continuation
+                is_body_stream = isinstance(layout_stream, str) and layout_stream.startswith(
+                    "body_col")
+
+                text_lower = text.lower() if text else ""
+                is_boilerplate = (
+                        "html" in text_lower or
+                        "css" in text_lower or
+                        "examples of how to" in text_lower or
+                        text_lower.startswith("figure ") or
+                        text_lower.startswith("table ")
+                )
+
+                if is_body_like and is_body_stream and not is_boilerplate:
+                    # --- Audit trail: preserve original classification ---
+                    if "_original_role" not in sp:
+                        sp["_original_role"] = sp.get("role")
+
+                    sp["_inside_figure_rescued"] = True
+                    sp["_tts_excluded"] = False
+                    sp["_rescue_reason"] = "inside_figure_rescued:spatial_body_like"
+                    continue
+                    # fall through
+                else:
+                    _exclude(sp, "inside_figure")
+                    continue
+            else:
+                _exclude(sp, "inside_figure")
+                continue
+
+        if sp.get("_is_table_content", False) or spatial.get("inside_table", False):
+            _exclude(sp, "inside_table")
+            continue
+
+        signals = sp.get("_signals") or {}
+        if (signals.get("diagram_label") or {}).get("is_label", False):
+            _exclude(sp, "diagram_label")
+            continue
+
+        if sp.get("_exclusion_candidate", False):
+            if sp.get("_requires_semantic_review", False):
+                _exclude(sp, "exclusion_candidate_unreviewed")
+            else:
+                _exclude(sp, "exclusion_candidate")
+            continue
+
+        # ------------------------------------------------------------
+        # Default include
+        # ------------------------------------------------------------
+        sp["_tts_excluded"] = False
+        sp["_tts_exclude_reason"] = None
+        sp["_tts_include_reason"] = "no_exclusion_rule_matched"
+        audit["included"] += 1
+
+    if trace_id:
+        logger.info(
+            "[%s] Flag translation: %d included, %d excluded %s",
+            trace_id,
+            audit["included"],
+            sum(audit["excluded_by"].values()),
+            dict(audit["excluded_by"]),
+        )
+
+    if trace_id:
+        rescue_count = sum(
+            1 for sp in spans
+            if sp.get("_ronc_rescue_applied", False)
+        )
+
+        logger.info(
+            "[%s] RONC enforcement: %d anchors rescued",
+            trace_id, rescue_count
+        )
+
+    return audit
+
+
+def _apply_line_coherent_streams(
+        window_spans: List[Dict],
+        *,
+        trace_id: str = None,
+) -> int:
+    """
+    Semantic-gated stream inheritance on WINDOW spans.
+
+    Promotes margin_* spans to body_col_* ONLY when:
+      1) Anchor (first span on line) is body_col_*
+      2) Target span is semantically included
+      3) Continuation gate passes
+    """
+    # PHASE 4 CONTRACT:
+    # - This method MAY adjust layout_stream and structural ordering
+    # - This method MUST NOT finalize semantic inclusion or exclusion
+    # - This method MUST NOT set or remove _has_semantic_authority
+    # - All exclusion signals here are PROVISIONAL and resolved in Phase 5
+
+    from collections import defaultdict
+
+    by_line: Dict[str, List[Dict]] = defaultdict(list)
+    for sp in window_spans:
+        if not isinstance(sp, dict):
+            continue
+        lid = sp.get("line_id")
+        if lid:
+            by_line[lid].append(sp)
+
+    changed = 0
+
+    for lid, line_spans in by_line.items():
+        if len(line_spans) <= 1:
+            continue
+
+        line_spans.sort(key=lambda s: s.get("span_index_in_line", 0))
+        anchor = line_spans[0]
+        anchor_stream = anchor.get("layout_stream") or ""
+
+        # Gate 0: anchor must be body column
+        # Column membership here is treated as STRUCTURAL, not semantic.
+        # Column transitions are soft unless paired with punctuation or paragraph signals.
+        if not anchor_stream.startswith("body_col_"):
+            continue
+
+        for sp in line_spans[1:]:
+            current_stream = sp.get("layout_stream") or ""
+
+            # Gate 1: target must be margin stream
+            if not current_stream.startswith("margin_"):
+                continue
+
+            # IMPORTANT:
+            # Semantic inclusion MUST be resolved before layout inheritance.
+            # This gate must never be removed or weakened.
+            # Gate 2: target must be semantically included
+            disp = sp.get("_semantic_disposition")
+            if disp != _SEM_DISP_INCLUDED:
+                continue
+
+            # RONC v2: do not structurally mutate protected spans
+            contract = sp.get("_ronc_contract")
+            if contract and contract.get("protection", {}).get("must_include"):
+                continue
+
+            # Gate 3: continuation gate
+            if not _passes_inline_continuation_gate(anchor, sp):
+                continue
+
+            # Apply inheritance (COMPLETE)
+            sp["_original_layout_stream"] = current_stream
+            sp["layout_stream"] = anchor_stream
+
+            # Inherit ALL structure to force correct sort order
+            sp["_original_column_index"] = sp.get("column_index")
+            sp["column_index"] = anchor.get("column_index")
+
+            sp["_original_block_id"] = sp.get("block_id")
+            sp["block_id"] = anchor.get("block_id")
+
+            sp["_original_line_index"] = sp.get("line_index")
+            sp["line_index"] = anchor.get("line_index")
+
+            sp["_stream_inherited_from_line"] = True
+            sp["_stream_inheritance_reason"] = "same_line_body_anchor"
+            sp["_stream_inheritance_confidence"] = "high"
+            changed += 1
+
+    if trace_id and changed:
+        logger.info("[%s] Line-coherent streams: corrected %d spans", trace_id, changed)
+
+    # =========================================================================
+    # PATCH 9B: Rescue sidebar spans that share line_id with body spans
+    # Some italic text gets misclassified as sidebar due to positional offset.
+    # Constraint: Only rescue short inline fragments (≤5 words) on body lines.
+    # Restricted to body_col* streams only (prevents footnote/margin leakage).
+    # =========================================================================
+    sidebar_rescue_count = 0
+
+    # Build index of line_ids that have body spans
+    body_line_ids = set()
+    for sp in window_spans:
+        if sp.get("role") == "body":
+            line_id = sp.get("line_id")
+            if line_id:
+                body_line_ids.add(line_id)
+
+    # Rescue sidebar spans on body lines
+    for sp in window_spans:
+        role = sp.get("role", "")
+        line_id = sp.get("line_id")
+        layout_stream = sp.get("layout_stream", "")
+
+        if role == "sidebar" and line_id and line_id in body_line_ids:
+            # Constraint: layout_stream must be body column (not margin)
+            is_inline_context = layout_stream.startswith("body_col")
+
+            if is_inline_context:
+                text = (sp.get("cleaned_text") or "").strip()
+                # Only rescue short inline fragments (≤5 words, likely italic terms)
+                if text and len(text.split()) <= 5:
+                    # --- Audit trail ---
+                    if "_original_role" not in sp:
+                        sp["_original_role"] = sp.get("role")
+
+                    sp["role"] = "body"
+                    sp["_rescue_reason"] = "sidebar_rescued:same_line_body_sibling"
+                    sp["_semantic_rescue_reason"] = "same_line_body_sibling"
+                    sp["_stream_inherited_from_line"] = True
+                    sp["_stream_inheritance_reason"] = "sidebar_same_line_body_sibling"
+                    sp["_stream_inheritance_confidence"] = "medium"
+                    sp["_layout_correction_applied"] = [
+                        "sidebar_rescue_same_line_body",
+                        "line_coherent_stream_inheritance"
+                    ]
+                    sidebar_rescue_count += 1
+                    changed += 1
+
+
+    if trace_id and sidebar_rescue_count > 0:
+        logger.info(
+            "[%s] Patch 9B: Rescued %d sidebar spans via same-line body sibling",
+            trace_id, sidebar_rescue_count
+        )
+
+    # =========================================================================
+    # PHASE 4 INVARIANT (DEBUG ONLY)
+    # Phase 4 must not create, remove, or modify semantic authority.
+    # =========================================================================
+    if trace_id and __debug__:
+        for sp in window_spans:
+            if "_has_semantic_authority" in sp:
+                # value must be unchanged from entry
+                pass  # presence is allowed, mutation is not detectable here
+
+    return changed
+
+
+def _sync_window_spans_back_to_cache(
+        window_spans: List[Dict],
+        page_span_cache: Dict[int, List[Dict]],
+        *,
+        trace_id: str = None,
+) -> int:
+    """
+    Sync mutations from window_spans back into page_span_cache.
+
+    Handles ALL window spans (prev_tail + current + next_head) so
+    overlapping windows converge.
+
+    Confidence-aware: higher confidence decisions are not overwritten.
+    """
+    SYNC_FIELDS = (
+        "_ronc_contract",
+        "_semantic_disposition",
+        "_semantic_reasons",
+        "_semantic_confidence",
+        "_tts_excluded",
+        "_tts_exclude_reason",
+        "_tts_include_reason",
+
+        # Stream inheritance
+        "layout_stream",
+        "_original_layout_stream",
+        "_stream_inherited_from_line",
+
+        # STRUCTURAL KEYS (CRITICAL)
+        "column_index",
+        "block_id",
+        "line_index",
+
+        # ─────────────────────────────────────────────────────
+        # RONC — Reading Order Normalization Contract (Phase 5)
+        # Metadata only. NO enforcement in sync.
+        # ─────────────────────────────────────────────────────
+        "_ronc_atomic_unit_id",
+        "_ronc_atomic_role",
+        "_ronc_break_after",
+        "_ronc_rescue_applied",
+
+        # Optional provenance (safe to keep)
+        "_original_column_index",
+        "_original_block_id",
+        "_original_line_index",
+        "_original_role",
+        "_rescue_reason",
+        "_inside_figure_rescued",
+    )
+
+    changed = 0
+
+    for ws in window_spans:
+        if not isinstance(ws, dict):
+            continue
+
+        page_idx = ws.get("_source_page_idx")
+        local_idx = ws.get("_page_local_idx")
+
+        if page_idx is None or local_idx is None:
+            continue
+
+        page_list = page_span_cache.get(page_idx)
+        if not page_list or not (0 <= local_idx < len(page_list)):
+            continue
+
+        target = page_list[local_idx]
+        if not isinstance(target, dict):
+            continue
+
+        ws_conf = ws.get("_semantic_confidence")
+        tgt_conf = target.get("_semantic_confidence")
+
+        INHERITANCE_GATED_FIELDS = {
+            "layout_stream",
+            "column_index",
+            "block_id",
+            "line_index",
+        }
+
+        for key in SYNC_FIELDS:
+            if key not in ws:
+                continue
+            # Always sync semantic confidence itself (authority signal)
+            if key == "_semantic_confidence":
+                if target.get(key) != ws.get(key):
+                    target[key] = ws[key]
+                    changed += 1
+                continue
+
+            # Only sync structural fields if inheritance actually occurred
+            if key in INHERITANCE_GATED_FIELDS:
+                if not ws.get("_stream_inherited_from_line", False):
+                    continue
+
+            # ─────────────────────────────────────────────────────────────────
+            # Confidence-aware sync: semantic disposition + RONC legacy fields
+            # ─────────────────────────────────────────────────────────────────
+            if key in {
+                "_semantic_disposition",
+                "_ronc_atomic_unit_id",
+                "_ronc_atomic_role",
+                "_ronc_break_after",
+            }:
+                if ws_conf is not None and tgt_conf is not None and ws_conf < tgt_conf:
+                    continue
+
+            # ─────────────────────────────────────────────────────────────────
+            # Authority-aware sync for RONC contracts
+            # Priority:
+            #   1. Higher semantic confidence wins
+            #   2. If confidence equal/unknown, protected beats unprotected
+            #   3. Otherwise, last writer wins
+            # ─────────────────────────────────────────────────────────────────
+            if key == "_ronc_contract":
+                ws_contract = ws.get("_ronc_contract", {})
+                tgt_contract = target.get("_ronc_contract", {})
+
+                if ws_conf is not None and tgt_conf is not None:
+                    if ws_conf < tgt_conf:
+                        continue
+
+                # Priority 2: Protection-based authority (among equal/unknown confidence)
+                ws_protected = ws_contract.get("protection", {}).get("must_include", False)
+                tgt_protected = tgt_contract.get("protection", {}).get("must_include", False)
+
+                if tgt_protected and not ws_protected:
+                    continue
+
+            if target.get(key) != ws.get(key):
+                target[key] = ws[key]
+                changed += 1
+
+
+def _init_stage1_soft_fields(span: Dict) -> None:
+    """
+    Initialize soft classification fields on a span (idempotent).
+
+    Stage 1 Contract: These fields enable deferred exclusion decisions.
+    Never removes existing fields.
+    """
+    span.setdefault("_spatial_context", {
+        "inside_figure": False,
+        "figure_index": None,
+        "overlap_ratio": 0.0,
+        "near_figure": False,
+        "figure_distance_ratio": 0.0,
+        "inside_table": False,
+        "table_index": None,
+    })
+    span.setdefault("_exclusion_candidate", False)
+    span.setdefault("_exclusion_candidate_reasons", [])
+    span.setdefault("_requires_semantic_review", False)
+
+
+def _flag_candidate(
+        span: Dict,
+        reason: str,
+        *,
+        requires_review: bool = False
+) -> None:
+    """
+    Flag a span as an exclusion candidate with reason tracking.
+
+    Stage 1 Contract: Flags only, never removes spans.
+
+    Args:
+        span: Span to flag.
+        reason: Exclusion reason constant.
+        requires_review: If True, span MUST reach semantic window.
+    """
+    span["_exclusion_candidate"] = True
+    reasons = span.setdefault("_exclusion_candidate_reasons", [])
+    if reason not in reasons:
+        reasons.append(reason)
+    if requires_review:
+        span["_requires_semantic_review"] = True
+
+
+def _span_visual_context(
+        span: Dict,
+        figure_tuples: Optional[List[BboxTuple]] = None,
+        table_regions: Optional[List[Dict]] = None,
+        *,
+        page_width: float,
+        page_height: float,
+        near_threshold_ratio: float = _SOFT_CLASSIFY_NEAR_THRESHOLD_RATIO,
+) -> Dict:
+    """
+    Compute spatial context for a span relative to figures and tables.
+
+    Stage 1 Contract: Reports context only, never decides viability.
+
+    Args:
+        span: Span with bbox.
+        figure_tuples: Figure regions as (x0, y0, x1, y1) tuples.
+        table_regions: Table region dicts with 'bbox' key.
+        page_width: Page width for ratio calculations.
+        page_height: Page height for ratio calculations.
+        near_threshold_ratio: Proximity threshold as ratio of page dimension.
+
+    Returns:
+        Spatial context dictionary (never None).
+    """
+    ctx = {
+        "inside_figure": False,
+        "figure_index": None,
+        "overlap_ratio": 0.0,
+        "near_figure": False,
+        "figure_distance_ratio": 0.0,
+        "inside_table": False,
+        "table_index": None,
+    }
+
+    span_rect = _span_to_rect(span)
+    if span_rect is None:
+        return ctx
+
+    # Normalize to float for cross-source consistency (PDF / DOM)
+    span_rect = tuple(float(v) for v in span_rect)
+
+    page_dimension = max(page_width, page_height, 1.0)
+    near_pad = min(page_width, page_height) * near_threshold_ratio
+
+    # === FIGURE ANALYSIS ===
+    best_overlap_ratio = 0.0
+    best_figure_idx = None
+    min_figure_distance = float('inf')
+
+    if figure_tuples:
+        for idx, fig_rect in enumerate(figure_tuples):
+            intersection = _get_intersection_rect(span_rect, fig_rect)
+
+            if intersection is not None:
+                inter_area = _rect_area(intersection)
+                span_area = max(1e-6, _rect_area(span_rect))
+                ratio = inter_area / span_area
+
+                if ratio > best_overlap_ratio:
+                    best_overlap_ratio = ratio
+                    best_figure_idx = idx
+            else:
+                # Compute edge distance for near-figure detection
+                dx = max(fig_rect[0] - span_rect[2], span_rect[0] - fig_rect[2], 0)
+                dy = max(fig_rect[1] - span_rect[3], span_rect[1] - fig_rect[3], 0)
+                dist = (dx ** 2 + dy ** 2) ** 0.5
+                min_figure_distance = min(min_figure_distance, dist)
+
+                # Near-figure by center point within padded bounds
+                cx = (span_rect[0] + span_rect[2]) / 2
+                cy = (span_rect[1] + span_rect[3]) / 2
+                if (fig_rect[0] - near_pad <= cx <= fig_rect[2] + near_pad and
+                        fig_rect[1] - near_pad <= cy <= fig_rect[3] + near_pad):
+                    ctx["near_figure"] = True
+
+    ctx["overlap_ratio"] = best_overlap_ratio
+    if best_figure_idx is not None and best_overlap_ratio >= _SOFT_CLASSIFY_OVERLAP_THRESHOLD:
+        ctx["inside_figure"] = True
+        ctx["figure_index"] = best_figure_idx
+
+    # Figure distance ratio (0.0 if inside, otherwise normalized distance)
+    if not ctx["inside_figure"] and min_figure_distance < float('inf'):
+        ctx["figure_distance_ratio"] = min_figure_distance / page_dimension
+
+    # === TABLE ANALYSIS ===
+    if table_regions:
+        for ti, table in enumerate(table_regions):
+            table_bbox = table.get("bbox")
+            if table_bbox is None:
+                continue
+
+            table_rect = _to_bbox_tuple(table_bbox)
+            if table_rect is None:
+                continue
+
+            intersection = _get_intersection_rect(span_rect, table_rect)
+            if intersection is not None:
+                inter_area = _rect_area(intersection)
+                span_area = max(1e-6, _rect_area(span_rect))
+                if (inter_area / span_area) >= _SOFT_CLASSIFY_OVERLAP_THRESHOLD:
+                    ctx["inside_table"] = True
+                    ctx["table_index"] = ti
+                    break
+
+    return ctx
+
+
+def _diagram_label_signal(
+        span: Dict,
+        figure_tuples: List[BboxTuple],
+        spatial_context: Dict,
+        baseline_font_size: float = 12.0,
+        trace_id: str = None,
+) -> Dict:
+    """
+    Compute diagram label detection signal.
+
+    Stage 1 Contract: Returns signal dict, never decides viability.
+
+    Args:
+        span: Span to evaluate.
+        figure_tuples: Figure regions.
+        spatial_context: Pre-computed spatial context (avoids recomputation).
+        baseline_font_size: Document baseline font size.
+        trace_id: Optional trace ID.
+
+    Returns:
+        Signal dict with is_label, confidence, detection_path, reasons.
+    """
+    try:
+        is_label = _is_diagram_label(span, figure_tuples, baseline_font_size, trace_id)
+    except Exception:
+        is_label = False
+
+    # Determine detection path based on spatial context
+    detection_path = None
+    if is_label:
+        if spatial_context.get("inside_figure", False):
+            detection_path = "geometric"
+        else:
+            detection_path = "orphan"
+
+    return {
+        "is_label": is_label,
+        "confidence": 0.9 if is_label else 0.0,
+        "detection_path": detection_path,
+        "reasons": ["diagram_label_detector"] if is_label else [],
+    }
+
+
+def _derive_legacy_content(classified_spans: List[Dict]) -> List[Dict]:
+    """
+    Derive legacy 'content' list from classified spans for backward compatibility.
+
+    Stage 1 Contract: classified_spans is never mutated.
+
+    Returns:
+        List of spans that would have passed the old filter logic.
+    """
+    return [
+        s for s in classified_spans
+        if not s.get("_exclusion_candidate", False)
+           or s.get("_exclusion_protected", False)
+    ]
 
 # ✦────── c. Layout & Margins ──────✦
 
@@ -2201,7 +5410,7 @@ def _detect_columns(
 
     magnet_reclassified = 0
 
-    for (line_id, row_key), group in vlg_groups.items():
+    for _, group in vlg_groups.items():
         body_spans = [s for s in group if not s.get("is_margin_content")]
         margin_spans = [s for s in group if s.get("is_margin_content")]
 
@@ -2259,7 +5468,7 @@ def _detect_columns(
 
     punctuation_protected = 0
 
-    for (line_id, row_key), group in vlg_groups.items():
+    for _, group in vlg_groups.items():
         body_count = sum(1 for s in group if not s.get("is_margin_content"))
         margin_count = sum(1 for s in group if s.get("is_margin_content"))
 
@@ -2386,6 +5595,10 @@ def _detect_margin_boundaries(
     span_count = 0
 
     for span in spans:
+        # Rationale: Table spans can cover full width and corrupt margin/body bands
+        if span.get("_is_table_content", False):
+            continue
+
         # Skip excluded roles
         role_str = span.get("role", "body")
 
@@ -2658,7 +5871,7 @@ def _flatten_to_raw_spans(
 
     Phase 1.5:  Deterministic order stabilization (row_key → x1 → x0 → index)
     Phase 1.75: Horizontal adjacency signaling (metadata-only, lossless)
-    A2-V:       Vertical continuation detection within block
+    A2-V: Vertical continuation detection within block
     """
 
     raw_spans: List[Dict] = []
@@ -2684,6 +5897,7 @@ def _flatten_to_raw_spans(
             continue
 
         prev_span = None
+        vertical_continuation_pending = None
 
         lines = block.get("lines")
         if not lines:
@@ -2754,6 +5968,15 @@ def _flatten_to_raw_spans(
                 horizontal_link_count += 1
 
             # =========================================================
+            # PHASE 1.76: Build reverse lookup for horizontal continuation
+            # Maps successor index → predecessor's continuation info
+            # =========================================================
+            horizontal_links_reverse = {}
+            for pred_idx, (mode, reason) in horizontal_links.items():
+                succ_idx = pred_idx + 1
+                horizontal_links_reverse[succ_idx] = (mode, reason)
+
+            # =========================================================
             # PHASE 1.5B (DIAGNOSTIC): Flag suspicious bbox geometry
             # =========================================================
             if trace_id:
@@ -2780,6 +6003,9 @@ def _flatten_to_raw_spans(
                     bbox_invalid_reason = None
                     x0, y0, x1, y1 = 0.0, 0.0, 0.0, 0.0  # Safe defaults for invalid bbox
 
+                    # Phase 1 geometry provenance
+                    geometry_inferred = False
+
                     if not bbox_is_valid:
                         bbox_invalid_reason = "missing_or_short_bbox"
                     else:
@@ -2791,6 +6017,7 @@ def _flatten_to_raw_spans(
 
                     if bbox_invalid_reason:
                         skipped_count += 1  # keep metric, but DO NOT continue
+                        geometry_inferred = True
 
                     # Compute origin/baseline using validated coordinates (or safe defaults)
                     origin = span.get("origin", (x0, y1))
@@ -2802,6 +6029,10 @@ def _flatten_to_raw_spans(
                     # REVISION A2-V: Vertical Continuation Detection
                     # First span of line only — links to prior line tail if safe
                     # =========================================================
+                    # NOTE: Phase-1 continuation fields are SIGNALS ONLY.
+                    # They MUST NOT be consumed before Phase 4/5.
+                    # They MUST NOT cause sentence boundaries.
+
                     if span_idx == 0 and carry_tail is not None and raw_text:
                         prev_text = (carry_tail.get("raw_text") or "").rstrip()
                         curr_text = raw_text.lstrip()
@@ -2817,6 +6048,10 @@ def _flatten_to_raw_spans(
                         # Guard 2: Previous span must not end with hard sentence boundary
                         prev_tail_stripped = prev_text.rstrip(" '\"”’)]}")
                         prev_hard_end = prev_tail_stripped.endswith((".", "?", "!"))
+
+                        # IMPORTANT (Phase 1 Guardrail):
+                        # Uppercase/punctuation checks here may ONLY suppress/allow continuation SIGNALS.
+                        # They MUST NOT introduce sentence boundaries or segmentation decisions.
 
                         # Guard 3: Context-aware uppercase handling (RELAXED for scientific text)
                         # Allow uppercase continuation if previous line is clearly unfinished
@@ -2853,11 +6088,21 @@ def _flatten_to_raw_spans(
                             if prev_text.endswith("-"):
                                 carry_tail["a2_continuation_mode"] = "hyphen_wrap"
                                 carry_tail["a2_continuation_reason"] = "a2_vertical_hyphen"
+                                # NEW: Mark current span as continuation target
+                                vertical_continuation_pending = ("hyphen_wrap",
+                                                                 "a2_vertical_hyphen")
                             else:
                                 carry_tail["a2_continuation_mode"] = "space_join"
                                 carry_tail["a2_continuation_reason"] = "a2_vertical_same_block"
+                                # NEW: Mark current span as continuation target
+                                vertical_continuation_pending = ("space_join",
+                                                                 "a2_vertical_same_block")
 
                             vertical_link_count += 1
+                        else:
+                            vertical_continuation_pending = None
+
+
 
                         # CRITICAL: Clear carry_tail after processing to prevent unbounded chaining
                         # Each vertical link applies to exactly one line transition
@@ -2868,9 +6113,13 @@ def _flatten_to_raw_spans(
                         "raw_text": raw_text,
                         "cleaned_text": None,
                         "bbox": bbox,
-                        "bbox_is_valid": (bbox is not None),
-                        "bbox_invalid_reason": bbox_invalid_reason,
+                        # Geometry provenance: True if bbox was missing/degenerate and we fell back to defaults
                         "font_size": float(span.get("size", 0)),
+
+                        "bbox_is_valid": (bbox is not None),
+                        # True when bbox was missing/degenerate
+
+                        "bbox_invalid_reason": bbox_invalid_reason,
                         "line_text": line_text_canonical,
                         "font": span.get("font", ""),
                         "flags": span.get("flags", 0),
@@ -2905,11 +6154,30 @@ def _flatten_to_raw_spans(
                         "a2_continues_to_next": span_idx in horizontal_links,
                         "a2_continuation_mode": horizontal_links.get(span_idx, (None, None))[0],
                         "a2_continuation_reason": horizontal_links.get(span_idx, (None, None))[1],
+                        "a2_continues_from_previous": (
+                                (span_idx == 0 and vertical_continuation_pending is not None) or
+                                span_idx in horizontal_links_reverse
+                        ),
+                        "a2_continuation_from_mode": (
+                            vertical_continuation_pending[
+                                0] if span_idx == 0 and vertical_continuation_pending
+                            else horizontal_links_reverse.get(span_idx, (None, None))[0]
+                        ),
+                        "a2_continuation_from_reason": (
+                            vertical_continuation_pending[
+                                1] if span_idx == 0 and vertical_continuation_pending
+                            else horizontal_links_reverse.get(span_idx, (None, None))[1]
+                        ),
                         "is_subscript": False,
                         "figure_index": None,
                     }
 
                     raw_spans.append(new_span_entry)
+
+                    # Phase 1 A2 completeness: propagate backward signal
+                    if prev_span and prev_span.get("a2_continues_to_next"):
+                        new_span_entry["a2_continues_from_previous"] = True
+
                     prev_span = new_span_entry
 
                 except (KeyError, TypeError, IndexError):
@@ -2928,18 +6196,32 @@ def _flatten_to_raw_spans(
 
     if trace_id and (horizontal_link_count > 0 or vertical_link_count > 0):
         logger.info(
-            "[%s] Ingestion: emitted %d horizontal + %d vertical continuation links (a2_*)",
+            "[%s] Ingestion: emitted %d horizontal + %d vertical continuation links "
+            "(bidirectional a2_continues_to/from)",
             trace_id, horizontal_link_count, vertical_link_count
         )
+    # =========================================================================
+    # PHASE 1 INVARIANT (DEBUG ONLY)
+    # Phase 1 must not introduce sentence, semantic, or exclusion authority.
+    # =========================================================================
+    if trace_id and __debug__:
+        for span in raw_spans:
+            assert "_sentence_id" not in span, "Phase 1 leaked sentence state"
+            assert "_semantic_disposition" not in span, "Phase 1 leaked semantic state"
+            assert "_exclusion_candidate" not in span, "Phase 1 leaked exclusion logic"
+            assert "_has_semantic_authority" not in span, "Phase 1 leaked authority"
+            assert not span.get("_tts_excluded"), "Phase 1 leaked exclusion state"
 
+    # === PHASE 1 EXIT ===
     return raw_spans
+
 
 def _build_lines_from_spans(
         spans: List[Dict],
         trace_id: str = None
 ) -> Dict[str, Dict]:
     """
-    PHASE 1: Build Line abstractions from flat span list.
+    PHASE 3: Build Line abstractions from flat span list.
 
     Groups spans by line_id and creates canonical line representations.
     Enables line-coherent semantic operations without altering geometry.
@@ -2954,6 +6236,12 @@ def _build_lines_from_spans(
             - fonts: List[str]
             - span_count: int
     """
+    # PHASE 3 CONTRACT:
+    # - This method groups spans into line abstractions only
+    # - This method MUST NOT introduce sentence boundaries
+    # - This method MUST NOT assign semantic inclusion/exclusion
+    # - This method MUST NOT set or modify _has_semantic_authority
+
     lines: Dict[str, Dict] = {}
 
     for span in spans:
@@ -2996,6 +6284,67 @@ def _build_lines_from_spans(
         line["font_sizes"] = sorted(line["font_sizes"])
         line["fonts"] = sorted(line["fonts"])
 
+    # =========================================================================
+    # PHASE 3 DIAGNOSTIC: PyMuPDF duplicate detection
+    # =========================================================================
+    if trace_id and __debug__:
+        for lid, line_data in lines.items():
+            line_spans = line_data.get("spans", [])
+            if len(line_spans) > 1:
+                texts = [
+                    ((s.get("cleaned_text") or s.get("raw_text") or "").strip(),
+                     s.get("layout_stream", "unknown"))
+                    for s in line_spans
+                ]
+                for i, (t1, s1) in enumerate(texts):
+                    for j, (t2, s2) in enumerate(texts):
+                        if i < j and t1 == t2 and s1 != s2:
+                            logger.warning(
+                                "[%s] Duplicate span detected: line_id=%s, text='%s...', streams=%s/%s",
+                                trace_id, lid, t1[:30], s1, s2
+                            )
+    # =========================================================================
+    # PHASE 3: Tag duplicate rank/count for spans with overlapping text
+    # =========================================================================
+    # NOTE:
+    # - _line_duplicate_rank == 0 indicates the most complete span for this line
+    # - Higher ranks indicate partial or mirrored duplicates (e.g., PyMuPDF artifacts)
+    # - These tags MUST NOT be used to drop spans; they are advisory only
+
+    for lid, line_data in lines.items():
+        line_spans = line_data.get("spans", [])
+        if len(line_spans) > 1:
+            texts = [
+                (s.get("cleaned_text") or s.get("raw_text") or "")
+                for s in line_spans
+            ]
+
+            # Only tag duplicates if overlap exists (substring or equality)
+            has_overlap = any(
+                i != j and (t1 in t2 or t2 in t1)
+                for i, t1 in enumerate(texts)
+                for j, t2 in enumerate(texts)
+            )
+
+            if not has_overlap:
+                continue
+
+            # Sort by text length descending (longest = most complete)
+            sorted_spans = sorted(
+                line_spans,
+                key=lambda s: len(s.get("cleaned_text") or s.get("raw_text", "")),
+                reverse=True
+            )
+            for rank, sp in enumerate(sorted_spans):
+                sp["_line_duplicate_rank"] = rank
+                sp["_line_duplicate_count"] = len(line_spans)
+    if trace_id and __debug__:
+        for line in lines.values():
+            for s in line.get("spans", []):
+                assert "_sentence_id" not in s, "Phase 3 leaked sentence state"
+                assert "_semantic_disposition" not in s, "Phase 3 leaked semantic state"
+                assert "_has_semantic_authority" not in s, "Phase 3 leaked authority"
+
     if trace_id:
         logger.debug(
             "[%s] Built %d line abstractions from %d spans",
@@ -3004,6 +6353,229 @@ def _build_lines_from_spans(
 
     return lines
 
+
+# ===========================================================================
+# STAGE 1 SOFT CLASSIFICATION (Schema v2.0 - Lossless)
+# ===========================================================================
+
+def _soft_classify_spans(
+        spans: List[Dict],
+        regions: Dict,
+        *,
+        page_width: float,
+        page_height: float,
+        trace_id: str = None,
+) -> List[Dict]:
+    """
+    STAGE 1 SOFT CLASSIFICATION: Annotate spans without exclusion.
+
+    This function is the SOLE AUTHORITY for Stage 1 classification.
+    It replaces _filter_spans for the new lossless pipeline.
+
+    Contract:
+        - ALL input spans are returned (no removal)
+        - Spans are annotated with soft classification fields
+        - Final exclusion decisions deferred to Stage 2 semantic window
+
+    Args:
+        spans: Raw spans from extraction (will be deep-copied if needed).
+        regions: Page regions dict with figures, tables, header_bands, etc.
+        page_width: Page width for ratio calculations.
+        page_height: Page height for ratio calculations.
+        trace_id: Optional trace ID for logging.
+
+    Returns:
+        List of all spans with soft classification fields attached.
+    """
+    if not spans:
+        return []
+
+    # --- SETUP: Extract region data ---
+    header_bands: set = set(regions.get("header_bands", []))
+    footer_bands: set = set(regions.get("footer_bands", []))
+    figure_tuples: List[BboxTuple] = regions.get("figure_tuples", regions.get("figures", []))
+    table_regions: List[Dict] = regions.get("tables", [])
+
+    # --- CONFIGURATION ---
+    effective_page_height = page_height if page_height and page_height > 0 else _FILTER_DEFAULT_PAGE_HEIGHT
+    effective_page_width = page_width if page_width and page_width > 0 else 612.0
+    y_band_precision = _REGION_Y_BAND_ROUNDING
+    header_artifact_zone_y = effective_page_height * _FILTER_HEADER_ARTIFACT_ZONE_RATIO
+    drop_cap_font_threshold = _PARA_DEFAULT_LINE_HEIGHT * 1.5
+
+    classified: List[Dict] = []
+
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        # RONC authority override: protected spans may not be exclusion candidates
+        if span.get("_ronc_contract", {}).get("protection", {}).get("must_include"):
+            classified.append(span)
+            continue
+
+        # Initialize soft classification fields
+        _init_stage1_soft_fields(span)
+
+        # --- VALIDATION: bbox ---
+        bbox = span.get("bbox")
+        if bbox is None or not isinstance(bbox, tuple) or len(bbox) < 4:
+            _flag_candidate(span, _REASON_INVALID_BBOX, requires_review=True)
+            classified.append(span)
+            continue
+
+        span_y = bbox[1]
+        text = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
+
+        if not text:
+            _flag_candidate(span, _REASON_EMPTY, requires_review=True)
+            classified.append(span)
+            continue
+
+        # --- Y-BAND calculation ---
+        y_band = round(span_y / y_band_precision) * y_band_precision
+
+        # === GREEK WHITELIST BYPASS ===
+        text_lower = text.lower()
+        if text_lower in GREEK_WHITELIST or text in GREEK_WHITELIST:
+            if y_band not in header_bands and y_band not in footer_bands:
+                span["_whitelist_protected"] = "greek_symbol"
+                classified.append(span)
+                continue
+
+        # === HEADER/FOOTER BAND FLAGS ===
+        in_header_band = y_band in header_bands
+        in_footer_band = y_band in footer_bands
+
+        if in_header_band:
+            # Check for lowercase continuation (protection)
+            if text and text[0].islower():
+                span["_exclusion_protected"] = True
+                span.setdefault("_exclusion_protection_reasons", []).append(
+                    "lowercase_continuation")
+            else:
+                _flag_candidate(span, _REASON_HEADER_BAND, requires_review=False)
+        elif in_footer_band:
+            if text and text[0].islower():
+                span["_exclusion_protected"] = True
+                span.setdefault("_exclusion_protection_reasons", []).append(
+                    "lowercase_continuation")
+            else:
+                _flag_candidate(span, _REASON_FOOTER_BAND, requires_review=False)
+
+        # === HEADER ARTIFACT ZONE ===
+        if span_y < header_artifact_zone_y:
+            span.setdefault("processing_tags", []).append("suspected_header_artifact_zone")
+            text_clean = text.strip()
+
+            if len(text_clean) == 1 and text_clean.isalpha() and text_clean.isupper():
+                is_large_font = span.get("font_size", 0) >= drop_cap_font_threshold
+                if is_large_font:
+                    # Drop cap protection
+                    span["_exclusion_protected"] = True
+                    span.setdefault("_exclusion_protection_reasons", []).append("drop_cap")
+                else:
+                    _flag_candidate(span, _REASON_HEADER_ARTIFACT, requires_review=False)
+
+        # === SPATIAL CONTEXT (figures/tables) ===
+        ctx = _span_visual_context(
+            span,
+            figure_tuples=figure_tuples,
+            table_regions=table_regions,
+            page_width=effective_page_width,
+            page_height=effective_page_height,
+        )
+        span["_spatial_context"] = ctx
+
+        # === VISUAL OVERLAP FLAG ===
+        if ctx["inside_figure"]:
+            try:
+                is_caption = _is_caption_candidate(span, figure_tuples)
+            except Exception:
+                is_caption = False
+
+            if not is_caption:
+                # P0 AMENDMENT 1: visual_overlap MUST require semantic review
+                _flag_candidate(span, _REASON_VISUAL_OVERLAP, requires_review=True)
+
+        # === DIAGRAM LABEL SIGNAL ===
+        if ENABLE_DIAGRAM_LABEL_FILTER:
+            label_sig = _diagram_label_signal(
+                span,
+                figure_tuples,
+                spatial_context=ctx,
+                baseline_font_size=12.0,
+                trace_id=trace_id,
+            )
+            if label_sig["is_label"]:
+                _flag_candidate(span, _REASON_DIAGRAM_LABEL, requires_review=False)
+                span.setdefault("_signals", {})["diagram_label"] = label_sig
+
+        # === BARE CAPTION FLAG ===
+        for pattern in _COMPILED_CAPTION_PATTERNS:
+            if pattern.match(text):
+                if len(text) < _FILTER_BARE_CAPTION_MAX_CHARS:
+                    if not _CAPTION_PROSE_CONTINUATION_PATTERN.search(text):
+                        _flag_candidate(span, _REASON_BARE_CAPTION, requires_review=True)
+                        break
+
+        # === NOISE FLAGS (with protections) ===
+        text_stripped = text.strip()
+
+        # Single char noise
+        if len(text_stripped) == 1 and not text_stripped.isdigit():
+            if text_stripped not in VALID_SINGLE_CHARS:
+                # Check for drop cap protection (large font single uppercase)
+                if text_stripped.isalpha() and text_stripped.isupper():
+                    is_large_font = span.get("font_size", 0) >= drop_cap_font_threshold
+                    if is_large_font:
+                        span["_exclusion_protected"] = True
+                        span.setdefault("_exclusion_protection_reasons", []).append("drop_cap")
+                    else:
+                        _flag_candidate(span, _REASON_NOISE_SINGLE_CHAR, requires_review=False)
+                else:
+                    _flag_candidate(span, _REASON_NOISE_SINGLE_CHAR, requires_review=False)
+
+        # Digit-only noise (with year/significant digit protection)
+        if text.isdigit():
+            is_year = len(text) == 4 and text.startswith(("19", "20"))
+            is_significant = len(text) >= 3
+
+            if is_year:
+                span["_exclusion_protected"] = True
+                span.setdefault("_exclusion_protection_reasons", []).append("year")
+            elif is_significant:
+                span["_exclusion_protected"] = True
+                span.setdefault("_exclusion_protection_reasons", []).append("significant_digits")
+            else:
+                _flag_candidate(span, _REASON_NOISE_DIGIT_ONLY, requires_review=False)
+
+        # Punctuation noise
+        if text in NOISE_PUNCTUATION:
+            _flag_candidate(span, _REASON_NOISE_PUNCTUATION, requires_review=False)
+
+        # Fragment noise
+        if len(text) <= _FILTER_SHORT_FRAGMENT_THRESHOLD and not span.get("filter_protected"):
+            text_norm = text.strip(".,;:")
+            is_letter = text_norm.isalpha()
+            is_protected_word = text_norm in PROTECTED_SHORT_WORDS
+            is_connector = text_norm.lower() in {"and", "or", "to", "of", "but", "nor", "for", "so",
+                                                 "yet"}
+
+            if not (is_letter or is_protected_word or is_connector):
+                _flag_candidate(span, _REASON_NOISE_FRAGMENT, requires_review=False)
+
+        classified.append(span)
+
+    if trace_id:
+        candidate_count = sum(1 for s in classified if s.get("_exclusion_candidate"))
+        review_count = sum(1 for s in classified if s.get("_requires_semantic_review"))
+        protected_count = sum(1 for s in classified if s.get("_exclusion_protected"))
+        logger.debug(
+            "[%s] Soft classification: %d spans, %d candidates, %d require review, %d protected",
+            trace_id, len(classified), candidate_count, review_count, protected_count
+        )
+
+    return classified
 
 def _filter_spans(
         spans: List[Dict],
@@ -3049,6 +6621,10 @@ def _filter_spans(
 
     if not spans:
         return [], []
+
+    # HARD STOP: legacy filter must not run after RONC v2
+    if any("_ronc_contract" in s for s in spans):
+        raise RuntimeError("filter_spans must not run after RONC v2 semantic window")
 
     valid: List[Dict] = []
     excluded: List[Dict] = []
@@ -3354,6 +6930,9 @@ def _clean_spans(spans: List[Dict], trace_id: str = None) -> None:
         1. Unicode NFKC normalization
         2. Control / zero-width character removal
         3. Whitespace normalization (collapsing to single spaces)
+
+    An empty cleaned_text ("") indicates a STRUCTURAL artifact,
+    not semantic deletion. Downstream phases MUST NOT treat it as noise.
     """
     if not spans:
         return
@@ -3638,9 +7217,10 @@ def _format_cell(
 ) -> Dict:
     """
     Extract text, bbox, and semantic role from PyMuPDF table cell.
-
-    ...docstring unchanged...
     """
+    if __debug__:
+        assert cell is not None, "Phase 1 guard: _format_cell must only be used during span creation"
+
     text: str = ""  # Default for None cell or extraction failure
     cell_bbox: Optional[BboxTuple] = None
 
@@ -4049,9 +7629,15 @@ def _detect_paragraphs(
         global_median_line_height: float = None
 ) -> None:
     """
-    Assign paragraph_index to spans.
+    Assign paragraph_index and paragraph provenance to spans.
     Phase A Hardened: Uses "Mixed Layout Protection" and global context.
     """
+    # PHASE 3 CONTRACT:
+    # - This method MAY assign paragraph_index and paragraph provenance only
+    # - This method MUST NOT set sentence boundaries
+    # - This method MUST NOT set semantic inclusion/exclusion
+    # - This method MUST NOT set or modify _has_semantic_authority
+
     # 1. Sort by reading order (Page, Y, X)
     spans.sort(
         key=lambda s: (
@@ -4075,9 +7661,6 @@ def _detect_paragraphs(
 
     # 3. Calculate Local Median Line Height
     line_heights: List[float] = []
-    _PARA_MAX_LINE_GAP = 50.0
-    _PARA_DEFAULT_LINE_HEIGHT = 12.0
-    _PARA_GAP_MULTIPLIER = 1.25
 
     for col_spans in columns.values():
         for i in range(1, len(col_spans)):
@@ -4118,6 +7701,14 @@ def _detect_paragraphs(
         col_spans = columns[col_idx]
         if not col_spans:
             continue
+        # Phase 3 provenance: default no column transition
+        for _s in col_spans:
+            _s["_column_transition"] = False
+
+        # Tag first span of each column after the first as column transition
+        if col_idx != (body_cols + margin_cols)[0]:
+            col_spans[0]["_column_transition"] = True
+            col_spans[0].setdefault("_paragraph_break_reason", "column_transition")
 
         col_spans[0]["paragraph_index"] = global_para_idx
         prev_bottom = col_spans[0].get("bbox", [0, 0, 0, 0])[3]
@@ -4163,15 +7754,6 @@ def _detect_paragraphs(
             prev_last_token = prev_tail.lower().rstrip(".!?")
             prev_last_token = prev_last_token.split()[-1] if prev_last_token.split() else ""
             is_abbreviation = prev_last_token in _PARA_ABBREVIATIONS
-
-            # ------------------------------------------------------------------
-            # VISUAL GAP ZONES (THREE-TIER MODEL)
-            # ------------------------------------------------------------------
-            visual_break_threshold = median_line_height * 1.5
-            borderline_threshold = para_gap_threshold * 1.25
-
-            is_visual_break = gap > visual_break_threshold
-            is_borderline = para_gap_threshold < gap <= borderline_threshold
 
             # ------------------------------------------------------------------
             # A. VERTICAL GAP CHECK (OUTER GATE — REQUIRED)
@@ -4242,12 +7824,24 @@ def _detect_paragraphs(
 
                     if not horizontal_cohesion:
                         start_new_paragraph = True
+                        # Paragraph break provenance (do not overwrite if already set)
+                        curr_span.setdefault("_paragraph_break_reason", "horizontal_break")
 
             # ------------------------------------------------------------------
             # FINALIZE PARAGRAPH INDEX
             # ------------------------------------------------------------------
+
             if start_new_paragraph:
                 global_para_idx += 1
+
+                # Paragraph break provenance (Phase 3 contract)
+                if gap > para_gap_threshold:
+                    curr_span.setdefault("_paragraph_break_reason", "visual_gap")
+                elif prev_ends_hard and curr_starts_cap and not is_abbreviation:
+                    curr_span["_paragraph_break_reason"] = "semantic_gap"
+                else:
+                    # Fallback: paragraph split without dominant visual or semantic signal
+                    curr_span["_paragraph_break_reason"] = "layout_transition"
 
             curr_span["paragraph_index"] = global_para_idx
 
@@ -4259,7 +7853,24 @@ def _detect_paragraphs(
                 prev_bottom = max(prev_bottom, curr_bbox[3])
 
         # Advance paragraph index after each column
+        # Tag column transition on first span of next column (handled in P3.4)
         global_para_idx += 1
+        # Note: column boundary paragraph increment
+        # First span of next column will carry _column_transition = True
+        col_spans[0]["_paragraph_break_reason"] = "column_transition"
+
+    if trace_id and __debug__:
+        for s in spans:
+            assert "_sentence_id" not in s, "Phase 3 leaked sentence state"
+            assert "_semantic_disposition" not in s, "Phase 3 leaked semantic state"
+            assert "_has_semantic_authority" not in s, "Phase 3 leaked authority"
+
+    # Summary logging (unconditional)
+    if trace_id:
+        logger.debug(
+            "[%s] Paragraph detection: %d paragraphs across %d columns",
+            trace_id, global_para_idx, len(columns)
+        )
 
 
 # ✦────── d. Role Detectors ──────✦
@@ -4722,6 +8333,9 @@ def _assign_roles(
     Mutates:
         Each span receives 'role' key.
     """
+    # AUTHORITY BOUNDARY:
+    # Phase 4 MUST NOT finalize inclusion or exclusion.
+    # All exclusion signals here are provisional and MUST be resolved in Phase 5.
     if not spans:
         return
 
@@ -4798,6 +8412,7 @@ def _assign_roles(
     # =========================================================================
     for span in spans:
         role = TextRole.BODY.value
+        role_origin = "default"
 
         # HARDENED: Enforce schema contract
         if not isinstance(span.get("flags", 0), int):
@@ -4814,6 +8429,7 @@ def _assign_roles(
                 continue
             # Has text but no bbox — assign default role, skip geometry-dependent checks
             span["role"] = TextRole.BODY.value
+            span["_role_origin"] = "geometry"
             span["_bbox_invalid_in_role_assignment"] = True
             previous_role = TextRole.BODY.value
             continue
@@ -4829,6 +8445,7 @@ def _assign_roles(
         span_rect = _span_to_rect(span)
         if span_rect is None:
             span["role"] = TextRole.EMPTY.value
+            span["_role_origin"] = "default"
             previous_role = TextRole.EMPTY.value
             continue
 
@@ -4838,6 +8455,7 @@ def _assign_roles(
         # Skip empty spans
         if not span_text:
             span["role"] = TextRole.EMPTY.value
+            span["_role_origin"] = "default"
             previous_role = TextRole.EMPTY.value
             continue
 
@@ -4847,6 +8465,7 @@ def _assign_roles(
         for t_rect in table_rects:
             if _rects_intersect(span_rect, t_rect):
                 role = TextRole.TABLE_CELL.value
+                role_origin = "geometry"
                 break
 
         # =====================================================================
@@ -4856,6 +8475,7 @@ def _assign_roles(
             for f_rect in figure_rects:
                 if _rects_intersect(span_rect, f_rect):
                     role = TextRole.INSIDE_FIGURE.value
+                    role_origin = "geometry"
                     break
 
         # =====================================================================
@@ -4880,14 +8500,21 @@ def _assign_roles(
 
                 if matches_label or matches_stats:
                     role = TextRole.FIGURE_LABEL.value
+                    role_origin = "content_pattern"
                 elif is_short and word_count <= _ROLE_FIGURE_LABEL_SHORT_WORD_COUNT:
                     role = TextRole.FIGURE_LABEL.value
+                    role_origin = "content_pattern"
                 elif is_short and is_small_font:
                     role = TextRole.FIGURE_LABEL.value
+                    role_origin = "content_pattern"
 
         # =====================================================================
         # PRIORITY 4: Caption (with guards)
         # =====================================================================
+        # AUTHORITY BOUNDARY:
+        # Phase 4 MUST NOT finalize inclusion or exclusion.
+        # All exclusion signals here are provisional and MUST be resolved in Phase 5.
+
         if role == TextRole.BODY.value:
             # Explicit caption pattern match — starts new chain
             is_explicit_caption = any(
@@ -4897,6 +8524,7 @@ def _assign_roles(
 
             if is_explicit_caption:
                 role = TextRole.CAPTION.value
+                role_origin = "content_pattern"
                 caption_chain_start_y = span_y
                 caption_chain_start_font_size = font_size
                 caption_chain_length = 1
@@ -4940,6 +8568,7 @@ def _assign_roles(
                     guard_not_new_section
                 ]):
                     role = TextRole.CAPTION.value
+                    role_origin = "continuity"
                     caption_chain_length += 1
                 else:
                     # Chain broken
@@ -4966,6 +8595,7 @@ def _assign_roles(
             if span.get("is_margin_content", False):
                 if char_count > _ROLE_SIDEBAR_MIN_CHARS:
                     role = TextRole.SIDEBAR.value
+                    role_origin = "geometry"
 
         # =====================================================================
         # PRIORITY 6: Heading
@@ -5000,6 +8630,7 @@ def _assign_roles(
                     is_strong_visual and relaxed_length)) and is_title_case and no_terminal_punct:
                 if is_strong_visual:
                     role = TextRole.HEADING.value
+                    role_origin = "content_pattern"
 
         # =====================================================================
         # PRIORITY 7: Subheading
@@ -5028,9 +8659,11 @@ def _assign_roles(
 
             if is_medium and is_short and is_title_case and is_structurally_independent:
                 role = TextRole.SUBHEADING.value
+                role_origin = "content_pattern"
             elif is_italic and is_short and is_title_case and word_count >= 2:
                 if is_structurally_independent:
                     role = TextRole.SUBHEADING.value
+                    role_origin = "content_pattern"
         # =====================================================================
         # PRIORITY 8: Footnote
         # =====================================================================
@@ -5040,9 +8673,24 @@ def _assign_roles(
 
             if is_small and is_at_bottom:
                 role = TextRole.FOOTNOTE.value
+                role_origin = "geometry"
             elif char_count <= 2 and font_size < baseline_font_size * _ROLE_FOOTNOTE_MARKER_FONT_RATIO:
                 if span_text.isdigit() or span_text in _ROLE_FOOTNOTE_MARKER_SYMBOLS:
                     role = TextRole.FOOTNOTE_MARKER.value
+                    role_origin = "geometry"
+
+        # PAGE NUMBER detection (numeric-only, centered, header/footer zones)
+        if role == TextRole.BODY.value:
+            if (
+                    span_text.isdigit() and
+                    char_count <= 4 and
+                    (
+                            span_y < header_zone_y or
+                            span_y > footer_zone_y
+                    )
+            ):
+                role = TextRole.PAGE_NUMBER.value
+                role_origin = "geometry"
 
         # =====================================================================
         # PRIORITY 9: List Item
@@ -5050,6 +8698,7 @@ def _assign_roles(
         if role == TextRole.BODY.value:
             if _LIST_ITEM_PATTERN.match(span_text):
                 role = TextRole.LIST_ITEM.value
+                role_origin = "content_pattern"
 
         # =====================================================================
         # PRIORITY 10: Code
@@ -5059,10 +8708,12 @@ def _assign_roles(
 
             if is_monospace and "symbol" not in font_name and "wingdings" not in font_name:
                 role = TextRole.CODE.value
+                role_origin = "content_pattern"
             elif char_count > _ROLE_CODE_MIN_CHAR_COUNT:
                 code_chars = _ROLE_CODE_PUNCT_PATTERN.findall(span_text)
                 if len(code_chars) / char_count > _ROLE_CODE_PUNCT_RATIO:
                     role = TextRole.CODE.value
+                    role_origin = "content_pattern"
 
         # PHASE 0: CODE veto for punctuation-only spans
         # Prevents body punctuation fragments from being dropped as non-viable CODE.
@@ -5078,6 +8729,7 @@ def _assign_roles(
         if role == TextRole.BODY.value:
             if span_text in link_uris or span_text.startswith(("http", "www.")):
                 role = TextRole.HYPERLINK.value
+                role_origin = "content_pattern"
 
         # =====================================================================
         # PRIORITY 12: Inline Equation
@@ -5085,6 +8737,7 @@ def _assign_roles(
         if role == TextRole.BODY.value:
             if _is_inline_equation(span_text, span):
                 role = TextRole.INLINE_EQUATION.value
+                role_origin = "content_pattern"
 
         # =====================================================================
         # PRIORITY 13: Subscript / Superscript
@@ -5095,9 +8748,11 @@ def _assign_roles(
             if is_very_small:
                 if span.get("is_subscript"):
                     role = TextRole.SUBSCRIPT.value
+                    role_origin = "content_pattern"
                     span["merge_with_adjacent"] = True
                 elif span.get("flags", 0) & PyMuPDFFlag.SUPERSCRIPT:
                     role = TextRole.SUPERSCRIPT.value
+                    role_origin = "content_pattern"
                     span["merge_with_adjacent"] = True
 
         # =====================================================================
@@ -5114,10 +8769,12 @@ def _assign_roles(
             if is_in_header_zone and is_short_fragment:
                 if _is_orphan_fragment(span_text):
                     role = TextRole.HEADER_ARTIFACT.value
+                    role_origin = "geometry"
                 elif is_uppercase and not _is_protected_acronym(span_text):
                     if char_count < _ROLE_VERY_SHORT_UPPERCASE_THRESHOLD:
                         if not any(c in span_text for c in ".,;:"):
                             role = TextRole.HEADER_ARTIFACT.value
+                            role_origin = "geometry"
 
         # =====================================================================
         # ASSIGN ROLE AND UPDATE STATE
@@ -5133,6 +8790,7 @@ def _assign_roles(
             span["sentence_continuation_ok"] = True
 
         span["role"] = role
+        span["_role_origin"] = role_origin
 
         previous_role = role
         previous_y = span_y
@@ -5187,14 +8845,11 @@ def _apply_continuity_role_resolution(
     if not spans or len(spans) < 2:
         return 0
 
-    # =========================================================================
     # GUARD: Ensure reading order before continuity analysis
-    # Continuity checks use spans[i-1] / spans[i+1], so order is critical.
-    # Sort by (page, column, block, line, span_in_line) for stable ordering.
-    # =========================================================================
+    # Reading-order invariant:
+    # Continuity must operate on the same linear order as reconstruction
     spans.sort(key=lambda s: (
         s.get("page_number", 0),
-        s.get("column_index", 0),
         s.get("block_id", 0),
         s.get("line_index", 0),
         s.get("span_index_in_line", 0),
@@ -5442,6 +9097,11 @@ def _build_sliding_window_spans(
     Uses PRE-PASS cached spans to ensure all spans have identical viability
     processing (Phase 1.5 continuity, Phase 1.3 rescue, etc.).
 
+    SCHEMA v2.0 CHANGE:
+        Window is now LOSSLESS. Sidebar/margin spans are no longer skipped.
+        Instead, they are tagged with _stage1_nonviable_hint=True and included.
+        The semantic resolution phase decides final disposition.
+
     Window structure:
     - Last N spans from previous page (deep copied, tagged)
     - ALL spans from current page (deep copied, tagged with _page_local_idx)
@@ -5462,23 +9122,23 @@ def _build_sliding_window_spans(
         - All spans are deep copies (no mutation of cache)
         - Current page spans tagged with _page_local_idx for remapping
         - All spans tagged with _source_page_idx for attribution
+        - SCHEMA v2.0: No spans are skipped; non-viable hints are tagged
     """
-    import copy
 
-    def _copy_span_for_window(span: Dict) -> Dict:
-        """
-        Phase 2 invariant: Window spans MUST be isolated from cached spans.
+    def _copy_span_for_window(source_span: Dict, source_page_idx: int,
+                              source_local_idx: int) -> Dict:
+        copied = copy.deepcopy(source_span)
 
-        We always deep-copy here to prevent:
-          - cross-page mutation
-          - tag leakage (_page_local_idx, _source_page_idx)
-          - Heisenbugs during multi-pass stitching
+        copied["_requires_semantic_review"] = bool(
+            copied.get("_requires_semantic_review", False)
+        )
 
-        NOTE:
-          Deep-copy cost is negligible because window size is bounded
-          (prev_tail + current + next_head).
-        """
-        return copy.deepcopy(span)
+        # RONC v2.0 invariant: every span must have a canonical ID
+        # Prefer upstream CID if present; otherwise generate stable page-local CID
+        if "_canonical_span_id" not in copied:
+            copied["_canonical_span_id"] = f"{source_page_idx}:{source_local_idx}"
+
+        return copied
 
     window_spans: List[Dict] = []
     current_spans = page_span_cache.get(current_page_idx, [])
@@ -5492,22 +9152,31 @@ def _build_sliding_window_spans(
     # PREVIOUS PAGE TAIL (deep copy, tagged)
     # =========================================================================
     prev_tail_count = 0
+    nonviable_prev_count = 0
     if current_page_idx > 0:
         prev_spans = page_span_cache.get(current_page_idx - 1, [])
         if prev_spans:
             tail_spans = prev_spans[-_WINDOW_TAIL_SPAN_COUNT:]
-            for span in tail_spans:
+            tail_start_idx = len(prev_spans) - len(tail_spans)
+            for idx, span in enumerate(tail_spans):
                 role = span.get("role", "")
                 layout_stream = span.get("layout_stream", "")
 
-                if (
-                    role == TextRole.SIDEBAR.value
-                    or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
-                ):
-                    if not span.get("_tts_promoted_to_body_stream", False):
-                        continue
+                # ─────────────────────────────────────────────────────────────
+                # SCHEMA v2.0: Lossless window — never skip, tag instead
+                # ─────────────────────────────────────────────────────────────
+                is_sidebar_or_margin = (
+                        role == TextRole.SIDEBAR.value
+                        or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
+                )
 
-                span_copy = _copy_span_for_window(span)
+                prev_local_idx = tail_start_idx + idx
+                span_copy = _copy_span_for_window(span, current_page_idx - 1, prev_local_idx)
+
+                if is_sidebar_or_margin and not span.get("_tts_promoted_to_body_stream", False):
+                    span_copy["_stage1_nonviable_hint"] = True
+                    nonviable_prev_count += 1
+
                 span_copy["_window_position"] = "prev_tail"
                 span_copy["_source_page_idx"] = current_page_idx - 1
                 window_spans.append(span_copy)
@@ -5517,19 +9186,26 @@ def _build_sliding_window_spans(
     # CURRENT PAGE (deep copy, tagged with _page_local_idx)
     # =========================================================================
     page_start_idx = len(window_spans)
+    nonviable_current_count = 0
 
     for page_local_idx, span in enumerate(current_spans):
         role = span.get("role", "")
         layout_stream = span.get("layout_stream", "")
 
-        if(
-            role == TextRole.SIDEBAR.value
-            or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
-        ):
-            if not span.get("_tts_promoted_to_body_stream", False):
-                continue
+        # ─────────────────────────────────────────────────────────────────────
+        # SCHEMA v2.0: Lossless window — never skip, tag instead
+        # ─────────────────────────────────────────────────────────────────────
+        is_sidebar_or_margin = (
+                role == TextRole.SIDEBAR.value
+                or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
+        )
 
-        span_copy = _copy_span_for_window(span)
+        span_copy = _copy_span_for_window(span, current_page_idx, page_local_idx)
+
+        if is_sidebar_or_margin and not span.get("_tts_promoted_to_body_stream", False):
+            span_copy["_stage1_nonviable_hint"] = True
+            nonviable_current_count += 1
+
         span_copy["_window_position"] = "current"
         span_copy["_source_page_idx"] = current_page_idx
         span_copy["_page_local_idx"] = page_local_idx
@@ -5541,36 +9217,46 @@ def _build_sliding_window_spans(
     # NEXT PAGE HEAD (deep copy, tagged)
     # =========================================================================
     next_head_count = 0
+    nonviable_next_count = 0
     if current_page_idx + 1 in page_span_cache:
         next_spans = page_span_cache.get(current_page_idx + 1, [])
         if next_spans:
             head_spans = next_spans[:_WINDOW_HEAD_SPAN_COUNT]
-            for span in head_spans:
+            for idx, span in enumerate(head_spans):
                 role = span.get("role", "")
                 layout_stream = span.get("layout_stream", "")
 
-                if (
-                    role == TextRole.SIDEBAR.value
-                    or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
-                ):
-                    if not span.get("_tts_promoted_to_body_stream", False):
-                        continue
+                # ─────────────────────────────────────────────────────────────
+                # SCHEMA v2.0: Lossless window — never skip, tag instead
+                # ─────────────────────────────────────────────────────────────
+                is_sidebar_or_margin = (
+                        role == TextRole.SIDEBAR.value
+                        or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
+                )
 
-                span_copy = _copy_span_for_window(span)
+                span_copy = _copy_span_for_window(span, current_page_idx + 1, idx)
+
+                if is_sidebar_or_margin and not span.get("_tts_promoted_to_body_stream", False):
+                    span_copy["_stage1_nonviable_hint"] = True
+                    nonviable_next_count += 1
+
                 span_copy["_window_position"] = "next_head"
                 span_copy["_source_page_idx"] = current_page_idx + 1
                 window_spans.append(span_copy)
                 next_head_count += 1
 
     if trace_id:
+        total_nonviable = nonviable_prev_count + nonviable_current_count + nonviable_next_count
         logger.debug(
-            "[%s] Phase 2.0: Window for page %d: prev_tail=%d, current=%d, next_head=%d, total=%d",
+            "[%s] Phase 2.0: Window for page %d: prev_tail=%d, current=%d, next_head=%d, "
+            "total=%d, nonviable_hints=%d",
             trace_id,
             current_page_num,
             prev_tail_count,
             page_end_idx - page_start_idx,
             next_head_count,
-            len(window_spans)
+            len(window_spans),
+            total_nonviable
         )
 
     return window_spans, (page_start_idx, page_end_idx)
@@ -5667,9 +9353,13 @@ def _filter_sentences_to_page(
 
         # Create sentence copy with remapped indices
         page_sent = dict(sent)
-        page_sent["span_start_index"] = page_local_start
-        page_sent["span_end_index"] = max(page_local_start, page_local_end)
+
+        # KEEP window-space indices as authoritative
         page_sent["page_number"] = page_num
+
+        # OPTIONAL: retain page-local indices for debugging or analytics only
+        page_sent["_page_local_span_start"] = page_local_start
+        page_sent["_page_local_span_end"] = page_local_end
 
         # Track if sentence benefited from window context
         if sent.get("_crosses_to_next_page") or window_start_idx < page_start:
@@ -5734,7 +9424,7 @@ def _refine_roles_via_content_flow(spans: List[Dict], trace_id: str = None) -> N
             b["count"] += 1
 
     # Block gaps: gap before each block, based on sorted block y0
-    sorted_bids = sorted(blocks.keys(), key=lambda b: blocks[b]["y0"])
+    sorted_bids = sorted(blocks.keys(), key=lambda blk: blocks[blk]["y0"])
     block_gaps: Dict[int, float] = {}
     prev_bid = None
     for bid in sorted_bids:
@@ -5844,6 +9534,15 @@ def _refine_roles_via_content_flow(spans: List[Dict], trace_id: str = None) -> N
             # Debug tags (cheap, optional)
             span["_outlier_score"] = round(score, 2)
             span["_outlier_reasons"] = reasons
+
+        # Summary logging
+        if trace_id:
+            demoted_count = sum(1 for s in spans if s.get("_outlier_score", 0) >= 0.70)
+            if demoted_count > 0:
+                logger.debug(
+                    "[%s] Content-flow refinement: demoted %d outlier spans",
+                    trace_id, demoted_count
+                )
 
 
 def _associate_captions_to_figures(
@@ -6086,6 +9785,9 @@ def _detect_structural_continuity(
     Returns:
         Dictionary with continuity flags and bbox tuples for UI linking.
     """
+    # Signals produced here MUST be consumed in Phase 4.
+    # This method MUST NOT decide sentence or semantic outcomes.
+
     continuity: Dict = {
         "table_continues": False,
         "figure_continues": False,
@@ -6441,7 +10143,6 @@ def _stitch_helper_columns_match(prev: Dict, next_s: Dict) -> bool:
     return prev_col == next_col
 
 
-
 def _is_cross_page_continuation(
         prev_sent: Dict,
         next_sent: Dict,
@@ -6451,27 +10152,91 @@ def _is_cross_page_continuation(
     """
     Heuristic: Should these two sentences be chunked together across a page break?
 
-    This is a wrapper around _stitch_helper_should_merge for API compatibility.
-
-    Args:
-        prev_sent: Previous sentence dictionary.
-        next_sent: Next sentence dictionary.
-        prev_spans: Optional span list for additional checks.
-        next_spans: Optional span list for additional checks.
-
-    Returns:
-        True if sentences should be merged across page break.
+    Uses sentence-level linguistic signals AND span-level structural guards
+    to make robust cross-page continuation decisions.
     """
     if not prev_sent or not next_sent:
         return False
 
-    should_merge, _ = _stitch_helper_should_merge(
-        prev_sent,
-        next_sent
+    # =========================================================================
+    # Gate 0: RONC v2.0 Authority (Cross-Page Specific)
+    # =========================================================================
+    # Extract boundary spans (if available)
+    # Spans enable RONC authority checks; without them, fall back to heuristics
+    has_spans = bool(prev_spans and next_spans)
+    prev_boundary = prev_spans[-1] if has_spans else None
+    next_boundary = next_spans[0] if has_spans else None
 
-    )
+    prev_unit = prev_boundary.get("_ronc_atomic_unit_id") if prev_boundary else None
+    next_unit = next_boundary.get("_ronc_atomic_unit_id") if next_boundary else None
 
-    return should_merge
+    # Same atomic unit across page break → Allow (RONC says they belong together)
+    if has_spans and prev_unit is not None and next_unit is not None and prev_unit == next_unit:
+        return True
+
+    # Explicit break → Block
+    if has_spans and prev_boundary.get("_ronc_break_after") is True:
+        return False
+
+    # Different atomic units → Block
+    if has_spans and prev_unit is not None and next_unit is not None and prev_unit != next_unit:
+        return False
+
+    # =========================================================================
+    # Gate 1: Sentence-level linguistic check
+    #
+    # NOTE:
+    # - Stitching callers already ran _stitch_helper_should_merge
+    # - Chunking callers do NOT pass spans and rely on this gate
+    # =========================================================================
+    if not has_spans:
+        should_merge, _ = _stitch_helper_should_merge(prev_sent, next_sent)
+        if not should_merge:
+            return False
+
+    # =========================================================================
+    # Gate 2: Span-level structural guards (cross-page specific)
+    # Only applies when boundary spans are available
+    # =========================================================================
+    if not has_spans:
+        return True
+
+    # -------------------------------------------------------------
+    # Guard A: Layout stream — no margin involvement cross-page
+    # -------------------------------------------------------------
+    prev_stream = prev_boundary.get("layout_stream", "") if prev_boundary else ""
+    next_stream = next_boundary.get("layout_stream", "") if next_boundary else ""
+
+    if (
+            isinstance(prev_stream, str) and prev_stream.startswith("margin")
+    ) or (
+            isinstance(next_stream, str) and next_stream.startswith("margin")
+    ):
+        return False
+
+    # -------------------------------------------------------------
+    # Guard B: Role compatibility
+    # -------------------------------------------------------------
+    non_continuation_roles = {
+        TextRole.FOOTNOTE.value,
+        TextRole.HEADER_ARTIFACT.value,
+        TextRole.FOOTER_ARTIFACT.value,
+        TextRole.PAGE_NUMBER.value,
+    }
+
+    if prev_boundary and next_boundary and (
+            prev_boundary.get("role") in non_continuation_roles
+            or next_boundary.get("role") in non_continuation_roles
+    ):
+        return False
+
+    # -------------------------------------------------------------
+    # Guard C: Stage 1 non-viable hint
+    # -------------------------------------------------------------
+    if next_boundary and next_boundary.get("_stage1_nonviable_hint", False):
+        return False
+
+    return True
 
 
 def _stitch_cross_page_sentences(
@@ -6576,6 +10341,26 @@ def _stitch_cross_page_sentences(
                             stripped.lower() in CONNECTOR_WORDS and
                             trailing_punct
                     ):
+                        # ─────────────────────────────────────────────────────
+                        # RONC GUARD: Connector rule must still respect RONC
+                        # ─────────────────────────────────────────────────────
+                        prev_unit = curr.get("_ronc_atomic_unit_id")
+                        next_unit = next_sent.get("_ronc_atomic_unit_id")
+
+                        # Block if RONC says don't merge
+                        ronc_blocks = False
+                        if curr.get("_ronc_break_after") is True:
+                            ronc_blocks = True
+                        elif (prev_unit is not None and next_unit is not None
+                              and prev_unit != next_unit):
+                            ronc_blocks = True
+
+                        if ronc_blocks:
+                            # RONC authority overrides connector rule
+                            result.append(curr)
+                            i += 1
+                            continue
+
                         # Remove ONLY the trailing punctuation from curr text
                         fixed_curr_text = curr_text[:-len(trailing_punct)].rstrip()
 
@@ -6621,6 +10406,14 @@ def _stitch_cross_page_sentences(
                         continue
 
                 should, reason = _stitch_helper_should_merge(curr, next_sent)
+
+                # Cross-page merges require additional structural approval
+                if should and curr.get("page_number") != next_sent.get("page_number"):
+                    prev_spans = curr.get("source_spans")
+                    next_spans = next_sent.get("source_spans")
+                    if not _is_cross_page_continuation(curr, next_sent, prev_spans, next_spans):
+                        should = False
+                        reason = "cross_page_structural_guard"
 
                 if should:
                     # Merge sentences
@@ -6714,10 +10507,40 @@ def _stitch_helper_merge(curr: Dict, next_sent: Dict) -> Dict:
     # Join with single space (safest default)
     merged_text = f"{t1} {t2}"
 
-    # Create merged sentence (shallow copy is sufficient)
     merged = curr.copy()
     merged["text"] = merged_text
     merged["is_stitched"] = True
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # RONC v2.0: Preserve lineage for stitched sentences
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Collect canonical span IDs from both sentences (ordered, deduplicated)
+    prev_cids = curr.get("_canonical_span_ids", [])
+    next_cids = next_sent.get("_canonical_span_ids", [])
+
+    # Handle single-span sentences (no list yet)
+    if not prev_cids and curr.get("_canonical_span_id"):
+        prev_cids = [curr.get("_canonical_span_id")]
+    if not next_cids and next_sent.get("_canonical_span_id"):
+        next_cids = [next_sent.get("_canonical_span_id")]
+
+    merged["_canonical_span_ids"] = list(dict.fromkeys(prev_cids + next_cids))
+
+    # Preserve atomic unit if shared (otherwise track merge across units)
+    prev_unit = curr.get("_ronc_atomic_unit_id")
+    next_unit = next_sent.get("_ronc_atomic_unit_id")
+
+    if prev_unit is not None and next_unit is not None:
+        if prev_unit == next_unit:
+            merged["_ronc_atomic_unit_id"] = prev_unit
+        else:
+            # Merged across units — track for audit
+            merged["_ronc_merged_units"] = sorted({prev_unit, next_unit})
+    elif prev_unit is not None:
+        merged["_ronc_atomic_unit_id"] = prev_unit
+    elif next_unit is not None:
+        merged["_ronc_atomic_unit_id"] = next_unit
 
     # Update span indices
     merged["span_end_index"] = max(
@@ -6842,7 +10665,79 @@ def _stitch_helper_should_merge(
     prev_text = (prev.get("text") or "").rstrip()
     next_text = (next_s.get("text") or "").lstrip()
 
-    # REVISION B3-M: Deterministic continuation from A2 (with adjacency verification)
+    # =========================================================================
+    # RONC v2.0 AUTHORITY GATE (Phases 4-6)
+    # Contract-based signals take precedence over linguistic heuristics
+    #
+    # Authority Stack:
+    #   1. RONC explicit links → FORCE merge
+    #   2. RONC same atomic unit → FORCE merge
+    #   3. RONC break_after → BLOCK merge
+    #   4. RONC different atomic units → BLOCK merge
+    #   5. No RONC opinion → Continue to linguistic rules
+    #
+    # NOTE: must_include (protection) is NOT a merge blocker.
+    # Protection prevents EXCLUSION from TTS, not COMBINATION of spans.
+    # =========================================================================
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Extract boundary spans for RONC field access
+    # RONC fields live on spans, not sentences. For merge decisions:
+    #   - prev: check LAST span (boundary exiting this sentence)
+    #   - next: check FIRST span (boundary entering next sentence)
+    # ─────────────────────────────────────────────────────────────────────────
+    prev_spans = prev.get("source_spans", [])
+    next_spans = next_s.get("source_spans", [])
+
+    prev_boundary_span = prev_spans[-1] if prev_spans else {}
+    next_boundary_span = next_spans[0] if next_spans else {}
+
+    prev_unit = prev_boundary_span.get("_ronc_atomic_unit_id")
+    next_unit = next_boundary_span.get("_ronc_atomic_unit_id")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FORCE MERGE: Same atomic unit (strongest positive signal)
+    # Spans in same unit are semantically continuous by RONC Phase 6 analysis
+    # ─────────────────────────────────────────────────────────────────────────
+    if prev_unit is not None and next_unit is not None and prev_unit == next_unit:
+        return True, "ronc:same_atomic_unit"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FORCE MERGE: Explicit RONC link from prev to next
+    # Phase 4 established this link with confidence threshold
+    # ─────────────────────────────────────────────────────────────────────────
+    prev_contract = prev_boundary_span.get("_ronc_contract", {})
+    prev_links = prev_contract.get("links", {})
+    prev_next_link = prev_links.get("next", {})
+
+    next_cid = next_boundary_span.get("_canonical_span_id")
+    linked_cid = prev_next_link.get("cid")
+
+    if linked_cid and next_cid and linked_cid == next_cid:
+        confidence = prev_next_link.get("confidence", 0.0)
+        mutual = prev_next_link.get("mutual", False)
+        if mutual:
+            return True, f"ronc:mutual_link:{confidence:.2f}"
+        elif confidence >= 0.60:
+            return True, f"ronc:explicit_link:{confidence:.2f}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK MERGE: Explicit break signal (Phase 6 semantic delimiter)
+    # ─────────────────────────────────────────────────────────────────────────
+    if prev_boundary_span.get("_ronc_break_after") is True:
+        return False, "ronc:break_after"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK MERGE: Different atomic units (semantic boundary)
+    # ─────────────────────────────────────────────────────────────────────────
+    if prev_unit is not None and next_unit is not None and prev_unit != next_unit:
+        return False, "ronc:atomic_unit_boundary"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NO OPINION: Continue to A2 and linguistic rules
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Deterministic continuation from A2 (with adjacency verification)
     # Adjacency check: same page, reasonable vertical proximity
     if prev.get("a2_continues_to_next"):
         # Verify adjacency to guard against orphaned flags
@@ -7150,6 +11045,312 @@ def _stitch_helper_should_merge(
 
 # ✦────── c. Sentence Segmentation ──────✦
 
+def _resolve_semantic_continuity(
+        window_spans: List[Dict],
+        page_span_range: Tuple[int, int],
+        *,
+        interruption_config: InterruptionConfig = None,
+        trace_id: str = None,
+) -> None:
+    """
+    Stage 2 semantic engine (v1):
+
+      - assigns _semantic_disposition in {included, excluded, interruption}
+      - never mutates legacy role
+      - uses Stage 1 flags as hints (not gates)
+      - lossless by default
+    """
+    if not window_spans:
+        return
+
+    # Reserved for future semantic tuning (v2)
+    if interruption_config is None:
+        interruption_config = InterruptionConfig()
+    _ = interruption_config  # Explicitly unused in v1
+
+    start_idx, end_idx = page_span_range
+
+    # ------------------------------------------------------------------
+    # Helpers (renamed to avoid shadowing outer variables)
+    # ------------------------------------------------------------------
+    def _set(target: Dict, disp: str, reason_list: List[str], conf: float = 1.0) -> None:
+        target["_semantic_disposition"] = disp
+        target["_semantic_reasons"] = reason_list
+        target["_semantic_confidence"] = round(float(conf), 2)
+
+    def _text(src: Dict) -> str:
+        return (src.get("cleaned_text") or src.get("raw_text") or "").strip()
+
+    def _is_body_like(text: str) -> bool:
+        if not text:
+            return False
+
+        # Substantial text is always body-like
+        if len(text) > 60 or len(text.split()) > 6:
+            return True
+
+        # FIX: lowercase heuristic requires substance (prevents single-word labels)
+        if text[0].islower() and len(text.split()) >= 3:
+            return True
+
+        # Punctuated prose with sufficient length
+        if any(ch in text for ch in [".", ",", ";", ":"]) and len(text.split()) >= 4:
+            return True
+
+        return False
+
+    # ------------------------------------------------------------------
+    # Pass 1: defaults + hard excludes
+    # ------------------------------------------------------------------
+    for i, span in enumerate(window_spans):
+        if not isinstance(span, dict):
+            continue
+
+        role = span.get("role", "")
+        if role in _SEMANTIC_NEVER_OVERRIDE_ROLES:
+            _set(span, _SEM_DISP_EXCLUDED, [f"never_override_role:{role}"], 1.0)
+            continue
+
+            # ─────────────────────────────────────────────────────────────────────
+            # RONC PROTECTION GATE (Phase 5 Authority)
+            # If RONC says must_include, semantic continuity MUST respect it.
+            # This overrides all downstream exclusion logic.
+            # ─────────────────────────────────────────────────────────────────────
+        ronc_contract = span.get("_ronc_contract", {})
+        ronc_protection = ronc_contract.get("protection", {})
+        ronc_must_include = ronc_protection.get("must_include", False)
+
+        if ronc_must_include:
+            _set(span, _SEM_DISP_INCLUDED, ["ronc:must_include_protected"], 1.0)
+            span["_has_semantic_authority"] = True
+            continue
+
+        # Default is included (lossless)
+        _set(span, _SEM_DISP_INCLUDED, ["default"], 0.5)
+
+        candidate_reasons = set(span.get("_exclusion_candidate_reasons") or [])
+
+        if span.get("_exclusion_candidate") and not span.get("_exclusion_protected"):
+            # ─────────────────────────────────────────────────────────────────
+            # Defense-in-depth: Re-check RONC protection wasn't missed
+            # (Should never fire if Patch A ran, but guards edge cases)
+            # ─────────────────────────────────────────────────────────────────
+            ronc_protected = span.get("_ronc_contract", {}).get("protection", {}).get(
+                "must_include", False)
+            if ronc_protected:
+                _set(span, _SEM_DISP_INCLUDED, ["ronc:protection_override_exclusion_candidate"],
+                     0.95)
+            elif any(
+                    r.startswith("global_header_match_") or r.startswith("global_footer_match_")
+                    for r in candidate_reasons
+            ):
+                _set(span, _SEM_DISP_EXCLUDED, ["global_band_match"], 0.95)
+            elif {
+                "noise_punctuation",
+                "noise_digit_only",
+                "noise_single_char",
+            } & candidate_reasons:
+                _set(span, _SEM_DISP_EXCLUDED, ["stage1_noise"], 0.9)
+
+        # Sidebar/margin hint - check for inline continuation potential
+        if span.get("_stage1_nonviable_hint"):
+            text = _text(span)
+
+            # Short tokens with continuation characteristics should NOT be interruption
+            # These are likely inline italics (e.g., "or", "and", terms)
+            is_likely_inline = False
+
+            if text:
+                first_word = text.split()[0].lower() if text.split() else ""
+                # Connectives are almost always inline continuation
+                if first_word in {"or", "and", "but", "the", "a", "an", "of", "in", "to",
+                                  "is", "are"}:
+                    is_likely_inline = True
+                # Short lowercase text on a line with body content
+                elif text[0].islower() and len(text.split()) <= 4:
+                    is_likely_inline = True
+
+            if is_likely_inline:
+                # Keep as candidate for line-coherent promotion
+                _set(
+                    span,
+                    _SEM_DISP_INCLUDED,
+                    ["nonviable_hint_inline_candidate"],
+                    0.65,
+                )
+            else:
+                _set(
+                    span,
+                    _SEM_DISP_INTERRUPTION,
+                    ["nonviable_hint_sidebar_or_margin"],
+                    0.6,
+                )
+
+    # ------------------------------------------------------------------
+    # Pass 2: required semantic review overrides
+    # ------------------------------------------------------------------
+    review_count = 0
+
+    for i, cur_span in enumerate(window_spans):
+        if not isinstance(cur_span, dict):
+            continue
+        if not cur_span.get("_requires_semantic_review"):
+            continue
+
+        review_count += 1
+
+        text = _text(cur_span)
+        candidate_reasons = set(cur_span.get("_exclusion_candidate_reasons") or [])
+
+        prev_span = window_spans[i - 1] if i > 0 else None
+        next_span = window_spans[i + 1] if i + 1 < len(window_spans) else None
+
+        prev_text = _text(prev_span) if isinstance(prev_span, dict) else ""
+        next_text = _text(next_span) if isinstance(next_span, dict) else ""
+
+        prev_incomplete = (
+                bool(prev_text)
+                and prev_text.split()[-1].lower().rstrip(".,;:!?\"')") in _STITCH_INCOMPLETE_ENDINGS
+        )
+
+        this_lower = bool(text) and text[0].islower()
+        next_lower = bool(next_text) and next_text[0].islower()
+        body_like = _is_body_like(text)
+
+        # Visual overlap resolution
+        if "visual_overlap" in candidate_reasons:
+            # =================================================================
+            # PATCH 7B-E: Rescue body-like / continuation prose BEFORE diagram_label hard exclude
+            #
+            # Problem: Stage-1 can over-attach "diagram_label" to real prose near figures.
+            # If we hard-exclude here, _translate_exclusion_flags Priority 0 will "continue"
+            # and later rescue logic never runs.
+            #
+            # Guardrails:
+            #   - Only rescue in body_col* streams (prevents margin leakage)
+            #   - Block boilerplate / documentation artifacts
+            #   - Allow short continuation tokens (e.g., "are called", "gamma neurons")
+            #   - Keep figure_label hard-excluded
+            # =================================================================
+            layout_stream = cur_span.get("layout_stream", "")
+            is_body_stream = isinstance(layout_stream, str) and layout_stream.startswith("body_col")
+
+            text_lower = text.lower() if text else ""
+            is_boilerplate = (
+                    "html" in text_lower or
+                    "css" in text_lower or
+                    "examples of how to" in text_lower or
+                    text_lower.startswith("figure ") or
+                    text_lower.startswith("table ")
+            )
+
+            # Short continuation heuristic (keeps stitch continuity alive)
+            # --- PATCH 7B-F: Word count (required for all subsequent checks) ---
+            word_count = len(text.split()) if text else 0
+
+            # --- PATCH 7B-F: Block-level structural context (page-scoped) ---
+            cur_page = cur_span.get("page_number")
+            block_id = cur_span.get("block_id")
+
+            # Guard: Only compute block context if both identifiers are present
+            is_diagram_heavy_block = False
+            if block_id is not None and cur_page is not None:
+                block_spans = [
+                    s for s in window_spans
+                    if isinstance(s, dict)
+                       and s.get("block_id") == block_id
+                       and s.get("page_number") == cur_page
+                ]
+
+                diagram_label_count = sum(
+                    1 for s in block_spans
+                    if "diagram_label" in (s.get("_exclusion_candidate_reasons") or [])
+                )
+
+                diagram_ratio = diagram_label_count / max(len(block_spans), 1)
+
+                # CRITICAL: strictly greater than (block at exactly 50% is NOT diagram-heavy)
+                is_diagram_heavy_block = diagram_ratio > 0.5
+
+            # --- PATCH 7B-F: Short continuation heuristic (>= 2 words ONLY) ---
+            is_short_continuation = (
+                    2 <= word_count <= 5 and
+                    text and (
+                            text[0].islower() or text[0] in ",;:.)"
+                    )
+            )
+
+            # True diagram-label-ish tokens: short + uppercase-ish (prevents label leakage)
+            is_true_label_like = (
+                    bool(text) and
+                    word_count <= 3 and
+                    text.isupper()
+            )
+
+            # --- PATCH 7B-F: Neighbor-aware single-word glue preservation ---
+            CONTINUATION_GLUE_WORDS = {
+                "called", "are", "is", "was", "were", "and", "or", "but"
+            }
+
+            is_glue_word_rescue = False
+            if word_count == 1 and text.lower() in CONTINUATION_GLUE_WORDS:
+                if prev_incomplete:
+                    is_glue_word_rescue = True
+                elif next_text and _is_body_like(next_text):
+                    is_glue_word_rescue = True
+
+            # --- PATCH 7B-F: Final rescue gate (AUTHORITATIVE) ---
+            rescue_as_body = (
+                    is_body_stream and
+                    not is_boilerplate and
+                    not is_true_label_like and
+                    not (is_diagram_heavy_block and word_count <= 3 and not is_glue_word_rescue) and
+                    (
+                            body_like or
+                            is_short_continuation or
+                            is_glue_word_rescue or
+                            (prev_incomplete and this_lower) or
+                            (this_lower and next_lower)
+                    )
+            )
+
+            if rescue_as_body:
+                # Optional audit flag; not required, but helps tracing
+                cur_span["_inside_figure_rescued"] = True
+                _set(cur_span, _SEM_DISP_INCLUDED, ["visual_overlap:body_like_rescue"], 0.85)
+
+            # HARD EXCLUSION: keep figure_label absolute, but allow diagram_label only if not rescued
+            elif "figure_label" in candidate_reasons:
+                _set(cur_span, _SEM_DISP_EXCLUDED, ["figure_label:hard_exclude"], 0.95)
+
+            elif "diagram_label" in candidate_reasons:
+                _set(cur_span, _SEM_DISP_EXCLUDED, ["diagram_label:hard_exclude"], 0.95)
+
+            elif body_like or (prev_incomplete and this_lower) or (this_lower and next_lower):
+                _set(cur_span, _SEM_DISP_INCLUDED, ["visual_overlap_override:include"], 0.85)
+
+            else:
+                _set(cur_span, _SEM_DISP_INTERRUPTION, ["visual_overlap:non_prose"], 0.7)
+
+        # Bare caption resolution
+        if "bare_caption" in candidate_reasons:
+            if body_like:
+                _set(cur_span, _SEM_DISP_INCLUDED, ["bare_caption_override:include"], 0.8)
+            else:
+                _set(cur_span, _SEM_DISP_INTERRUPTION, ["bare_caption:interrupt"], 0.65)
+
+        # Invalid bbox / empty text
+        if "invalid_bbox" in candidate_reasons or "empty" in candidate_reasons:
+            if body_like:
+                _set(cur_span, _SEM_DISP_INCLUDED, ["bbox_or_empty:text_only_include"], 0.75)
+
+    if trace_id:
+        logger.debug(
+            "[%s] Semantic continuity resolved: window=%d current_range=(%d,%d) reviewed=%d",
+            trace_id, len(window_spans), start_idx, end_idx, review_count
+        )
+
+
 def _reconstruct_text_for_segmentation(
         spans: List[Dict],
         trace_id: str = None
@@ -7181,9 +11382,11 @@ def _reconstruct_text_for_segmentation(
     indexed_spans = list(enumerate(spans))
 
     # 2. Sort by geometry/structure using the span object (item[1])
+    # PATCH 7B-F SORT: Block-first ordering for document fidelity
+    # INVARIANT: Final reading order MUST be (page, block, line, span_index_in_line).
+    # column_index MUST NOT participate in linearization.
     sorted_spans = sorted(indexed_spans, key=lambda item: (
         item[1].get('page_number', 0),
-        item[1].get('column_index', 0),
         item[1].get('block_id', 0),
         item[1].get('line_index', 0),
         item[1].get('span_index_in_line', 0),
@@ -7203,9 +11406,61 @@ def _reconstruct_text_for_segmentation(
     prev_span_ref: Optional[Dict] = None
 
     a2_signal_joins = 0
+    ronc_atomic_welds = 0
+    ronc_boundary_breaks = 0
 
     for _, (orig_idx, span) in enumerate(sorted_spans):
         if not isinstance(span, dict):
+            continue
+
+        # =====================================================================
+        # DEFENSE-IN-DEPTH GATE (Lead Option C - Containment Fix)
+        # This should never fire if checkpoint ran correctly.
+        # If it fires, log as warning (indicates checkpoint bypass).
+        # =====================================================================
+        if span.get("_tts_excluded", False):
+            if trace_id:
+                logger.warning(
+                    "[%s] Defense gate triggered: span reached reconstruction with "
+                    "_tts_excluded=True (checkpoint bypass). role=%s reason=%s text=%r",
+                    trace_id,
+                    span.get("role"),
+                    span.get("_tts_exclude_reason"),
+                    (span.get("cleaned_text") or span.get("raw_text") or "")[:40],
+                )
+            continue
+
+        # =====================================================================
+        # CONTRACT CHECK: Disposition should be set by flag translator
+        # (Fail-open for backward compatibility, but make it loud.)
+        # =====================================================================
+        disp = span.get("_semantic_disposition")
+        if disp is None:
+            if trace_id:
+                logger.warning(
+                    "[%s] Span with unset _semantic_disposition reached reconstruction. "
+                    "Defaulting to INCLUDED (checkpoint bypass). role=%s text=%r",
+                    trace_id,
+                    span.get("role"),
+                    (span.get("cleaned_text") or span.get("raw_text") or "")[:40],
+                )
+            disp = _SEM_DISP_INCLUDED  # backward-compatible default
+
+        role = span.get("role", "")
+
+        # Never-override roles are always excluded
+        if role in _SEMANTIC_NEVER_OVERRIDE_ROLES:
+            continue
+
+        # Excluded spans never enter reconstruction
+        if disp == _SEM_DISP_EXCLUDED:
+            continue
+
+        # Interruption spans: allow downstream config behaviors (v1: skip here;
+        # later we can insert announcements/break markers without mutating role)
+        if disp == _SEM_DISP_INTERRUPTION:
+            # v1 conservative: skip the span text itself
+            # (future: announce/break behavior injection)
             continue
 
         # =====================================================================
@@ -7214,11 +11469,7 @@ def _reconstruct_text_for_segmentation(
         # CRITICAL: Do NOT rescue actual margin content.
         # =====================================================================
         effective_role = span.get("role", "")
-        if effective_role in {
-            TextRole.SIDEBAR.value,
-            TextRole.SUBHEADING.value,
-            TextRole.HEADING.value,
-        }:
+        if effective_role in _TTS_NON_VIABLE_ROLES:
             is_actual_margin = span.get("is_margin_content", False)
             was_line_rescued = span.get("_tts_rescued", False)
 
@@ -7247,12 +11498,32 @@ def _reconstruct_text_for_segmentation(
             TextRole.FIGURE_LABEL.value,
             TextRole.CODE.value,
             TextRole.HEADER_ARTIFACT.value,
+            TextRole.FOOTER_ARTIFACT.value,
+            TextRole.PAGE_NUMBER.value,
         }:
             continue
 
         text = (span.get("cleaned_text") or "")
         if not text:
             continue
+
+        # =================================================================
+        # RONC PHASE 6: Extract atomic unit metadata for boundary decisions
+        # =================================================================
+        prev_ronc_unit = (
+            prev_span_ref.get("_ronc_atomic_unit_id")
+            if isinstance(prev_span_ref, dict) else None
+        )
+        curr_ronc_unit = span.get("_ronc_atomic_unit_id")
+        same_atomic_unit = (
+                prev_ronc_unit is not None
+                and curr_ronc_unit is not None
+                and prev_ronc_unit == curr_ronc_unit
+        )
+        prev_break_after = (
+            prev_span_ref.get("_ronc_break_after")
+            if isinstance(prev_span_ref, dict) else None
+        )
 
         curr_column = span.get("column_index", 0) or 0
         curr_para = span.get("paragraph_index", 0) or 0
@@ -7264,20 +11535,28 @@ def _reconstruct_text_for_segmentation(
             # =================================================================
             # PRIORITY 0 (PHASE 2.7): UNIVERSAL A2 OVERRIDE — SUPREME AUTHORITY
             # If upstream proved linguistic continuity, we MUST weld.
+            # RONC Rule 1 is implicit here: A2 spans are always same-unit.
             # =================================================================
             if prev_span_ref and prev_span_ref.get("a2_continues_to_next", False):
                 prefix = " "
                 a2_signal_joins += 1
+                if same_atomic_unit:
+                    ronc_atomic_welds += 1
 
             # =================================================================
             # PRIORITY 1: Column change (same page) = hard break
+            # RONC Rule 1: Atomic membership vetoes structural breaks
             # =================================================================
             elif (
                     prev_column is not None and
                     curr_column != prev_column and
                     curr_page == prev_page
             ):
-                prefix = "\n\n"
+                if same_atomic_unit:
+                    prefix = " "
+                    ronc_atomic_welds += 1
+                else:
+                    prefix = "\n\n"
 
             # =================================================================
             # PRIORITY 2: Page change = space (preserve sentence flow)
@@ -7287,15 +11566,48 @@ def _reconstruct_text_for_segmentation(
 
             # =================================================================
             # PRIORITY 3: Paragraph change on same page = soft break
+            # RONC Rule 1: Atomic membership vetoes structural breaks
             # =================================================================
             elif prev_para is not None and curr_para != prev_para:
+                if same_atomic_unit:
+                    prefix = " "
+                    ronc_atomic_welds += 1
+                else:
+                    prefix = "\n"
+
+            # =================================================================
+            # PRIORITY 3.5 (PHASE 6 — RONC): Soft-force break at atomic boundary
+            #
+            # If previous span is a tail (_ronc_break_after=True), insert a
+            # structural break even without layout gaps. Handles headers,
+            # list items, and tight blocks without punctuation.
+            #
+            # Subordinate to Rule 1: only applies when NOT same_atomic_unit.
+            # =================================================================
+            elif prev_break_after is True and not same_atomic_unit:
                 prefix = "\n"
+                ronc_boundary_breaks += 1
 
             # =================================================================
             # PRIORITY 4: Default join (no structural break)
             # =================================================================
             else:
-                prefix = " "
+                if same_atomic_unit:
+                    # RONC Rule 1: Even in default case, atomic unit = no break
+                    prefix = " "
+                    ronc_atomic_welds += 1
+                elif prev_text and prev_text.endswith("."):
+                    # If next span looks like a standalone label, prefer paragraph break
+                    if (
+                            len(text.split()) <= 3
+                            and text[0].isupper()
+                            and not text.lower().startswith(("however", "therefore", "thus"))
+                    ):
+                        prefix = "\n"
+                    else:
+                        prefix = " "
+                else:
+                    prefix = " "
 
         # GUARDRAIL: prefix must be structural whitespace only
         if prefix not in ("", " ", "\n", "\n\n"):
@@ -7330,16 +11642,14 @@ def _reconstruct_text_for_segmentation(
         prev_para = curr_para
         prev_page = curr_page
         prev_text = text
-
-        # REVISION B: Track span for next iteration
         prev_span_ref = span
 
     if trace_id:
         logger.debug(
             "[%s] Reconstructed text: %d chars, %d spans, source map size: %d, "
-            "a2_signal_joins: %d",
+            "a2_signal_joins: %d, ronc_atomic_welds: %d, ronc_boundary_breaks: %d",
             trace_id, len(full_text), len(span_map), len(char_to_span),
-            a2_signal_joins
+            a2_signal_joins, ronc_atomic_welds, ronc_boundary_breaks
         )
 
     # =========================================================================
@@ -7356,7 +11666,6 @@ def _reconstruct_text_for_segmentation(
             )
 
     return full_text, span_map, char_to_span
-
 
 
 def _should_join_without_space(prev_text: str, curr_text: str) -> bool:
@@ -7378,6 +11687,10 @@ def _should_join_without_space(prev_text: str, curr_text: str) -> bool:
         True if spans should join without space (kerning detected).
         False if space should be preserved (default safe behavior).
     """
+
+    # This method MUST remain pairwise and stateless.
+    # It MUST NOT inspect layout, role, page, or semantic context.
+
     if not prev_text or not curr_text:
         return False
 
@@ -7709,25 +12022,107 @@ def _heal_truncated_sentences(
         List of healed sentence dictionaries.
     """
 
+    # ---------------------------------------------------------------------
+    # Phase 7 Hygiene: Clear transient consumption flags
+    # Prevent cross-run state leakage during testing / retries
+    # ---------------------------------------------------------------------
+    for s in sentences:
+        if isinstance(s, dict):
+            s.pop("_consumed", None)
+
     healed: List[Dict] = []
     i = 0
     heal_count = 0
+    ronc_driven_heals = 0
+    heuristic_driven_heals = 0
 
     while i < len(sentences):
         curr = sentences[i]
-
         # Skip if consumed by a previous lookahead merge
         if curr.get("_consumed"):
             i += 1
             continue
-
         text = curr.get("text", "").strip()
 
         # =====================================================================
-        # CORRECTED: Only process sentences ending with PERIOD
+        # PHASE 7 PRIORITY 0: RONC Intersection Trigger (SUPREME AUTHORITY)
+        #
+        # If current sentence shares ANY atomic unit with the next sentence,
+        # they were illegally split. MERGE IMMEDIATELY without heuristics.
+        #
+        # CRITICAL: This runs BEFORE legacy guards (period check, cut indicators)
+        # to ensure RONC-driven healing is never blocked by punctuation state.
+        # =====================================================================
+        curr_page = curr.get("page_number")
+        curr_ronc_units = set(curr.get("_ronc_atomic_units") or [])
+        ronc_triggered = False
+
+        if curr_ronc_units:
+            MAX_RONC_LOOKAHEAD = 5
+            for j in range(i + 1, min(i + 1 + MAX_RONC_LOOKAHEAD, len(sentences))):
+                next_sent = sentences[j]
+
+                # Same-page constraint (cross-page deferred to Phase 8)
+                if next_sent.get("page_number") != curr_page:
+                    break
+
+                if next_sent.get("_consumed"):
+                    continue
+
+                next_ronc_units = set(next_sent.get("_ronc_atomic_units") or [])
+
+                # RONC INTERSECTION = ILLEGAL SPLIT → MERGE
+                if curr_ronc_units & next_ronc_units:
+                    next_text = next_sent.get("text", "").strip()
+                    if not next_text:
+                        continue
+
+                    # Handle both period and non-period cases
+                    text_clean = text.rstrip('.') if text.endswith('.') else text
+
+                    # Perform RONC-driven merge
+                    merged_text = text_clean + " " + next_text
+                    merged = curr.copy()
+                    merged["text"] = merged_text
+                    merged["tts_text"] = merged_text
+                    merged["span_end_index"] = next_sent.get("span_end_index",
+                                                             curr.get("span_end_index"))
+                    merged["char_end"] = next_sent.get("char_end", curr.get("char_end"))
+                    merged["healed_truncation"] = True
+                    merged["_ronc_heal_triggered"] = True
+
+                    # Inherit semantic authority
+                    if next_sent.get("_has_semantic_authority") and not merged.get(
+                            "_has_semantic_authority"):
+                        merged["_has_semantic_authority"] = True
+                        merged["_authority_inherited_from"] = "ronc_truncation_heal"
+
+                    # RONC METADATA PROPAGATION (union)
+                    combined = curr_ronc_units | next_ronc_units
+                    merged["_ronc_atomic_units"] = sorted(combined)
+
+                    healed.append(merged)
+                    heal_count += 1
+                    ronc_driven_heals += 1
+                    ronc_triggered = True
+                    sentences[j]["_consumed"] = True
+
+                    if trace_id:
+                        logger.debug(
+                            "[%s] RONC-driven truncation heal (gap=%d): units=%s",
+                            trace_id, j - i, sorted(curr_ronc_units & next_ronc_units)
+                        )
+                    break
+
+        # RONC handled this sentence — skip legacy guards entirely
+        if ronc_triggered:
+            i += 1
+            continue
+
+        # =====================================================================
+        # PRIORITY 1 (LEGACY): Only process sentences ending with PERIOD
         # =====================================================================
         ends_with_period = text.endswith('.')
-
         if not ends_with_period:
             healed.append(curr)
             i += 1
@@ -7747,9 +12142,9 @@ def _heal_truncated_sentences(
             continue
 
         # =====================================================================
-        # EXTENDED LOOKAHEAD: Search for continuation (hopping over artifacts)
+        # PRIORITY 1 LEGACY LOOKAHEAD: Search for continuation (heuristic)
+        # Only reached if RONC did not trigger above.
         # =====================================================================
-        curr_page = curr.get("page_number")
         found_continuation = False
         MAX_LOOKAHEAD = 5
 
@@ -7769,7 +12164,22 @@ def _heal_truncated_sentences(
                 continue
 
             # CONTINUATION SIGNAL: Lowercase start = strong match
-            if next_text[0].islower():
+            first_char = next_text[0]
+            second_char = next_text[1] if len(next_text) > 1 else ""
+
+            is_continuation = (
+                    first_char.islower() or
+                    (
+                            first_char in {",", ";", ":", "—", "–"} and
+                            second_char.islower()
+                    ) or
+                    (
+                            first_char in {"(", "[", "{"} and
+                            second_char.islower()
+                    )
+            )
+
+            if is_continuation:
                 # Perform Merge
                 merged_text = text_no_period + " " + next_text
 
@@ -7781,8 +12191,22 @@ def _heal_truncated_sentences(
                 merged["char_end"] = next_sent.get("char_end", curr.get("char_end"))
                 merged["healed_truncation"] = True
 
+                # PATCH: Inherit semantic authority from continuation sentence
+                if next_sent.get("_has_semantic_authority") and not merged.get(
+                        "_has_semantic_authority"):
+                    merged["_has_semantic_authority"] = True
+                    merged["_authority_inherited_from"] = "truncation_heal_continuation"
+
+                # RONC METADATA PROPAGATION (Phase 4 — Passive, NO decisions)
+                left_units = set(curr.get("_ronc_atomic_units") or [])
+                right_units = set(next_sent.get("_ronc_atomic_units") or [])
+                combined = left_units | right_units
+                if combined:
+                    merged["_ronc_atomic_units"] = sorted(combined)
+
                 healed.append(merged)
                 heal_count += 1
+                heuristic_driven_heals += 1
                 found_continuation = True
 
                 # Mark the future sentence as consumed so the main loop skips it
@@ -7799,8 +12223,27 @@ def _heal_truncated_sentences(
             healed.append(curr)
             i += 1
 
+    # =========================================================================
+    # PHASE 7 INVARIANT (DEBUG ONLY)
+    # Healing must not lose sentences unexpectedly
+    # =========================================================================
+    if trace_id and __debug__:
+        consumed_count = sum(
+            1 for s in sentences
+            if isinstance(s, dict) and s.get("_consumed")
+        )
+        expected_min = len(sentences) - consumed_count
+        if len(healed) < expected_min:
+            logger.error(
+                "[%s] HEALING LOSS: expected >= %d sentences, got %d",
+                trace_id, expected_min, len(healed)
+            )
     if trace_id and heal_count:
-        logger.info("[%s] Truncation healing: %d sentences repaired", trace_id, heal_count)
+        logger.info(
+            "[%s] Truncation healing: %d sentences repaired "
+            "(ronc_driven=%d, heuristic=%d)",
+            trace_id, heal_count, ronc_driven_heals, heuristic_driven_heals
+        )
 
     return healed
 
@@ -7811,11 +12254,14 @@ def _heal_cross_page_truncations(
 ) -> List[Dict]:
     """
     Post-aggregation healing for sentences truncated at page/column boundaries.
-
     MODIFIED Phase 10 FINAL:
         1. LOOKAHEAD to skip garbage between valid sentences
         2. EXPANDED CUT_INDICATORS with relative pronouns
 
+    PHASE 7 NOTE:
+        RONC intersection is NOT used as merge trigger here.
+        Atomic unit IDs are page-scoped; cross-page collision possible.
+        Phase 8 will implement tuple-scoped identity for safe cross-page RONC.
     Args:
         all_sentences: List of all sentence dictionaries (all pages combined).
         trace_id: Optional trace ID for logging.
@@ -7830,12 +12276,20 @@ def _heal_cross_page_truncations(
     if not all_sentences:
         return all_sentences
 
+    # ---------------------------------------------------------------------
+    # Phase 7 Hygiene: Clear transient consumption flags
+    # Prevent cross-run state leakage during testing / retries
+    # ---------------------------------------------------------------------
+    for s in all_sentences:
+        if isinstance(s, dict):
+            s.pop("_consumed", None)
+
     healed: List[Dict] = []
-    skip_until: int = -1
+    consumed_indices: set = set()
     heal_count = 0
 
     for i, curr in enumerate(all_sentences):
-        if i <= skip_until:
+        if i in consumed_indices:
             continue
 
         text = curr.get("text", "").strip()
@@ -7876,7 +12330,19 @@ def _heal_cross_page_truncations(
                 continue
 
             first_char = peek_text[0]
-            is_continuation = first_char.islower() or len(peek_text.split()) <= 3
+            second_char = peek_text[1] if len(peek_text) > 1 else ""
+
+            # CONTINUATION SIGNALS (Phase 10, tightened)
+            # NOTE: Short sentences (≤3 tokens) starting uppercase are
+            # intentionally NOT merged to prevent false matches with
+            # headings like "Figure 2" or "Table 3".
+            is_continuation = (
+                    first_char.islower() or
+                    (
+                            first_char in {",", ";", ":", "—", "–"} and
+                            second_char.islower()
+                    )
+            )
 
             if is_continuation:
                 found_continuation = True
@@ -7905,6 +12371,34 @@ def _heal_cross_page_truncations(
         merged["healed_truncation"] = True
         merged["lookahead_distance"] = merge_target_idx - i
 
+        # PATCH: Inherit semantic authority from continuation sentence
+        if next_sent.get("_has_semantic_authority") and not merged.get("_has_semantic_authority"):
+            merged["_has_semantic_authority"] = True
+            merged["_authority_inherited_from"] = "cross_page_heal_continuation"
+
+        # RONC METADATA PROPAGATION (Phase 4 — Passive, NO decisions)
+        left_units = set(curr.get("_ronc_atomic_units") or [])
+        right_units = set(next_sent.get("_ronc_atomic_units") or [])
+        combined = left_units | right_units
+        if combined:
+            merged["_ronc_atomic_units"] = sorted(combined)
+
+        # =====================================================================
+        # PHASE 8 PLACEHOLDER: Cross-page RONC intersection detection
+        #
+        # RONC intersection is NOT used as merge trigger here because
+        # atomic unit IDs are page-scoped. Cross-page ID collision is possible.
+        #
+        # Phase 8 will implement tuple-scoped identity: (page_number, unit_id)
+        # =====================================================================
+        ronc_intersection = left_units & right_units
+        if ronc_intersection and trace_id:
+            logger.debug(
+                "[%s] Phase 8 note: Cross-page heal found RONC intersection=%s "
+                "(may indicate collision or true cross-page unit)",
+                trace_id, sorted(ronc_intersection)
+            )
+
         curr_page = curr.get("page_number", 1)
         next_page = next_sent.get("page_number", 1)
         if curr_page != next_page:
@@ -7913,7 +12407,9 @@ def _heal_cross_page_truncations(
 
         healed.append(merged)
         heal_count += 1
-        skip_until = merge_target_idx
+        # Mark ALL intervening sentences as consumed to prevent loss or duplication
+        for k in range(i + 1, merge_target_idx + 1):
+            consumed_indices.add(k)
 
         if trace_id:
             logger.debug(
@@ -8055,7 +12551,7 @@ def _segment_sentences(
         # =====================================================================
         # STEP 2: Map to source spans via char_to_span
         # =====================================================================
-        span_indices: set = set()
+        span_indices: set[int] = set()
         columns: set = set()
         pages: set = set()
         roles: set = set()
@@ -8117,12 +12613,14 @@ def _segment_sentences(
                 TextRole.HEADING.value if hasattr(TextRole, 'HEADING') else "heading",
                 TextRole.SUBHEADING.value if hasattr(TextRole, 'SUBHEADING') else "subheading",
             ]
-            primary_role = TextRole.BODY.value
+            # Find highest priority role present in the sentence
+            primary_role = None
             for priority_role in role_priority:
                 if priority_role in roles:
                     primary_role = priority_role
                     break
-            else:
+            # Fallback if no priority role found
+            if primary_role is None:
                 primary_role = sorted(roles)[0]
         else:
             primary_role = first_span.get("role", TextRole.BODY.value)
@@ -8149,7 +12647,19 @@ def _segment_sentences(
             "char_start": start_char,
             "char_end": end_char,
             "alignment_method": alignment_method,
+            "boundary_risks": [],
         }
+
+        # Explicitly consume primary_role for downstream logic
+        sentence_record["is_body"] = (primary_role == TextRole.BODY.value)
+        sentence_record["is_heading"] = primary_role in {
+            TextRole.HEADING.value if hasattr(TextRole, "HEADING") else "heading",
+            TextRole.SUBHEADING.value if hasattr(TextRole, "SUBHEADING") else "subheading",
+        }
+
+        # Structural risk flag: non-body sentence crossing multiple spans
+        if primary_role != TextRole.BODY.value and len(span_indices) > 1:
+            sentence_record["structural_risk"] = "non_body_multi_span"
 
         if sentence_bbox:
             sentence_record["bbox"] = sentence_bbox
@@ -8163,6 +12673,48 @@ def _segment_sentences(
             sentence_record["column_range"] = sorted(columns)
 
         sentence_record["source_span_count"] = len(span_indices)
+
+        # ==========================================================
+        # PHASE 6: Boundary Risk Analysis (NON-DESTRUCTIVE)
+        # ==========================================================
+        tokens = sent.split()
+        token_count = len(tokens)
+
+        # Risk 1: Leading conjunction
+        if sent.lstrip().lower().startswith(("and ", "or ", "but ")):
+            sentence_record["boundary_risks"].append("leading_conjunction")
+
+        # Risk 2: Very low token count
+        if token_count < 3:
+            sentence_record["boundary_risks"].append("low_token_count")
+
+        # Risk 3: Short sentence without terminal punctuation
+        if token_count < 5 and not sent.rstrip().endswith((".", "!", "?")):
+            sentence_record["boundary_risks"].append("short_no_terminal_punct")
+
+        # Risk 4: Single-span fragment
+        if len(span_indices) == 1:
+            sentence_record["boundary_risks"].append("single_span_fragment")
+
+        # ==========================================================
+        # AUTHORITY PROPAGATION (Phase 6)
+        # ==========================================================
+        if any(all_spans[idx].get("_has_semantic_authority") for idx in span_indices):
+            sentence_record["_has_semantic_authority"] = True
+
+        # ==========================================================
+        # RONC METADATA PROPAGATION (Phase 4 — Passive, NO decisions)
+        # ==========================================================
+        ronc_units = set()
+        for idx in span_indices:
+            if 0 <= idx < len(all_spans):
+                unit_id = all_spans[idx].get("_ronc_atomic_unit_id")
+                if unit_id is not None:
+                    ronc_units.add(unit_id)
+
+        if ronc_units:
+            sentence_record["_ronc_atomic_units"] = sorted(ronc_units)
+
         processed_sentences.append(sentence_record)
 
     # =========================================================================
@@ -8194,6 +12746,11 @@ def _normalize_punctuation_spacing(text: str) -> str:
         3. Ensure space after comma: "word,word" -> "word, word"
         4. Collapse multiple spaces
     """
+
+    # ORDERING INVARIANT:
+    # This method MUST run strictly BEFORE Phase 6 (sentence segmentation).
+    # It MUST NOT be invoked after sentence boundaries are inferred.
+
     if not text:
         return ""
 
@@ -8292,6 +12849,9 @@ def _find_actual_end_position(full_text: str, start: int, normalized_target: str
             text_idx += 1
 
         # Guard: if we failed to match within bounded scan, stop to prevent drift
+        # TODO (Batch B): Return bounded_resync flag to caller for alignment_risk tagging
+        # Currently returns text_idx without indicating resync occurred.
+        # Phase 6 requirement: sentence should receive alignment_risk="bounded_resync"
         if scan_count >= max_scan:
             break
 
@@ -8418,7 +12978,11 @@ def _normalize_text(input_text: str) -> str:
 
     Returns:
         Normalized text string.
+
     """
+    # This normalization is for header/footer band comparison ONLY.
+    # It MUST NOT be used for sentence text, joining, or TTS.
+
     if not input_text:
         return ""
     result = input_text.lower()
@@ -8990,6 +13554,129 @@ def _filter_spans_by_global_bands(
     return filtered_spans, excluded_spans
 
 
+def _apply_global_band_signals(
+        classified_spans: List[Dict],
+        global_header_bands: List[int],
+        global_footer_bands: List[int],
+        *,
+        header_samples: List[str] = None,
+        footer_samples: List[str] = None,
+        page_height: float = None,
+        trace_id: str = None,
+) -> None:
+    """
+    Schema v2.0: Apply global header/footer signals WITHOUT excluding.
+    Mutates spans in place by adding candidate flags (via _flag_candidate()).
+
+    Ported from _filter_spans_by_global_bands:
+      - same band match logic
+      - same similarity thresholding
+      - same "body-like shield" (lowercase start / dense text)
+    """
+
+    if not classified_spans:
+        return
+
+    header_band_set: set = set(global_header_bands or [])
+    footer_band_set: set = set(global_footer_bands or [])
+    if not header_band_set and not footer_band_set:
+        return
+
+    tolerance = _GLOBAL_BAND_MERGE_TOLERANCE
+    normalized_header_samples = [_normalize_text(s) for s in (header_samples or []) if s]
+    normalized_footer_samples = [_normalize_text(s) for s in (footer_samples or []) if s]
+
+    kept_band_matches = 0
+    flagged_band_matches = 0
+
+    for span in classified_spans:
+        if not isinstance(span, dict):
+            continue
+
+        # Role shield (same as legacy): don't band-flag semantic roles
+        role = span.get("role")
+        if role in {
+            TextRole.CAPTION.value,
+            TextRole.HEADING.value,
+            TextRole.SUBHEADING.value,
+        }:
+            continue
+
+        bbox = span.get("bbox")
+        if bbox is None or len(bbox) < 4:
+            # Uncertain geometry: do not band-flag
+            continue
+
+        span_y = bbox[1]
+        span_y_rounded = round(span_y, _GLOBAL_BAND_ROUNDING_PRECISION)
+
+        matches_header_band = any(
+            abs(span_y_rounded - band) <= tolerance for band in header_band_set)
+        matches_footer_band = any(
+            abs(span_y_rounded - band) <= tolerance for band in footer_band_set)
+
+        if not matches_header_band and not matches_footer_band:
+            continue
+
+        span_text = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
+        normalized_span_text = _normalize_text(span_text)
+
+        # Body-like shield logic (symmetrical, per legacy)
+        is_continuation = bool(span_text) and span_text[0].islower()
+        is_dense_body = len(span_text) > 60 or len(span_text.split()) > 6
+        is_body_like = is_continuation or is_dense_body
+
+        should_flag = False
+        flag_reason = ""
+
+        # Header
+        if matches_header_band:
+            if is_body_like or not normalized_header_samples:
+                should_flag = False
+            else:
+                similarity_threshold = (
+                    _FILTER_SHORT_TEXT_THRESHOLD
+                    if len(normalized_span_text) < _FILTER_SHORT_TEXT_LENGTH
+                    else _FILTER_FUZZY_MATCH_THRESHOLD
+                )
+                for sample in normalized_header_samples:
+                    similarity = _text_similarity(normalized_span_text, sample)
+                    if similarity >= similarity_threshold:
+                        should_flag = True
+                        flag_reason = f"global_header_match_{similarity:.2f}"
+                        break
+
+        # Footer (only if not already flagged by header)
+        if (not should_flag) and matches_footer_band:
+            if is_body_like or not normalized_footer_samples:
+                should_flag = False
+            else:
+                similarity_threshold = (
+                    _FILTER_SHORT_TEXT_THRESHOLD
+                    if len(normalized_span_text) < _FILTER_SHORT_TEXT_LENGTH
+                    else _FILTER_FUZZY_MATCH_THRESHOLD
+                )
+                for sample in normalized_footer_samples:
+                    similarity = _text_similarity(normalized_span_text, sample)
+                    if similarity >= similarity_threshold:
+                        should_flag = True
+                        flag_reason = f"global_footer_match_{similarity:.2f}"
+                        break
+
+        if should_flag:
+            # E2 taxonomy: global band matches are high-confidence → requires_review=False
+            _flag_candidate(span, flag_reason, requires_review=False)
+            flagged_band_matches += 1
+        else:
+            kept_band_matches += 1
+
+    if trace_id:
+        logger.debug(
+            "[%s] Global band signals applied: flagged=%d kept_by_shield=%d total=%d",
+            trace_id, flagged_band_matches, kept_band_matches, len(classified_spans)
+        )
+
+
 def normalize_header_footer_across_document(
         page_outputs: List[Dict],
         trace_id: str = None
@@ -9156,6 +13843,9 @@ def _sanitize_for_tts(
     Returns:
         TTS-safe sanitized text.
     """
+    # This method MUST be applied ONLY to finalized sentences.
+    # It MUST NOT operate on provisional or pre-segmentation text.
+
     # =========================================================================
     # HANDLE EMPTY INPUT
     # =========================================================================
@@ -9321,6 +14011,19 @@ def _sanitize_for_tts(
         ]:
             needs_punct = False
 
+        # =====================================================================
+        # PATCH 8A: Don't add period to short fragments ending with incomplete words
+        # These are lead-in fragments that need merging, not sentence termination.
+        # Threshold (8 words) mirrors _semantic_completeness_action logic.
+        # =====================================================================
+        if needs_punct:
+            words = text.split()
+            if words and len(words) <= 8:
+                last_word = words[-1].lower().rstrip(",:;\"'")
+                if last_word in _STITCH_INCOMPLETE_ENDINGS:
+                    needs_punct = False
+                    modifications.append("incomplete_ending_preserved")
+
         if needs_punct:
             text = text + "."
             modifications.append("terminal_punct_added")
@@ -9350,6 +14053,27 @@ def _sanitize_for_tts(
             modifications,
             text[:50]
         )
+
+    # =========================================================================
+    # v1.3.2: Decoder runaway defense (comma-dense long sentences)
+    # Long sentences with excessive clause-chaining can hit max_decoder_steps.
+    # Break at conjunction points to create breath boundaries.
+    # NOTE: Moved outside conditional block to run unconditionally.
+    # =========================================================================
+    comma_count = text.count(",")
+
+    if comma_count >= 4 and len(text) > 180:
+        def _split_conj(m):
+            conj = m.group(1)
+            return f". {conj.capitalize()} "
+
+        text = re.sub(r",\s+(and|or)\s+", _split_conj, text, flags=re.IGNORECASE)
+
+        if trace_id:
+            logger.debug(
+                "[%s] Sanitize: broke clause-dense sentence (commas=%d, len=%d)",
+                trace_id, comma_count, len(text)
+            )
 
     return text
 
@@ -9574,6 +14298,11 @@ def _finalize_chunk(
     # =========================================================================
     # FILTER NON-VIABLE SENTENCES
     # =========================================================================
+    # IMPORTANT (INVARIANT):
+    # Phase 8 must never override semantic authority.
+    # Once _has_semantic_authority is set upstream, it is final.
+    # If semantic resolution (Phase 5) included a sentence, it MUST survive.
+    # =========================================================================
     viable_sentences: List[Dict] = []
     rejection_counts: Dict[str, int] = {}
 
@@ -9582,6 +14311,9 @@ def _finalize_chunk(
         sent_role = s.get("role", TextRole.BODY.value)
         is_continuation = s.get("is_continuation", False)
 
+        # PATCH P0: Respect semantic authority from upstream resolution
+        has_authority = s.get("_has_semantic_authority", False)
+
         is_viable, reason = _is_tts_viable(
             tts_text,
             role=sent_role,
@@ -9589,7 +14321,8 @@ def _finalize_chunk(
             trace_id=trace_id
         )
 
-        if is_viable:
+        # PATCH P0: Authority overrides viability rejection
+        if is_viable or has_authority:
             viable_sentences.append(s)
         else:
             rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
@@ -9598,6 +14331,18 @@ def _finalize_chunk(
                 logger.debug(
                     "[%s] Sentence rejected: reason=%s, text='%s...'",
                     trace_id, reason, tts_text[:40]
+                )
+
+    # =========================================================================
+    # DEBUG: Authority violation assertion
+    # =========================================================================
+    if trace_id and __debug__:
+        viable_ids = {id(v) for v in viable_sentences}
+        for s in sentences:
+            if s.get("_has_semantic_authority") and id(s) not in viable_ids:
+                logger.error(
+                    "[%s] AUTHORITY VIOLATION: authoritative sentence dropped: '%s...'",
+                    trace_id, s.get("tts_text", "")[:40]
                 )
 
     if not viable_sentences:
@@ -9614,7 +14359,15 @@ def _finalize_chunk(
     full_text = " ".join(s["tts_text"] for s in viable_sentences)
 
     is_viable, reason = _is_tts_viable(full_text, trace_id=trace_id)
-    if not is_viable:
+
+    # PATCH P0: Chunk-level authority check
+    # If ANY sentence in this chunk has semantic authority, do not reject
+    has_any_authority = any(
+        s.get("_has_semantic_authority", False)
+        for s in viable_sentences
+    )
+
+    if not is_viable and not has_any_authority:
         if trace_id:
             logger.debug(
                 "[%s] Full chunk rejected: reason=%s",
@@ -9833,20 +14586,32 @@ def extract_page(
     )
 
     # =========================================================================
-    # STEP 7: Filter Spans (The "Shield")
+    # STEP 7: Soft Classification (Schema v2.0 - Lossless)
     # =========================================================================
-    valid_spans, excluded_spans = _filter_spans(raw_spans, regions)
+    import copy
+
+    # P0 AMENDMENT 4: Deep copy raw_spans to preserve immutability
+    raw_spans_immutable = raw_spans  # Keep original reference
+    classified_spans = [copy.deepcopy(s) for s in raw_spans]
+
+    classified_spans = _soft_classify_spans(
+        classified_spans,
+        regions,
+        page_width=page.rect.width,
+        page_height=page.rect.height,
+        trace_id=trace_id,
+    )
 
     # =========================================================================
-    # STEP 8: Clean Spans (The "Skin")
+    # STEP 8: Clean Spans (The "Skin") — operates on classified copies
     # =========================================================================
-    _clean_spans(valid_spans)
+    _clean_spans(classified_spans)
 
     # =========================================================================
     # STEP 9: Assign Roles (The "Classifier")
     # =========================================================================
     _assign_roles(
-        valid_spans,
+        classified_spans,
         regions,
         page_width=page.rect.width,
         page_height=page.rect.height,
@@ -9857,7 +14622,7 @@ def extract_page(
     # STEP 10: Associate Captions (The "Links")
     # =========================================================================
     _associate_captions_to_figures(
-        valid_spans,
+        classified_spans,
         figure_tuples,
         page_height=page.rect.height,
         trace_id=trace_id
@@ -9866,21 +14631,169 @@ def extract_page(
     # =========================================================================
     # STEP 11: Assign span_index (Sacred Index — must be last)
     # =========================================================================
-    for idx, span in enumerate(valid_spans):
+    for idx, span in enumerate(classified_spans):
         span["span_index"] = idx
+
+    # =========================================================================
+    # STEP 11.1: Assign canonical span identity (Stage 2 authority anchor)
+    # =========================================================================
+    # This ID must be assigned in Stage 1 so it:
+    #   - persists into *_raw.json
+    #   - survives deep copies and windowing
+    #   - allows Option A RONC remapping
+    #
+    # Format: P{page_idx}:{local_idx}
+    # page_num here is ZERO-BASED and aligned with Stage 2 enumerate(raw_data_list)
+
+    for local_idx, span in enumerate(classified_spans):
+        span["_canonical_span_id"] = f"P{page_num}:{local_idx}"
+
+    # =========================================================================
+    # STEP 12: Derive Legacy Content (Backward Compatibility)
+    # =========================================================================
+    legacy_content = _derive_legacy_content(classified_spans)
+    legacy_excluded = [s for s in classified_spans if
+                       s.get("_exclusion_candidate") and not s.get("_exclusion_protected")]
 
     return {
         "metadata": {
             "page_number": page_num + 1,
             "width": page.rect.width,
             "height": page.rect.height,
-            "global_median_font_size": global_median_font_size,  # Store for Stage 2
+            "global_median_font_size": global_median_font_size,
         },
         "structure": regions,
-        "content": valid_spans,
-        "excluded": excluded_spans
+        # === SCHEMA v2.0 ===
+        "raw_spans": raw_spans_immutable,  # Immutable extraction output
+        "classified_spans": classified_spans,  # All spans with soft flags
+        # === LEGACY (deprecated) ===
+        "content": legacy_content,  # Derived for backward compat
+        "excluded": legacy_excluded,  # Derived for backward compat
+        "_schema_version": "2.0",
     }
 
+
+def _passes_inline_continuation_gate(anchor: Dict, target: Dict) -> bool:
+    """
+    Determines if target span is likely inline continuation of anchor.
+
+    Gates:
+      1) Anchor lacks terminal punctuation
+      2) Target starts lowercase or with connective
+      3) Target doesn't match obvious annotation/caption patterns
+    """
+    anchor_text = (anchor.get("cleaned_text") or anchor.get("raw_text") or "").strip()
+    target_text = (target.get("cleaned_text") or target.get("raw_text") or "").strip()
+
+    if not anchor_text or not target_text:
+        return False
+
+    # Gate 1: anchor must NOT end a sentence
+    if anchor_text[-1] in ".!?":
+        return False
+
+    # Gate 2: target looks like continuation
+    first_char = target_text[0]
+    first_word = target_text.split()[0].lower() if target_text.split() else ""
+    connectives = {
+        "and", "or", "but", "in", "to", "for", "the", "a", "an", "of",
+        "is", "are", "was", "were", "that", "which", "with", "as", "by",
+    }
+
+    if not (first_char.islower() or first_word in connectives):
+        return False
+
+    # Gate 3: disqualify obvious caption/annotation patterns
+    if target_text.startswith(("Figure ", "Table ", "Note:", "See ")):
+        return False
+
+    return True
+
+
+def _semantic_completeness_action(
+        text: str,
+        has_authority: bool = False,
+        trace_id: str = None
+) -> Tuple[str, Optional[str]]:
+    """
+    Decide what to do with a candidate sentence for TTS quality:
+    AUTHORITY CONTRACT:
+        If has_authority is True, this function MUST return ("keep", None).
+        No heuristic rule is permitted to skip or merge authoritative sentences.
+      - "keep": sentence is fine
+      - "merge_next": likely a lead-in fragment; merge into next sentence
+      - "skip": broken clause/label that should not be spoken
+
+    Conservative: prefer merge_next over skip when uncertain.
+    """
+    if has_authority:
+        return "keep", None
+
+    if not text:
+        return "skip", "empty"
+
+    text = text.strip()
+    if not text:
+        return "skip", "empty"
+
+    lower = text.lower()
+    words = text.split()
+    wc = len(words)
+
+    # -------------------------------------------------------------------------
+    # Rule 1: Dangling preposition endings (short sentences only)
+    # -------------------------------------------------------------------------
+    DANGLING_PREP = ("to", "of", "for", "with", "by", "in", "on", "at", "from")
+    if wc <= 8:
+        for w in DANGLING_PREP:
+            if lower.endswith(f" {w}.") or lower.endswith(f" {w}"):
+                return "merge_next", f"dangling_preposition:{w}"
+
+    # -------------------------------------------------------------------------
+    # Rule 2: Dangling copula/auxiliary endings (very short only)
+    # -------------------------------------------------------------------------
+    DANGLING_VERB = (
+        "is", "are", "was", "were", "has", "have", "been",
+        "called", "named", "termed", "known"
+    )
+    # Original threshold (1-6 words): all dangling verbs
+    if wc <= 6:
+        for w in DANGLING_VERB:
+            if lower.endswith(f" {w}.") or lower.endswith(f" {w}"):
+                return "merge_next", f"dangling_verb:{w}"
+    # PATCH 9A: Surgical extension (7-8 words) for empirically proven failures:
+    #   "The central region of each intrafusal fiber has." (8 words)
+    #   "The much slower, highly affective component is called." (8 words)
+    elif wc <= 8:
+        for w in ("has", "called"):  # Only proven failure verbs
+            if lower.endswith(f" {w}.") or lower.endswith(f" {w}"):
+                return "merge_next", f"dangling_verb:{w}"
+
+    # -------------------------------------------------------------------------
+    # Rule 3: Lowercase-leading short fragments (mid-sentence spill)
+    # -------------------------------------------------------------------------
+    if text[0].islower() and wc <= 7:
+        return "merge_next", "lowercase_fragment"
+
+    # -------------------------------------------------------------------------
+    # Rule 4: Discourse markers are always valid
+    # -------------------------------------------------------------------------
+    DISCOURSE_OK = {
+        "no.", "yes.", "often.", "always.", "never.", "sometimes.",
+        "however.", "therefore.", "thus.", "indeed.", "perhaps.",
+        "probably.", "certainly.", "clearly.", "obviously.",
+        "in contrast.", "for example.", "for instance.",
+    }
+    if lower in DISCOURSE_OK:
+        return "keep", None
+
+    # -------------------------------------------------------------------------
+    # Rule 5: Very short label-like phrases → merge (not skip)
+    # -------------------------------------------------------------------------
+    if wc <= 3 and text.endswith("."):
+        return "merge_next", "short_label_candidate"
+
+    return "keep", None
 
 def compile_tts_ready_content(
         raw_data_list: List[Dict],
@@ -9927,38 +14840,69 @@ def compile_tts_ready_content(
         footer_sample_texts = [f.get("sample_text", "") for f in document_footers]
         page_height = page_data.get("metadata", {}).get("height", _FILTER_DEFAULT_PAGE_HEIGHT)
 
-        filtered_spans, excluded_spans = _filter_spans_by_global_bands(
-            page_data,
-            global_bands["header_bands"],
-            global_bands["footer_bands"],
-            header_samples=header_sample_texts,
-            footer_samples=footer_sample_texts,
-            page_height=page_height,
-            trace_id=trace_id
-        )
+        schema_version = page_data.get("_schema_version", "1.0")
 
-        # Store excluded for debugging/analysis
-        page_data["excluded_by_global_bands"] = excluded_spans
+        if schema_version == "2.0":
+            classified = page_data.get("classified_spans", []) or []
+
+            _apply_global_band_signals(
+                classified,
+                global_bands["header_bands"],
+                global_bands["footer_bands"],
+                header_samples=header_sample_texts,
+                footer_samples=footer_sample_texts,
+                page_height=page_height,
+                trace_id=trace_id,
+            )
+
+            # For debugging parity with legacy fields
+            page_data["excluded_by_global_bands"] = [
+                s for s in classified
+                if s.get("_exclusion_candidate")
+                   and not s.get("_exclusion_protected")
+                   and any(
+                    (r.startswith("global_header_match_") or r.startswith("global_footer_match_"))
+                    for r in (s.get("_exclusion_candidate_reasons") or [])
+                )
+            ]
+
+            spans_for_processing = classified
+
+        else:
+            filtered_spans, excluded_spans = _filter_spans_by_global_bands(
+                page_data,
+                global_bands["header_bands"],
+                global_bands["footer_bands"],
+                header_samples=header_sample_texts,
+                footer_samples=footer_sample_texts,
+                page_height=page_height,
+                trace_id=trace_id
+            )
+            page_data["excluded_by_global_bands"] = excluded_spans
+            spans_for_processing = filtered_spans
 
         # =====================================================================
         # PHASE 3.0: Content-Flow Outlier Refinement
-        # Detects single-page footers, attributions, isolated metadata that
-        # escaped global band detection. Mutates roles to FOOTNOTE/HEADER_ARTIFACT.
-        # Must run AFTER global bands, BEFORE role annotation loop.
+        # (legacy mutates roles; in Schema v2.0 we can later replace with signals)
         # =====================================================================
+        _refine_roles_via_content_flow(spans_for_processing, trace_id=trace_id)
 
-        _refine_roles_via_content_flow(filtered_spans, trace_id=trace_id)
-
-        # PHASE 0: Track bbox-invalid spans for auditability
-        bbox_invalid_spans = [s for s in filtered_spans if not s.get("bbox_is_valid", True)]
+        bbox_invalid_spans = [s for s in spans_for_processing if not s.get("bbox_is_valid", True)]
         page_data["bbox_invalid_spans"] = bbox_invalid_spans
 
-        # PHASE 1: Preserve lossless text assembly while protecting geometry math
-        spans_for_text = list(filtered_spans)
-        spans_for_geometry = [s for s in filtered_spans if s.get("bbox_is_valid", True)]
+        spans_for_text = list(spans_for_processing)
 
         if not spans_for_text:
             continue
+        # Assigned ONCE per page, BEFORE any windowing or semantic mutation
+        for local_idx, sp in enumerate(spans_for_text):
+            # Canonical ID MUST already exist from Stage 1
+            if "_canonical_span_id" not in sp:
+                sp["_canonical_span_id"] = f"P{page_idx}:{local_idx}"
+
+        # cache
+        page_span_cache[page_idx] = spans_for_text
+        page_metadata_cache[page_idx] = page_data.get("metadata", {})
 
         # PHASE 1.5: Continuity-Aware Role Resolution (Stream-First Foundation)
         _apply_continuity_role_resolution(spans_for_text, trace_id=trace_id)
@@ -9970,9 +14914,16 @@ def compile_tts_ready_content(
             role = span.get("role", TextRole.BODY.value)
 
             if role in _TTS_NON_VIABLE_ROLES:
-                span["_tts_excluded"] = True
-                span["_tts_exclude_reason"] = role
-                excluded_by_role.append(span)
+                # PATCH 7B-C (CORRECTED):
+                # Do NOT exclude inside_figure spans at Phase 0.
+                # They must survive into semantic resolution (7B-E).
+                if role == TextRole.INSIDE_FIGURE.value:
+                    span["_tts_excluded"] = False
+                    span["_tts_exclude_reason"] = None
+                else:
+                    span["_tts_excluded"] = True
+                    span["_tts_exclude_reason"] = role
+                    excluded_by_role.append(span)
             else:
                 span["_tts_excluded"] = False
                 span["_tts_exclude_reason"] = None
@@ -10207,7 +15158,6 @@ def compile_tts_ready_content(
                         except Exception:
                             body_peer_stream = None
                             body_peer_column = None
-                            dominant_body_stream = None
 
                         # Apply full normalization (NO hardcoded column fallback)
                         if body_peer_stream:
@@ -10232,11 +15182,21 @@ def compile_tts_ready_content(
                 trace_id, rescued_count
             )
 
-        # Continue with filtering (rescued spans now included)
-        spans_for_text = [s for s in spans_for_text if not s.get("_tts_excluded", False)]
+        # =====================================================================
+        # v1.2.1 CRITICAL: DO NOT filter before caching (lossless cache contract)
+        # Pass 2 semantic window must see ALL spans (including excluded).
+        # =====================================================================
 
-        # Cache the processed spans for Pass 2
-        page_span_cache[page_idx] = spans_for_text
+        # Keep a local filtered list ONLY for any immediate Pass-1-only operations
+        # (If Pass 1 does not need the filtered list, you can omit this entirely.)
+        filtered_spans_for_tts = [s for s in spans_for_text if not s.get("_tts_excluded", False)]
+        _ = filtered_spans_for_tts  # intentional snapshot (debug/audit)
+
+        # DO NOT overwrite page_span_cache[page_idx] here.
+        # page_span_cache[page_idx] was already populated earlier with the lossless list.
+        # page_span_cache[page_idx] = spans_for_text  # <-- intentionally NOT done
+
+        # Keep metadata cache as before
         page_metadata_cache[page_idx] = {
             "page_num": page_num,
             "continuity": page_data.get("continuity", {}),
@@ -10266,20 +15226,133 @@ def compile_tts_ready_content(
         if not window_spans:
             continue
 
+        _resolve_semantic_continuity(window_spans, page_span_range, trace_id=trace_id)
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # RONC v2.0 — Contract-Maker Architecture
+        # Must run AFTER semantic continuity resolution, BEFORE exclusion translation
+        #
+        # Pipeline: Boundary Profiling → Candidate Pools → Affinity Scoring →
+        #           Link Reconciliation → Protection Assignment → Legacy Derivation
+        #
+        # Output: Every span receives _ronc_contract + legacy fields
+        # ═══════════════════════════════════════════════════════════════════════
+        _ronc_audit = _build_ronc_contract_v2(window_spans, trace_id=trace_id)
+
+
+        # ---------------------------------------------------------------------
+        # RONC PERSISTENCE: propagate contract and legacy fields to canonical spans
+        # ---------------------------------------------------------------------
+        for sp in window_spans:
+            # Only current-page spans participate in canonical authority
+            if sp.get("_window_position") != "current":
+                continue
+
+            source_page_idx = sp.get("_source_page_idx")
+            if source_page_idx is None:
+                continue
+
+            # Resolve canonical span via CID
+            cid = sp.get("_canonical_span_id")
+            if not cid:
+                continue
+
+            try:
+                page_i, local_i = cid[1:].split(":")
+                page_i = int(page_i)
+                local_i = int(local_i)
+            except Exception:
+                continue  # Defensive: malformed canonical ID
+
+            canonical_list = page_span_cache.get(page_i)
+            if not canonical_list or not (0 <= local_i < len(canonical_list)):
+                continue
+
+            canonical_sp = canonical_list[local_i]
+
+            # ═══════════════════════════════════════════════════════════════
+            # RONC v2.0: Persist full contract (authoritative)
+            # ═══════════════════════════════════════════════════════════════
+            contract = sp.get("_ronc_contract")
+            if contract:
+                existing = canonical_sp.get("_ronc_contract", {})
+
+                canonical_sp["_ronc_contract"] = {
+                    "protection": {
+                        **existing.get("protection", {}),
+                        **contract.get("protection", {}),
+                    },
+                    "links": {
+                        **existing.get("links", {}),
+                        **contract.get("links", {}),
+                    },
+                }
+
+            # ═══════════════════════════════════════════════════════════════
+            # Legacy fields (derived from contract, for backward compatibility)
+            # ═══════════════════════════════════════════════════════════════
+            canonical_sp["_ronc_atomic_unit_id"] = sp.get("_ronc_atomic_unit_id")
+            canonical_sp["_ronc_atomic_role"] = sp.get("_ronc_atomic_role")
+            canonical_sp["_ronc_break_after"] = sp.get("_ronc_break_after")
+            canonical_sp["_ronc_rescue_applied"] = sp.get("_ronc_rescue_applied")
+
+            # A2 continuity signals (preserved)
+            canonical_sp["a2_continues_from_previous"] = sp.get("a2_continues_from_previous")
+            canonical_sp["a2_continues_to_next"] = sp.get("a2_continues_to_next")
+
+        # =====================================================================
+        # PHASE 2.0.5–2.0.8: ADJUDICATION CHECKPOINT (Lead Option C)
+        #
+        # Contract guarantees at this point:
+        #   1. Every span has _tts_excluded explicitly set (True or False)
+        #   2. Every span has _semantic_disposition set (or loudly defaulted)
+        #   3. Line-coherent stream inheritance applied (semantic-gated)
+        #   4. Exclusion decisions synced back to page cache (audit/debug)
+        #
+        # Reconstruction input (window_spans_for_text) is CLEAN.
+        # =====================================================================
+
+        # 1) Translate soft exclusion + semantic signals into authoritative flags
+        _translate_exclusion_flags(window_spans, trace_id=trace_id)
+
+        # 2) Apply line-coherent stream inheritance (semantic-gated)
+        #    NOTE: This MUST respect _tts_excluded
+        _apply_line_coherent_streams(window_spans, trace_id=trace_id)
+
+        # 3) Sync adjudicated span state back to page cache (audit + convergence)
+        _sync_window_spans_back_to_cache(
+            window_spans,
+            page_span_cache,
+            trace_id=trace_id
+        )
+
+        # 4) HARD FILTER: reconstruction input MUST be clean
+        window_spans_for_text = [
+            sp for sp in window_spans
+            if isinstance(sp, dict) and not sp.get("_tts_excluded", False)
+        ]
+
         # Reconstruct text from window (cross-page aware)
-        window_text, window_span_map, window_char_to_span = _reconstruct_text_for_segmentation(
-            window_spans, trace_id
+        window_text, span_map, char_to_span = _reconstruct_text_for_segmentation(
+            window_spans_for_text, trace_id=trace_id
         )
 
         # Segment on full window text
         window_sentences = _segment_sentences(
-            window_text, window_char_to_span, window_spans, trace_id
+            window_text,
+            char_to_span,
+            window_spans_for_text,
+            trace_id=trace_id
         )
 
         # Filter to sentences starting in current page, remap indices
         page_sentences = _filter_sentences_to_page(
-            window_sentences, window_spans, page_span_range,
-            page_idx, page_num, trace_id
+            window_sentences,
+            window_spans_for_text,
+            page_span_range,
+            page_idx,
+            page_num,
+            trace_id
         )
 
         # Tag sentences with continuity info (page_number already set by filter)
@@ -10313,15 +15386,15 @@ def compile_tts_ready_content(
                         trace_id, start_idx
                     )
                 sent["role"] = TextRole.BODY.value
-            elif start_idx >= len(spans_for_text):
+            elif start_idx >= len(window_spans_for_text):
                 if trace_id:
                     logger.warning(
-                        "[%s] span_start_index %d >= len(spans_for_text) %d, defaulting to BODY",
-                        trace_id, start_idx, len(spans_for_text)
+                        "[%s] span_start_index %d >= len(window_spans_for_text) %d, defaulting to BODY",
+                        trace_id, start_idx, len(window_spans_for_text)
                     )
                 sent["role"] = TextRole.BODY.value
             else:
-                role_from_span = spans_for_text[start_idx].get("role", TextRole.BODY.value)
+                role_from_span = window_spans_for_text[start_idx].get("role", TextRole.BODY.value)
 
                 # =============================================================
                 # PHASE 2.8.1: Caption Continuity Guard
@@ -10345,8 +15418,40 @@ def compile_tts_ready_content(
                     )
                     if has_body_characteristics:
                         role_from_span = TextRole.BODY.value
-
                 sent["role"] = role_from_span
+
+            # =================================================================
+            # PHASE 2.8.2: SEMANTIC AUTHORITY PROPAGATION (CRITICAL)
+            #
+            # If a sentence is derived from any span that semantic resolution
+            # explicitly INCLUDED (or inside_figure rescued), downstream heuristics
+            # are NOT allowed to skip it.
+            #
+            # WHY HERE:
+            # - Here we still have window_spans_for_text in scope.
+            # - Later (chunking loop), we only have sentences, not their source spans.
+            # =================================================================
+            start_idx = sent.get("span_start_index", 0)
+            end_idx = sent.get("span_end_index", start_idx)
+            if not isinstance(end_idx, int) or end_idx < start_idx:
+                end_idx = start_idx
+
+            # Respect pre-existing authority (RONC or semantic resolution)
+            has_semantic_authority = sent.get("_has_semantic_authority", False)
+
+            for sp_idx in range(start_idx, min(end_idx + 1, len(window_spans_for_text))):
+                sp = window_spans_for_text[sp_idx]
+                if (
+                        sp.get("_inside_figure_rescued")
+                        or (
+                        sp.get("_semantic_disposition") == _SEM_DISP_INCLUDED
+                        and sp.get("_semantic_confidence", 0.0) >= 0.6
+                )
+                ):
+                    has_semantic_authority = True
+                    break
+
+            sent["_has_semantic_authority"] = has_semantic_authority
 
             all_sentences.append(sent)
 
@@ -10373,9 +15478,20 @@ def compile_tts_ready_content(
     skipped_count = 0
     prev_sentence_text = ""
 
+    pending_merge_prefix = ""  # v1.3.2: Accumulator for merge_next fragments
+
     for i, sent in enumerate(all_sentences):
         tts_text = _sanitize_for_tts(sent.get("text", ""), trace_id=trace_id)
         sent_role = sent.get("role", TextRole.BODY.value)
+
+        # =====================================================================
+        # PATCH 8B: Strip trailing punctuation from fragment before merging
+        # Safety net for merge_next fragments that may have acquired punctuation.
+        # =====================================================================
+        if pending_merge_prefix:
+            clean_prefix = pending_merge_prefix.rstrip().rstrip(".!?")
+            tts_text = clean_prefix + " " + tts_text.lstrip()
+            pending_merge_prefix = ""  # Clear after use
 
         # Viability Check logic...
         is_dialogue = False
@@ -10389,9 +15505,46 @@ def compile_tts_ready_content(
         )
         force_keep = is_dialogue and is_short_response
 
-        viable, reject_reason = _is_tts_viable(tts_text, sent_role, trace_id=trace_id)
+        # =====================================================================
+        # v1.3.2: Semantic completeness action (pre-viability)
+        # Returns: "keep" | "merge_next" | "skip"
+        # =====================================================================
+        # SEMANTIC AUTHORITY INVARIANT:
+        has_authority = sent.get("_has_semantic_authority", False)
 
-        if not viable and not force_keep:
+        # v1.3.2: Semantic completeness action (pre-viability)
+        action, sem_reason = _semantic_completeness_action(
+            tts_text,
+            has_authority=has_authority,
+            trace_id=trace_id
+        )
+
+        if action == "merge_next" and not force_keep and not has_authority:
+            if trace_id:
+                logger.debug(
+                    "[%s] Fragment marked for merge-next: %r (reason: %s)",
+                    trace_id, tts_text[:80], sem_reason
+                )
+            # Accumulate into pending prefix for next valid sentence
+            pending_merge_prefix = (
+                pending_merge_prefix.rstrip() + " " + tts_text.lstrip()
+                if pending_merge_prefix else tts_text
+            )
+            skipped_count += 1
+            continue
+        if action == "skip" and not force_keep and not has_authority:
+            if trace_id:
+                logger.debug(
+                    "[%s] Skipping incomplete sentence: %r (reason: %s)",
+                    trace_id, tts_text[:80], sem_reason
+                )
+            skipped_count += 1
+            pending_merge_prefix = ""  # Don't carry garbage forward
+            prev_sentence_text = tts_text
+            continue
+        # Existing viability gate remains authoritative
+        viable, reject_reason = _is_tts_viable(tts_text, sent_role, trace_id=trace_id)
+        if not viable and not force_keep and not has_authority:
             skipped_count += 1
             prev_sentence_text = tts_text
             continue
