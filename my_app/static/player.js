@@ -92,6 +92,15 @@ class TTSAudioPlayer {
             chunks: null, // ← FINAL CONSISTENCY FIX: Declares property used later
             isProcessing: false,
             processingProgress: 0,
+            // === P1: Playback Epoch ===
+            // Incremented on book load and chunk switch
+            // Used to invalidate stale AUDIOPROCESS events
+            playbackEpoch: 0,
+
+            // === P4: Loading State Gate ===
+            // True during loadAudiobook() execution
+            // Blocks AUDIOPROCESS handling to prevent race conditions
+            isLoading: false,
         },
         pdf: {
             documentUrl: null,
@@ -122,6 +131,7 @@ class TTSAudioPlayer {
             errorMessage: '',
             lastCitation: null,
             lastHighlightedSpan: null,
+            lastAutoTurnedPage: null,
         },
     };
 
@@ -178,6 +188,16 @@ class TTSAudioPlayer {
      */
     constructor() {
         console.log('TTSAudioPlayer constructed. Ready to init.');
+
+        // === P1: Active Epoch Tracker ===
+        // Snapshot of playbackEpoch when current chunk started
+        // Compared against state.audiobook.playbackEpoch in AUDIOPROCESS
+        this._activeEpoch = 0;
+
+        // === P2: Warning Deduplication ===
+        // Prevents log spam if sentence.page_number missing
+        // Reset on each book load
+        this._loggedMissingPageNumber = false;
     }
 
     // ===========================================
@@ -408,6 +428,12 @@ class TTSAudioPlayer {
         });
 
         backend.on(AudioBackend.EVENTS.TIMEUPDATE, (data) => {
+            // === P4: Block during loading ===
+            if (this.state.audiobook.isLoading) return;
+
+            // === P1: Ignore stale events from prior epoch ===
+            if (this._activeEpoch !== this.state.audiobook.playbackEpoch) return;
+
             this.state.audio.currentTime = data.currentTime;
             this._updateTimeDisplay();
             this._updateSeekSlider();
@@ -415,9 +441,15 @@ class TTSAudioPlayer {
 
         // Bind AUDIOPROCESS (60Hz) with SEPARATED concerns
         backend.on(AudioBackend.EVENTS.AUDIOPROCESS, (data) => {
-          // PRIORITY 1: Page Sync (Smart Auto-Turn)
-          if (this.state.audiobook.mode === 'audiobook' && this.state.pdf.pdfDocument) {
-            const activeChunkPage = this.getPageForTimestamp(data.currentTime);
+            // === P4: Block during loading ===
+            if (this.state.audiobook.isLoading) return;
+
+            // === P1: Ignore stale events from prior epoch ===
+            if (this._activeEpoch !== this.state.audiobook.playbackEpoch) return;
+
+            // PRIORITY 1: Page Sync (Smart Auto-Turn)
+            if (this.state.audiobook.mode === 'audiobook' && this.state.pdf.pdfDocument) {
+                const activeChunkPage = this.getPageForTimestamp(data.currentTime);
 
             // Only turn page if the AUDIO has moved to a new page.
             if (activeChunkPage && activeChunkPage !== this.state.ui.lastAutoTurnedPage) {
@@ -454,6 +486,9 @@ class TTSAudioPlayer {
         });
 
         backend.on(AudioBackend.EVENTS.FINISH, () => {
+            // === P1: Ignore stale FINISH from prior epoch ===
+            if (this._activeEpoch !== this.state.audiobook.playbackEpoch) return;
+
             if (this.state.audiobook.mode === 'audiobook') {
                 this.playNextChunk();
             } else {
@@ -464,8 +499,13 @@ class TTSAudioPlayer {
             }
         });
 
-        // SEEKING: User seeked to new position
         backend.on(AudioBackend.EVENTS.SEEKING, (data) => {
+            // === P4: Block during loading ===
+            if (this.state.audiobook.isLoading) return;
+
+            // === P1: Ignore stale events from prior epoch ===
+            if (this._activeEpoch !== this.state.audiobook.playbackEpoch) return;
+
             this.state.audio.currentTime = data.currentTime;
             this._updateTimeDisplay();
             this._updateSeekSlider();
@@ -503,8 +543,24 @@ class TTSAudioPlayer {
     const index = Math.floor(ratio * chunk.sentences.length);
     const sentence = chunk.sentences[index];
 
+    // === P2: Use sentence-level page with fallback ===
+    let page = sentence.page_number;
+
+    if (page == null) {
+      page = chunk.page;
+
+      // Warn once per book if page_number missing (processor contract issue)
+      if (!this._loggedMissingPageNumber) {
+          const traceId = this.state.audiobook.manifest?.trace_id || 'unknown';
+          console.warn(
+              `[${traceId}] sentence.page_number missing; falling back to chunk.page`
+          );
+          this._loggedMissingPageNumber = true;
+      }
+    }
+
     return {
-      page: chunk.page,
+      page: page,
       span_start_index: sentence.span_start_index,
       span_end_index: sentence.span_end_index,
       highlighting_enabled: true
@@ -1057,10 +1113,23 @@ class TTSAudioPlayer {
      */
     // REPLACE existing loadAudiobook (Full code block)
     async loadAudiobook(bookId) {
+        // === P4: Block event processing during load ===
+        this.state.audiobook.isLoading = true;
+
+        // === P1: Increment epoch, capture snapshot ===
+        const localEpoch = ++this.state.audiobook.playbackEpoch;
+        this._activeEpoch = localEpoch;
+
+        // === P1: Clear UI caches tied to previous epoch ===
+        this.state.ui.lastHighlightedSpan = null;
+        this.state.ui.lastAutoTurnedPage = null;
+
+        // === P2: Reset per-book warning flag ===
+        this._loggedMissingPageNumber = false;
+
         try {
             this.clearError();
             this.hideBanner();
-
             // Clear old state (EXISTING CODE)
             this.state.audiobook.coordinateData = null;
             this.coordIndex = null;
@@ -1169,12 +1238,28 @@ class TTSAudioPlayer {
                 console.log(`Playing partial audiobook: ${ready}/${total} chunks available (${Math.round((ready / total) * 100)}%)`);
             }
 
+            // === P1: Guard play() against superseded loads (epoch-consistent) ===
+            // playChunk(0) may or may not increment epoch depending on currentChunkIndex,
+            // so we predict the next epoch if a chunk switch occurs.
+            const expectedEpoch = (0 !== this.state.audiobook.currentChunkIndex)
+                ? (this.state.audiobook.playbackEpoch + 1)
+                : this.state.audiobook.playbackEpoch;
+
             await this.playChunk(0);
-            await this.play();
+
+            // Only play if this transition was not superseded
+            if (this.state.audiobook.playbackEpoch === expectedEpoch) {
+                await this.play();
+            }
 
         } catch (error) {
             this.logError('Failed to load audiobook: ' + error.message);
             console.error('Audiobook load error:', error);
+            // === P4: Disable highlighting on error ===
+            this.state.audiobook.hasCoordinateIndex = false;
+        } finally {
+            // === P4: ALWAYS re-enable event processing ===
+            this.state.audiobook.isLoading = false;
         }
     }
 
@@ -1365,10 +1450,19 @@ class TTSAudioPlayer {
 
         if (nextIndex < this.state.audiobook.readyChunks.length) {
             console.log(`Advancing to chunk ${nextIndex + 1}/${this.state.audiobook.totalChunks}`);
+
+            // === P1: Epoch-consistent play guard ===
+            // playChunk(nextIndex) increments playbackEpoch when the chunk actually changes.
+            // Capture expected epoch AFTER the chunk switch.
+            const epochBefore = this.state.audiobook.playbackEpoch;
+
             await this.playChunk(nextIndex);
 
-            // Tell the backend to play the new chunk.
-            await this.play();
+            // playChunk should advance epoch by exactly 1 when chunk changes
+            if (this.state.audiobook.playbackEpoch === (epochBefore + 1)) {
+                await this.play();
+            }
+
         } else {
             console.log('Reached end of available audiobook chunks');
 
@@ -1379,15 +1473,24 @@ class TTSAudioPlayer {
         }
     }
 
+
     /**
      * Play specific chunk
      * @param {number} chunkIndex - Chunk index (0-based)
      */
     async playChunk(chunkIndex) {
         try {
-            // ✅ FIX A: Use the definitive 'chunks' list (full objects) for reliability.
-            // This list is populated from the new /chunks endpoint and contains all metadata.
             const chunks = this.state.audiobook.chunks || [];
+
+            // === P1: Epoch increment ONLY if chunk actually changes ===
+            if (chunkIndex !== this.state.audiobook.currentChunkIndex) {
+                const localEpoch = ++this.state.audiobook.playbackEpoch;
+                this._activeEpoch = localEpoch;
+
+                // Clear UI caches tied to previous chunk
+                this.state.ui.lastHighlightedSpan = null;
+                this.state.ui.lastAutoTurnedPage = null;
+            }
 
             // Validate chunk index
             if (chunkIndex < 0 || chunkIndex >= chunks.length) {
@@ -2135,15 +2238,77 @@ class TTSAudioPlayer {
     }
 
     buildCoordinateIndex() {
+        // === P3: Preflight validation of sentence span indices ===
+        const traceId = this.state.audiobook.manifest?.trace_id || 'unknown';
+        const chunks = this.state.audiobook.chunks || [];
+        const coordData = this.state.audiobook.coordinateData || [];
+        let validationPassed = true;
+
+        for (const chunk of chunks) {
+            const pageIndex = (chunk.page || 0) - 1;
+
+            // Page bounds validation
+            if (pageIndex < 0 || pageIndex >= coordData.length) {
+                console.warn(
+                    `[${traceId}] chunk.page ${chunk.page} out of range for coordinateData length ${coordData.length}`
+                );
+                validationPassed = false;
+                continue;
+            }
+
+            const pageData = coordData[pageIndex];
+
+            if (!pageData || !Array.isArray(pageData.coordinate_blocks)) {
+                continue; // No coordinates for this page, skip validation
+            }
+
+            const maxIndex = pageData.coordinate_blocks.length - 1;
+
+            for (const sentence of (chunk.sentences || [])) {
+                const start = sentence.span_start_index;
+                const end = sentence.span_end_index;
+
+                // Skip sentences with missing indices
+                if (start == null || end == null) continue;
+
+                if (start < 0) {
+                    console.warn(
+                        `[${traceId}] P${chunk.page}: span_start_index ${start} is negative`
+                    );
+                    validationPassed = false;
+                }
+
+                if (end < start) {
+                    console.warn(
+                        `[${traceId}] P${chunk.page}: span_end_index ${end} < span_start_index ${start}`
+                    );
+                    validationPassed = false;
+                }
+
+                if (end > maxIndex) {
+                    console.warn(
+                        `[${traceId}] P${chunk.page}: span_end_index ${end} exceeds coordinate_blocks length ${maxIndex + 1}`
+                    );
+                    validationPassed = false;
+                }
+            }
+        }
+
+        if (!validationPassed) {
+            console.error(
+                `[${traceId}] Coordinate index validation failed — highlighting disabled`
+            );
+            this.state.audiobook.hasCoordinateIndex = false;
+            return;
+        }
+        // === END P3 VALIDATION ===
+
         // Initialize structure
         this.coordIndex = {
             byPage: {},     // Page -> chunks mapping (stores full chunk objects)
             byTime: [],     // Sorted array of {startTime, endTime, chunkId}
             spatial: {}     // Page -> coordinate_blocks for click lookup
         };
-
-        // ✅ FIX 5: Use this.state.audiobook.chunks (full objects with sentences)
-        const chunks = this.state.audiobook.chunks || [];
         let hasSentences = false;
 
         chunks.forEach(chunk => {
@@ -2172,7 +2337,6 @@ class TTSAudioPlayer {
         this.coordIndex.byTime.sort((a, b) => a.startTime - b.startTime);
 
         // Populate spatial index from coordinateData
-        const coordData = this.state.audiobook.coordinateData || [];
         coordData.forEach(pageData => {
             const pageNum = pageData.page_number;
             this.coordIndex.spatial[pageNum] = pageData.coordinate_blocks || [];
@@ -2319,7 +2483,7 @@ class TTSAudioPlayer {
     sanitizeFilename(filename) {
         return filename.replace(/[^\w\-\.]/g, '').trim();
     }
-} // ← CLASS ENDS HERE
+}
 
 // ===========================================
 // Part 6: Integration (Entry Point)
