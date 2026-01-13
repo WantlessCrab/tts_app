@@ -345,7 +345,6 @@ async def run_full_pipeline(
     logger.info(f"[{trace_id}] Pipeline started for: {pdf_filename}")
 
     pdf_path = INPUT_DIR / pdf_filename
-    raw_cache_path = CACHE_DIR / f"{pdf_path.stem}_raw.json"
     citation_filename = f"{book_id}_citation_ready.json"
     citation_path = CACHE_DIR / citation_filename
     manifest_path = OUTPUT_DIR / book_id / "manifest.json"
@@ -468,9 +467,6 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
             # ==========================================================
             global_line_gaps = []
             global_font_sizes = []
-
-            GLOBAL_MEDIAN_LINE_HEIGHT = None
-            GLOBAL_MEDIAN_FONT_SIZE = None
 
             # PERFORMANCE HARDENING:
             # Sample a bounded set of pages to avoid double-parsing entire books.
@@ -628,6 +624,21 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
 
         # Build citation-ready output
         book_id = data.get('book_id') or derive_book_id(cache_file_path.stem)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # SEMANTIC ARTIFACT: Persist RONC/A2/disposition decisions
+        # P6 FIX: Use processed_spans from tts_result (contains P6 modifications)
+        # instead of page_outputs (original unmodified spans)
+        # ═══════════════════════════════════════════════════════════════════
+        semantic_path = CACHE_DIR / f"{book_id}_semantic.json"
+        processed_spans = tts_result.get('processed_spans', {})
+        _save_semantic_artifact(
+            processed_spans,
+            semantic_path,
+            book_id,
+            trace_id,
+            data['metadata']
+        )
         citation_path = CACHE_DIR / f"{book_id}_citation_ready.json"
 
         output_data = {
@@ -677,11 +688,27 @@ def _format_sentences_for_manifest(sentences: List[dict]) -> List[dict]:
     """
     Formats extraction_engine sentences for manifest compatibility.
 
-    V1.9 Phase 1: Now includes per-sentence timing fields.
+    V2.1: Includes full provenance for joinability and forensic debugging.
+
+    ARCHITECTURAL CONTRACT:
+    - Manifest sentences MUST be joinable back to source spans
+    - Provenance fields enable late-stage QA and error triage
+    - Runtime-only fields (_source_spans) are stripped; IDs are preserved
+    - Flow identity is PROJECTED from spans here, not stored on sentences
+
+    Provenance fields:
+    - source_cids: Canonical span IDs (reversible join key)
+    - source_unit_ids: RONC atomic unit memberships
+    - source_flow_ids: Layout stream identities (derived from spans)
+    - is_multi_flow: Contamination flag (sentence spans multiple streams)
+    - is_stitched: Whether sentence was merged from fragments
     """
     formatted = []
     for i, sent in enumerate(sentences):
-        formatted.append({
+        # ═══════════════════════════════════════════════════════════════════
+        # Core fields (existing)
+        # ═══════════════════════════════════════════════════════════════════
+        entry = {
             'global_index': sent.get('global_index', i),
             'sentence_in_chunk': i,
             'text': sent.get('tts_text', sent.get('text', '')),
@@ -694,9 +721,229 @@ def _format_sentences_for_manifest(sentences: List[dict]) -> List[dict]:
             'start_time': sent.get('start_time', 0.0),
             'end_time': sent.get('end_time', 0.0),
             'duration_seconds': sent.get('duration_seconds', 0.0),
-        })
+            'paragraph_index': sent.get('paragraph_index'),
+        }
+
+        # ═══════════════════════════════════════════════════════════════════
+        # RONC v2.1: Provenance fields (JOIN KEYS — non-negotiable)
+        # ═══════════════════════════════════════════════════════════════════
+
+        # Source span canonical IDs (primary join key)
+        source_cids = sent.get('_source_span_ids')
+        if source_cids:
+            # Filter None sentinels for manifest (keep only valid IDs)
+            entry['source_cids'] = [cid for cid in source_cids if cid is not None]
+
+        # RONC atomic unit memberships
+        source_units = sent.get('_ronc_atomic_units')
+        if source_units:
+            entry['source_unit_ids'] = source_units
+
+        # ═══════════════════════════════════════════════════════════════════
+        # RONC v2.1: Flow identity PROJECTION (derived from spans at emission)
+        # Flow identity is NOT stored on sentences — it is projected fresh
+        # from authoritative span sources to maintain RONC as single truth.
+        # ═══════════════════════════════════════════════════════════════════
+        source_spans = sent.get('_source_spans') or []
+        flow_ids = set()
+        for sp in source_spans:
+            flow = sp.get('layout_stream')
+            if flow:
+                flow_ids.add(flow)
+
+        if flow_ids:
+            entry['source_flow_ids'] = sorted(flow_ids)
+            if len(flow_ids) > 1:
+                entry['is_multi_flow'] = True
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Audit flags (cross-boundary merges detected during stitching)
+        # ═══════════════════════════════════════════════════════════════════
+        if sent.get('_ronc_cross_unit_merge'):
+            entry['is_cross_unit_merge'] = True
+
+        if sent.get('_ronc_cross_flow_merge'):
+            entry['is_cross_flow_merge'] = True
+
+        # ═══════════════════════════════════════════════════════════════════
+        # Diagnostic fields (optional but valuable for triage)
+        # ═══════════════════════════════════════════════════════════════════
+        if sent.get('_contaminated'):
+            entry['is_contaminated'] = True
+            entry['contaminated_roles'] = sent.get('_contaminated_roles', [])
+
+        if sent.get('alignment_method'):
+            entry['alignment_method'] = sent['alignment_method']
+
+        if sent.get('boundary_risks'):
+            entry['boundary_risks'] = sent['boundary_risks']
+
+        formatted.append(entry)
+
     return formatted
 
+
+# ========================================
+# SEMANTIC ARTIFACT (Stage 2 Output Layer)
+# ========================================
+
+def _save_semantic_artifact(
+        processed_spans: dict,
+        output_path: Path,
+        book_id: str,
+        trace_id: str,
+        metadata: dict
+):
+    """
+    STAGE 2 OUTPUT: Semantic authority artifact.
+
+    P6 FIX: Now receives processed_spans dict (keyed by CID) directly from
+    compile_tts_ready_content, which includes P6 same-line promotions.
+
+    Schema v1.0 Contract:
+        - extraction artifact = geometry + basic classification (Stage 1)
+        - semantic artifact = RONC authority + dispositions (Stage 2)
+        - manifest = final TTS output (Stage 3)
+
+    Scope clarification:
+        - _tts_excluded is a Stage 2 eligibility decision
+        - manifest.json is the emission authority (Stage 3)
+    """
+    semantic_data = {
+        "metadata": {
+            **metadata,
+            "artifact_type": "semantic",
+            "schema_version": "1.1",
+            "stage": "2",
+            "authority_scope": "semantic_eligibility",
+        },
+        "book_id": book_id,
+        "trace_id": trace_id,
+        "generated_at": datetime.datetime.utcnow().isoformat(),
+        "spans": {}
+    }
+
+    # P6 FIX: Iterate processed_spans dict directly (already keyed by CID)
+    for cid, sp in processed_spans.items():
+        if not cid:
+            continue
+
+        semantic_data["spans"][cid] = {
+                # RONC Contract (full authority record)
+                "_ronc_contract": sp.get("_ronc_contract"),
+                # Canonical ID (P5 FIX: required for provenance tracking)
+                "_canonical_span_id": cid,
+                # A2 Edge Qualification (Phase 7)
+                "_a2_edge_exists": sp.get("_a2_edge_exists"),
+                "_a2_cross_stream": sp.get("_a2_cross_stream"),
+                "_a2_qualified": sp.get("_a2_qualified"),
+                "_a2_edge_prev_id": sp.get("_a2_edge_prev_id"),
+                # Semantic Disposition (with confidence)
+                "_semantic_disposition": sp.get("_semantic_disposition"),
+                "_semantic_reasons": sp.get("_semantic_reasons"),
+                "_semantic_confidence": sp.get("_semantic_confidence"),
+                # TTS Eligibility (Stage 2 decision, not emission truth)
+                "_tts_excluded": sp.get("_tts_excluded"),
+                "_tts_exclude_reason": sp.get("_tts_exclude_reason"),
+                "_tts_include_reason": sp.get("_tts_include_reason"),
+                # RONC Legacy Fields
+                "_ronc_atomic_unit_id": sp.get("_ronc_atomic_unit_id"),
+                "_ronc_atomic_role": sp.get("_ronc_atomic_role"),
+                "_ronc_break_after": sp.get("_ronc_break_after"),
+                "_ronc_rescue_applied": sp.get("_ronc_rescue_applied"),
+                # Structural Context (for diagnostics)
+                "layout_stream": sp.get("layout_stream"),
+                "role": sp.get("role"),
+                "page_number": sp.get("page_number"),
+                "block_id": sp.get("block_id"),
+                "cleaned_text": (sp.get("cleaned_text") or "")[:100],
+                "line_index": sp.get("line_index"),
+                "span_index_in_line": sp.get("span_index_in_line"),
+                "line_id": sp.get("line_id"),
+                "bbox": sp.get("bbox"),
+
+                # ─────────────────────────────────────────────────────
+                # Phase 1.3 Line-Aware Rescue Audit
+                # ─────────────────────────────────────────────────────
+                "_tts_rescued": sp.get("_tts_rescued"),
+                "_tts_rescue_reason": sp.get("_tts_rescue_reason"),
+                "_tts_promoted_to_body_stream": sp.get("_tts_promoted_to_body_stream"),
+                "_tts_promotion_reason": sp.get("_tts_promotion_reason"),
+                "_tts_inline_detection_method": sp.get("_tts_inline_detection_method"),
+
+                # ─────────────────────────────────────────────────────
+                # Phase 1.5 Continuity Override Audit
+                # ─────────────────────────────────────────────────────
+                "_continuity_override": sp.get("_continuity_override"),
+                "_continuity_override_reason": sp.get("_continuity_override_reason"),
+                "_original_geometry_role": sp.get("_original_geometry_role"),
+
+                # ─────────────────────────────────────────────────────
+                # P6 Same-Line Promotion Audit
+                # ─────────────────────────────────────────────────────
+                "_same_line_promoted": sp.get("_same_line_promoted"),
+                "_zombie_role_fixed": sp.get("_zombie_role_fixed"),
+                "_original_role": sp.get("_original_role"),
+                "_original_layout_stream": sp.get("_original_layout_stream"),
+            }
+
+    semantic_data["summary"] = _build_semantic_summary(semantic_data["spans"])
+    atomic_write_manifest(output_path, semantic_data, logger)
+    logger.info(
+        f"[{trace_id}] Semantic artifact saved: {len(semantic_data['spans'])} spans"
+    )
+
+
+def _build_semantic_summary(spans: dict) -> dict:
+    """Build summary statistics for semantic artifact."""
+    authority = {"strong": 0, "weak": 0, "none": 0, "missing": 0}
+    disposition = {"included": 0, "excluded": 0, "interruption": 0, "missing": 0}
+    a2_stats = {"edges": 0, "qualified": 0, "cross_stream": 0}
+    tts = {"included": 0, "excluded": 0}
+    confidence_sum = 0
+    confidence_count = 0
+
+    for cid, sp in spans.items():
+        # Authority distribution
+        contract = sp.get("_ronc_contract") or {}
+        auth = contract.get("authority", "missing")
+        authority[auth] = authority.get(auth, 0) + 1
+
+        # Disposition distribution
+        disp = sp.get("_semantic_disposition", "missing")
+        disposition[disp] = disposition.get(disp, 0) + 1
+
+        # Confidence stats
+        conf = sp.get("_semantic_confidence")
+        if conf is not None:
+            confidence_sum += conf
+            confidence_count += 1
+
+        # A2 edge stats
+        if sp.get("_a2_edge_exists"):
+            a2_stats["edges"] += 1
+        if sp.get("_a2_qualified"):
+            a2_stats["qualified"] += 1
+        if sp.get("_a2_cross_stream"):
+            a2_stats["cross_stream"] += 1
+
+        # TTS eligibility
+        if sp.get("_tts_excluded"):
+            tts["excluded"] += 1
+        else:
+            tts["included"] += 1
+
+    return {
+        "total_spans": len(spans),
+        "authority_distribution": authority,
+        "disposition_distribution": disposition,
+        "a2_edge_stats": a2_stats,
+        "tts_eligibility": tts,
+        "avg_semantic_confidence": (
+            round(confidence_sum / confidence_count, 3)
+            if confidence_count > 0 else None
+        ),
+    }
 
 # ========================================
 # STAGE 3: TTS Generation (Unchanged)
@@ -707,7 +954,7 @@ async def generate_single_chunk(
         book_id: str,
         trace_id: str,
         manifest_path: Path,
-        logger
+        _logger
 ):
     chunk_id = chunk['chunk_id']
     page = chunk['page']
@@ -905,7 +1152,7 @@ def derive_book_id(title):
     return re.sub(r'_+', '_', re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_'))
 
 
-def atomic_write_manifest(path, data, logger):
+def atomic_write_manifest(path, data, _logger):
     tmp = None
     try:
         fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -921,7 +1168,7 @@ def atomic_write_manifest(path, data, logger):
         raise e
 
 
-def validate_and_write_manifest(path, data, trace_id, logger):
+def validate_and_write_manifest(path, data, trace_id, _logger):
     try:
         validated = ManifestSchema(**data)
         atomic_write_manifest(path, validated.dict(), logger)

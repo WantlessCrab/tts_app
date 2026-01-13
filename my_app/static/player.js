@@ -5,6 +5,58 @@
 //
 
 /**
+ * ─────────────────────────────────────────────────────────────
+ * PIPELINE CONSUMER CONTRACT (Frontend Authority)
+ * ─────────────────────────────────────────────────────────────
+ *
+ * This player assumes the following backend pipeline semantics:
+ *
+ * PIPELINE STAGES
+ *   - stage_1_complete:
+ *       • PDF parsed
+ *       • coordinate_blocks available
+ *       • NO audio yet
+ *
+ *   - stage_2_complete:
+ *       • chunks + sentences finalized
+ *       • still NO audio
+ *
+ *   - stage_3_started:
+ *       • audio generation in progress
+ *
+ *   - stage_3_partial:
+ *       • some audio chunks available
+ *       • playback is allowed
+ *       • highlighting & click-seek are allowed
+ *
+ *   - stage_3_complete:
+ *       • all chunks available
+ *       • full playback enabled
+ *
+ * PLAYABILITY RULE
+ *   Playback is allowed if:
+ *     processing_status ∈ {stage_3_partial, stage_3_complete}
+ *     AND ready_chunks.length > 0
+ *
+ * HIGHLIGHTING RULE
+ *   Highlighting is enabled only if:
+ *     • coordinate data exists
+ *     • sentence span indices are available
+ *
+ * RETRY SEMANTICS
+ *   - retry(bookId, force=false): resume pipeline
+ *   - retry(bookId, force=true): wipe caches + rebuild
+ *
+ * NON-GOALS
+ *   This file does NOT:
+ *     • interpret extraction logic
+ *     • compute alignment
+ *     • modify backend artifacts
+ *
+ * The backend is authoritative for all timing, spans, and pages.
+ */
+
+/**
  * TTSAudioPlayer
  *
  * The main application class that manages all player state,
