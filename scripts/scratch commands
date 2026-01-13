@@ -1,0 +1,23 @@
+docker compose -f docker-compose.tts.py310.yml down
+docker compose -f docker-compose.tts.py310.yml up
+
+docker compose -f docker-compose.fileserver.yml down
+docker compose -f docker-compose.fileserver.yml up
+
+docker compose -f docker-compose.pdf.yml down
+docker compose -f docker-compose.pdf.yml up
+
+docker compose -f docker-compose.gateway.yml down
+docker compose -f docker-compose.gateway.yml up
+
+### Stop all containers
+docker compose -f docker-compose.tts.py310.yml down
+docker compose -f docker-compose.fileserver.yml down
+docker compose -f docker-compose.pdf.yml down
+docker compose -f docker-compose.gateway.yml down
+
+### Run all containers:
+docker compose -f docker-compose.tts.py310.yml up
+docker compose -f docker-compose.fileserver.yml up
+docker compose -f docker-compose.pdf.yml up
+docker compose -f docker-compose.gateway.yml up
