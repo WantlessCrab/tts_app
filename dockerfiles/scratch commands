@@ -1,3 +1,4 @@
+### Stop - Start
 docker compose -f docker-compose.tts.py310.yml down
 docker compose -f docker-compose.tts.py310.yml up
 
@@ -21,3 +22,23 @@ docker compose -f docker-compose.tts.py310.yml up
 docker compose -f docker-compose.fileserver.yml up
 docker compose -f docker-compose.pdf.yml up
 docker compose -f docker-compose.gateway.yml up
+
+### Restart All Containers:
+docker restart project-rebuild-tts-service
+docker restart project-rebuild-fileserver
+docker restart project-rebuild-pdf-processor
+docker restart project-rebuild-gateway
+
+# TTS TESTING SHORTCUTS
+
+docker compose -f docker-compose.tts.py310.yml down
+docker compose -f docker-compose.pdf.yml down
+
+docker compose -f docker-compose.tts.py310.yml up
+docker compose -f docker-compose.pdf.yml up
+
+docker restart project-rebuild-tts-service
+docker restart project-rebuild-pdf-processor
+
+test-somatosensory
+curl -X POST "http://localhost:8000/api/retry/web_read?force_rebuild=true"

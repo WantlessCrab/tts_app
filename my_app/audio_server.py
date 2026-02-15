@@ -1,4 +1,8 @@
 # ~/TTS/my_app/audio_server.py
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION 0 — IMPORTS, CONFIGURATION, CONSTANTS
+# ════════════════════════════════════════════════════════════════════════════════
 from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -13,10 +17,6 @@ import httpx
 from fastapi import Query
 from typing import Optional
 from datetime import datetime
-
-# ========================================
-# Configuration & Setup
-# ========================================
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -50,6 +50,8 @@ AUDIO_SOURCES = {
 DEFAULT_AUDIO_SOURCE_NAME = "audiobooks"
 STALE_JOB_THRESHOLD_MINUTES = int(os.getenv('STALE_JOB_THRESHOLD_MINUTES', '30'))
 
+# APPLICATION SETUP
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -61,6 +63,9 @@ app.add_middleware(
 # Create the HTTP client for calling other services
 client = httpx.AsyncClient(timeout=30.0)
 
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION A — Server Lifecycle
+# ════════════════════════════════════════════════════════════════════════════════
 
 @app.on_event("startup")
 async def startup_event():
@@ -81,9 +86,9 @@ async def shutdown_event():
     logger.info("HTTP client closed.")
 
 
-# ========================================
-# Frontend Endpoints
-# ========================================
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION B — Frontend Shell / Static UI
+# ════════════════════════════════════════════════════════════════════════════════
 
 @app.get("/", response_class=HTMLResponse)
 async def get_player_interface():
@@ -94,11 +99,15 @@ async def get_player_interface():
     return FileResponse(player_html_path)
 
 
-# ========================================
-# API Endpoints
-# ========================================
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION C — Source & Asset Enumeration
+# ════════════════════════════════════════════════════════════════════════════════
 
-# --- Step 1.4: Modified Endpoint to Handle Source Parameter ---
+@app.get("/api/audio_sources")
+async def list_audio_sources():
+    """Returns a list of available audio source names."""
+    return {"sources": list(AUDIO_SOURCES.keys())}
+
 @app.get("/api/list_audio")
 async def list_audio_files(source: Optional[str] = Query(DEFAULT_AUDIO_SOURCE_NAME)):
     """Lists audio files from the specified source directory."""
@@ -116,14 +125,16 @@ async def list_audio_files(source: Optional[str] = Query(DEFAULT_AUDIO_SOURCE_NA
     if target_directory.exists():
         try:
             # Only get WAV files directly within the target directory
-            for f in target_directory.glob("*.wav"):
-                if f.is_file():
-                    files.append({
-                        "name": f.name,
-                        "path": str(f),
-                        "size_bytes": f.stat().st_size,
-                        "type": source
-                    })
+            for book_dir in target_directory.iterdir():
+                if book_dir.is_dir():
+                    for f in book_dir.glob("chunk_*.wav"):
+                        files.append({
+                            "name": f.name,
+                            "path": str(f),
+                            "book_id": book_dir.name,
+                            "size_bytes": f.stat().st_size,
+                            "type": source
+                        })
         except Exception as e:
             logger.error(f"Error scanning directory {target_directory}: {e}")
             # Don't raise HTTPException here, just return empty list or partial results
@@ -131,55 +142,24 @@ async def list_audio_files(source: Optional[str] = Query(DEFAULT_AUDIO_SOURCE_NA
     return {"files": files, "source": source}
 
 
-@app.websocket("/stream")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    Milestone 4: Placeholder for future real-time streaming updates.
-    (2.3 Future-Proofing: Removed unnecessary send_json/sleep calls)
-    """
-    await websocket.accept()
-    logger.info("WebSocket connection established (placeholder)")
-    try:
-        # Await future client messages or simply block
-        await websocket.receive_text()  # Block until client sends something or closes
-    except Exception as e:
-        # Expected exception when connection closes
-        logger.debug(f"WebSocket client disconnected: {e}")
-    finally:
-        await websocket.close()
-        logger.info("WebSocket connection closed")
+@app.get("/api/available_pdfs")
+async def list_available_pdfs():
+    """List PDFs available for processing (Functionality retained from baseline)"""
+    pdf_input_dir = Path("/workspace/pdf_input")
+    pdfs = []
+    if pdf_input_dir.exists():
+        for pdf_file in pdf_input_dir.glob("*.pdf"):
+            pdfs.append({
+                "filename": pdf_file.name,
+                "size_bytes": pdf_file.stat().st_size,
+                "size_mb": round(pdf_file.stat().st_size / (1024 * 1024), 2)
+            })
+    return {"available_pdfs": pdfs}
 
 
-# --- Replaced direct import with API call ---
-@app.get("/api/audiobook/{book_id}/citation")
-async def get_citation_for_timestamp(book_id: str, timestamp: float = 0.0):
-    """
-    Get citation information by proxying the request to the pdf-service.
-    (1.3 Citation Proxy Update: Improved error handling for timeouts)
-    """
-    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
-
-    try:
-        api_url = f"{PDF_SERVICE_URL}/api/v1/citation/{safe_book_id}"
-        # Forward the request to the pdf-service
-        response = await client.get(api_url, params={"timestamp": timestamp})
-
-        response.raise_for_status()
-        return response.json()
-
-    except httpx.TimeoutException:  # <-- CORRECTED
-        # 2.2 Error Handling: Specific handling for timeouts
-        logger.error(f"Error getting citation: Proxy connection timed out to {PDF_SERVICE_URL}")
-        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Error getting citation from pdf-service: {e.response.status_code}")
-        # Pass the error detail from the downstream service
-        detail = e.response.json().get("detail", "Failed to retrieve citation")
-        raise HTTPException(status_code=e.response.status_code, detail=detail)
-    except Exception as e:
-        logger.error(f"Error getting citation: {e}")
-        raise HTTPException(status_code=500, detail="Citation system not available")
-
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION D — Audiobook Status APIs & Metadata
+# ════════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/audiobooks")
 async def list_audiobooks():
@@ -219,7 +199,6 @@ async def list_audiobooks():
                     logger.error(f"Failed to read manifest for {book_dir.name}: {e}")
     return {"audiobooks": books}
 
-
 @app.get("/api/audiobook/{book_id}/status")
 async def get_audiobook_status(book_id: str):
     """
@@ -245,7 +224,7 @@ async def get_audiobook_status(book_id: str):
         total = response_data.get('total_chunks', 0)
         ready = len(response_data.get('ready_chunks', []))
 
-        if 'processing_status' not in response_data or response_data['processing_status'] is None:
+        if 'processing_status' not in response_data:
             if total == 0:
                 response_data['processing_status'] = 'processing_started'
             elif ready == total and total > 0:
@@ -288,10 +267,15 @@ async def get_audiobook_status(book_id: str):
         response_data['is_stale'] = is_stale
         response_data['stale_threshold_minutes'] = STALE_JOB_THRESHOLD_MINUTES
 
-        # Check citation file
+        # Check citation file (legacy)
         citation_filename = safe_book_id + '_citation_ready.json'
         citation_path = PDF_CACHE_DIR / citation_filename
         response_data['highlighting_ready'] = citation_path.exists()
+
+        # Check UI sentences file (new UI contract)
+        ui_sentences_filename = safe_book_id + '_ui_sentences.json'
+        ui_sentences_path = PDF_CACHE_DIR / ui_sentences_filename
+        response_data['ui_ready'] = ui_sentences_path.exists()
 
         return response_data
 
@@ -300,29 +284,44 @@ async def get_audiobook_status(book_id: str):
         raise HTTPException(status_code=500, detail="Failed to read audiobook data")
 
 
-@app.get("/api/audiobook/{book_id}/coordinates")
-async def get_audiobook_coordinates(book_id: str):
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION E — UI Sentence & Citation APIs
+# ════════════════════════════════════════════════════════════════════════════════
+@app.get("/api/audiobook/{book_id}/ui_sentences")
+async def get_audiobook_ui_sentences(book_id: str):
     """
-    (1.2 New Coordinate Endpoint): Serves the heavy coordinate data from _raw.json cache.
-    This replaces merging coordinates in /status. (Option A implementation)
+    Serves pre-resolved UI sentence data from ui_sentences.json.
+
+    This is the SOLE source of truth for frontend UI concerns:
+    - Sentence timing
+    - Pre-resolved geometry per page
+    - Page turn markers
+    - Sentence-to-page mapping
+
+    Frontend MUST use this instead of /coordinates + /chunks for UI rendering.
+
+    Returns the file byte-exact via FileResponse (no re-serialization).
     """
-    # 1.4 Sanitization Consistency: book_id is trusted to be sanitized
     safe_book_id = book_id
 
-    # Coordinates are stored in the _raw.json file generated by process.py Stage 1
-    # 2.1 File Path Robustness: Constructs path to _raw.json
-    raw_cache_filename = safe_book_id + '_raw.json'
-    raw_cache_path = PDF_CACHE_DIR / raw_cache_filename
+    ui_sentences_filename = f"{safe_book_id}_ui_sentences.json"
+    ui_sentences_path = PDF_CACHE_DIR / ui_sentences_filename
 
-    if not raw_cache_path.exists():
-        logger.error(f"Raw coordinate file not found at {raw_cache_path}")
-        raise HTTPException(status_code=404,
-                            detail="Raw coordinate data not available for this book.")
+    if not ui_sentences_path.exists():
+        for f in PDF_CACHE_DIR.glob(f"*{safe_book_id}*_ui_sentences.json"):
+            ui_sentences_path = f
+            break
+        else:
+            logger.warning(f"UI sentences data not found for: {book_id}")
+            raise HTTPException(
+                status_code=404,
+                detail="UI sentence data not available. Book may still be processing."
+            )
 
-    # Serve the raw file containing coordinate_blocks (Option A)
-    logger.info(f"Serving coordinate data from: {raw_cache_path}")
+    logger.info(f"Serving UI sentences file for: {book_id}")
+
     return FileResponse(
-        path=raw_cache_path,
+        path=ui_sentences_path,
         media_type="application/json",
         headers={
             "Cache-Control": "public, max-age=3600"
@@ -330,41 +329,81 @@ async def get_audiobook_coordinates(book_id: str):
     )
 
 
-@app.get("/api/audiobook/{book_id}/chunks")
-async def get_audiobook_chunks(book_id: str):
+@app.get("/api/audiobook/{book_id}/semantic")
+async def get_audiobook_semantic(book_id: str):
     """
-    Serves full chunk data with sentence indices from citation_ready.json
-    This data is required by the frontend for M3 (Click-to-Seek) index.
+    Serves semantic.json for frontend semantic lookups.
+
+    This endpoint exposes content-level metadata (e.g. cleaned_text)
+    required for advanced frontend rendering policies such as
+    progressive sentence highlighting.
+
+    Semantic data remains the authoritative source for:
+      - span text
+      - content length
+      - semantic roles
+
+    Frontend MUST treat this as read-only.
     """
+
     safe_book_id = book_id
-    citation_filename = safe_book_id + '_citation_ready.json'
-    citation_path = PDF_CACHE_DIR / citation_filename
 
-    if not citation_path.exists():
-        logger.warning(f"Citation data not found for chunks endpoint: {citation_path}")
-        raise HTTPException(status_code=404, detail="Citation data not available")
+    semantic_filename = f"{safe_book_id}_semantic.json"
+    semantic_path = PDF_CACHE_DIR / semantic_filename
 
-    try:
-        # Load data within helper scope
-        with open(citation_path, 'r', encoding='utf-8') as f:
-            citation_data = json.load(f)
+    if not semantic_path.exists():
+        for f in PDF_CACHE_DIR.glob(f"*{safe_book_id}*_semantic.json"):
+            semantic_path = f
+            break
+        else:
+            logger.warning(f"Semantic data not found for: {book_id}")
+            raise HTTPException(
+                status_code=404,
+                detail="Semantic data not available. Book may still be processing."
+            )
 
-        # Apply Optional Enhancement: Return explicit Response with cache headers
-        response_content = {
-            "chunks": citation_data.get('chunks', []),
-            "highlighting_enabled": citation_data.get('highlighting_enabled', False)
+    logger.info(f"Serving semantic.json for: {book_id}")
+
+    return FileResponse(
+        path=semantic_path,
+        media_type="application/json",
+        headers={
+            "Cache-Control": "public, max-age=3600"
         }
+    )
 
-        return Response(
-            content=json.dumps(response_content),
-            media_type="application/json",
-            headers={
-                "Cache-Control": "public, max-age=3600"
-            }
-        )
-    except Exception as e:
-        logger.error(f"Error reading citation file for chunks: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve citation chunks")
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION F — Audio Chunk Serving
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/audiobook/{book_id}/play/{chunk_filename}")
+async def serve_audiobook_chunk(book_id: str, chunk_filename: str):
+    """Serve a specific audio chunk from an audiobook (Functionality retained from baseline)"""
+    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
+    safe_filename = re.sub(r'[^\w\-\.]', '', chunk_filename).strip()
+
+    if not safe_filename.endswith('.wav'):
+        raise HTTPException(status_code=400, detail="Only WAV files are supported")
+
+    file_path = AUDIOBOOKS_DIR / safe_book_id / safe_filename
+
+    if not file_path.exists():
+        logger.warning(f"Audio file not found: {file_path}")
+        raise HTTPException(status_code=404, detail="Audio chunk not found")
+
+    return FileResponse(
+        path=file_path,
+        media_type="audio/wav",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION G — PDF Proxy APIs
+# ════════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/pdf/{pdf_filename}")
 async def proxy_serve_pdf(pdf_filename: str):
@@ -413,76 +452,6 @@ async def proxy_serve_pdf(pdf_filename: str):
         raise HTTPException(status_code=500, detail="PDF service not available")
 
 
-@app.post("/api/retry/{book_id}")
-async def retry_processing(book_id: str, force_rebuild: bool = False):
-    """
-    Proxy retry request to pdf-processor service.
-    """
-    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
-
-    try:
-        api_url = f"{PDF_SERVICE_URL}/api/v1/retry/{safe_book_id}"
-
-        # Pass force_rebuild flag as a query parameter
-        response = await client.post(api_url, params={"force_rebuild": force_rebuild})
-        response.raise_for_status()
-
-        return response.json()
-
-    except httpx.TimeoutException:
-        logger.error(f"Retry request timed out for {safe_book_id}")
-        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Retry request failed: {e.response.status_code}")
-        detail = e.response.json().get("detail", "Retry failed")
-        raise HTTPException(status_code=e.response.status_code, detail=detail)
-
-    except Exception as e:
-        logger.error(f"Retry request error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to initiate retry")
-
-@app.get("/api/audiobook/{book_id}/play/{chunk_filename}")
-async def serve_audiobook_chunk(book_id: str, chunk_filename: str):
-    """Serve a specific audio chunk from an audiobook (Functionality retained from baseline)"""
-    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
-    safe_filename = re.sub(r'[^\w\-\.]', '', chunk_filename).strip()
-
-    if not safe_filename.endswith('.wav'):
-        raise HTTPException(status_code=400, detail="Only WAV files are supported")
-
-    file_path = AUDIOBOOKS_DIR / safe_book_id / safe_filename
-
-    if not file_path.exists():
-        logger.warning(f"Audio file not found: {file_path}")
-        raise HTTPException(status_code=404, detail="Audio chunk not found")
-
-    return FileResponse(
-        path=file_path,
-        media_type="audio/wav",
-        headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600"
-        }
-    )
-
-
-@app.get("/api/available_pdfs")
-async def list_available_pdfs():
-    """List PDFs available for processing (Functionality retained from baseline)"""
-    pdf_input_dir = Path("/workspace/pdf_input")
-    pdfs = []
-    if pdf_input_dir.exists():
-        for pdf_file in pdf_input_dir.glob("*.pdf"):
-            pdfs.append({
-                "filename": pdf_file.name,
-                "size_bytes": pdf_file.stat().st_size,
-                "size_mb": round(pdf_file.stat().st_size / (1024 * 1024), 2)
-            })
-    return {"available_pdfs": pdfs}
-
-
-# --- Proxy to PDF Processor Service ---
 @app.post("/api/v1/process/{pdf_filename}")
 async def start_pdf_processing(pdf_filename: str):
     """
@@ -520,8 +489,78 @@ async def start_pdf_processing(pdf_filename: str):
         raise HTTPException(status_code=500, detail="Failed to initiate processing")
 
 
-# --- Step 1.2: New Endpoint to List Sources ---
-@app.get("/api/audio_sources")
-async def list_audio_sources():
-    """Returns a list of available audio source names."""
-    return {"sources": list(AUDIO_SOURCES.keys())}
+# ════════════════════════════════════════════════════════════════════════════════
+# SECTION H — Processing Control APIs
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/retry/{book_id}")
+async def retry_processing(book_id: str, force_rebuild: bool = False):
+    """
+    Proxy retry request to pdf-processor service.
+    """
+    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
+
+    try:
+        api_url = f"{PDF_SERVICE_URL}/api/v1/retry/{safe_book_id}"
+
+        # Pass force_rebuild flag as a query parameter
+        response = await client.post(api_url, params={"force_rebuild": force_rebuild})
+        response.raise_for_status()
+
+        return response.json()
+
+    except httpx.TimeoutException:
+        logger.error(f"Retry request timed out for {safe_book_id}")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Retry request failed: {e.response.status_code}")
+        detail = e.response.json().get("detail", "Retry failed")
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+
+    except Exception as e:
+        logger.error(f"Retry request error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate retry")
+
+
+@app.post("/api/v1/rebuild_selective/{book_id}")
+async def rebuild_selective(
+        book_id: str,
+        chunk_ids: Optional[str] = None,
+        pages: Optional[str] = None,
+):
+    """
+    Proxy selective rebuild request to pdf-processor service.
+    Full Stages 1+2, targeted Stage 3 audio generation.
+    """
+    safe_book_id = re.sub(r'[^\w\s\-]', '', book_id).strip()
+
+    try:
+        api_url = f"{PDF_SERVICE_URL}/api/v1/rebuild_selective/{safe_book_id}"
+
+        params = {}
+        if chunk_ids:
+            params["chunk_ids"] = chunk_ids
+        if pages:
+            params["pages"] = pages
+
+        response = await client.post(api_url, params=params)
+        response.raise_for_status()
+
+        return response.json()
+
+    except httpx.TimeoutException:
+        logger.error(f"Selective rebuild timed out for {safe_book_id}")
+        raise HTTPException(status_code=504, detail="Gateway Timeout: PDF service did not respond.")
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Selective rebuild failed: {e.response.status_code}")
+        try:
+            detail = e.response.json().get("detail", "Selective rebuild failed")
+        except Exception:
+            detail = f"Selective rebuild failed (HTTP {e.response.status_code})"
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+
+    except Exception as e:
+        logger.error(f"Selective rebuild error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initiate selective rebuild")

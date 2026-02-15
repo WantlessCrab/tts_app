@@ -17,19 +17,22 @@ import sys
 import json
 from pathlib import Path
 import logging
+import logging as _logging
 import asyncio
 import httpx
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 import os
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Set
 from pydantic import BaseModel, Field, ValidationError
 import tempfile
 import shutil
 import datetime
 import re
 import unicodedata
-import json
+import wave
+import io
+from collections import Counter
 
 # V1.6: Use extraction_engine instead of text_cleanup
 try:
@@ -37,6 +40,7 @@ try:
 except ImportError:
     import extraction_engine
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ========================================
 # Pydantic Schema Definition
@@ -63,7 +67,7 @@ class ManifestSchema(BaseModel):
     # State and Progress
     processing_status: Optional[str] = Field(None)
     total_chunks: int = Field(0)
-    ready_chunks: List[ReadyChunkSchema] = Field([])
+    ready_chunks: List[ReadyChunkSchema] = Field(default_factory=list)
 
     # Error/Recovery
     error_message: Optional[str] = Field(None)
@@ -97,10 +101,120 @@ TTS_SEMAPHORE = asyncio.Semaphore(TTS_MAX_CONCURRENT_REQUESTS)
 MANIFEST_LOCK = asyncio.Lock()
 
 TTS_MAX_CHUNK_CHARS = 650
+_TTS_UNIT_MIN_VIABLE_WORDS: int = 3
+_TTS_COMPOUND_SEGMENT_MIN_CHARS: int = 3
+_TTS_PROACTIVE_SPLIT_CHARS: int = 130
+_TTS_PROACTIVE_SPLIT_WORDS: int = 22
+
+# Stage 3 TTS output validation thresholds
+_TTS_MAX_WAV_SECONDS: float = 120.0  # Absolute ceiling
+_TTS_MAX_DURATION_RATIO: float = 5.0  # Max actual/expected
+_TTS_MIN_DURATION_RATIO: float = 0.1  # Min actual/expected (deflation)
+_TTS_MIN_EXPECTED_SECONDS: float = 1.5  # Floor for unit expected duration
 
 EXTRACTOR_VERSION = "2.2"
 
 MAX_CONSECUTIVE_FAILURES = 5
+
+
+# ========================================
+# V1.8: Per-Sentence Audio Synthesis
+# ========================================
+
+def _concatenate_wav_with_gaps(wav_segments: List[bytes], gap_ms: int = 40) -> bytes:
+    """
+    Concatenate WAV audio segments with silence gaps between them.
+
+    Used for prosodic clause splitting: each clause is generated separately
+    by TTS and concatenated with micro-gaps (30-50ms) to sound like one
+    continuous sentence while avoiding TTS decoder overflow.
+
+    ARCHITECTURAL NOTE:
+        This is a Stage 3 (audio generation) concern only.
+        It does NOT affect semantic segmentation, citation, or chunk logic.
+
+    Args:
+        wav_segments: List of WAV file bytes from individual TTS calls
+        gap_ms: Milliseconds of silence between segments (default 40ms)
+
+    Returns:
+        Combined WAV file bytes
+    """
+    if not wav_segments:
+        return b''
+    if len(wav_segments) == 1:
+        return wav_segments[0]
+
+    # Read parameters from first segment
+    try:
+        with wave.open(io.BytesIO(wav_segments[0]), 'r') as w:
+            params = w.getparams()
+            sample_rate = w.getframerate()
+            sample_width = w.getsampwidth()
+            n_channels = w.getnchannels()
+    except Exception as e:
+        logger.warning(f"Failed to read WAV params: {e}, returning first segment")
+        return wav_segments[0]
+
+    # Generate silence gap
+    gap_samples = int(sample_rate * gap_ms / 1000)
+    silence = b'\x00' * (gap_samples * sample_width * n_channels)
+
+    # Combine all audio data
+    combined_frames = []
+    for i, segment in enumerate(wav_segments):
+        try:
+            with wave.open(io.BytesIO(segment), 'r') as w:
+                # Enforce parameter consistency across segments
+                if (
+                        w.getframerate() != sample_rate
+                        or w.getsampwidth() != sample_width
+                        or w.getnchannels() != n_channels
+                ):
+                    logger.warning(
+                        "WAV segment %d params mismatch (rate=%r width=%r ch=%r) != (rate=%r width=%r ch=%r); skipping",
+                        i, w.getframerate(), w.getsampwidth(), w.getnchannels(),
+                        sample_rate, sample_width, n_channels
+                    )
+                    continue
+                combined_frames.append(w.readframes(w.getnframes()))
+        except Exception as e:
+            logger.warning(f"Failed to read WAV segment {i}: {e}, skipping")
+            continue
+
+        # Add silence gap after all but last segment
+        if i < len(wav_segments) - 1:
+            combined_frames.append(silence)
+
+    if not combined_frames:
+        return wav_segments[0] if wav_segments else b''
+
+    # If we skipped most segments, fail-open to first segment for safety
+    if len(combined_frames) < max(1, len(wav_segments) // 2):
+        logger.warning(
+            "Most WAV segments were skipped during concatenation (%d/%d kept); returning first segment",
+            len(combined_frames), len(wav_segments)
+        )
+        return wav_segments[0]
+
+    # Write combined WAV
+    output = io.BytesIO()
+    with wave.open(output, 'w') as w:
+        w.setparams(params)
+        w.writeframes(b''.join(combined_frames))
+
+    final_bytes = output.getvalue()
+
+    # Validate the combined WAV is parseable (fail-open to first segment)
+    try:
+        with wave.open(io.BytesIO(final_bytes), 'r') as _w:
+            _ = _w.getnframes()
+    except Exception as e:
+        logger.warning(f"Combined WAV parse failed: {e}; returning first segment")
+        return wav_segments[0]
+
+    return final_bytes
+
 
 # ========================================
 # Lifecycle Events
@@ -185,7 +299,7 @@ async def retry_processing(
     # Source A: Existing manifest
     if manifest_path.exists():
         try:
-            with open(manifest_path, 'r') as f:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 existing_manifest = json.load(f)
             source_filename = existing_manifest.get('metadata', {}).get('source_filename')
             logger.info(f"Found source from manifest: {source_filename}")
@@ -234,7 +348,7 @@ async def retry_processing(
                 status_code=404,
                 detail=f"No manifest found for '{safe_book_id}'. Use force_rebuild=true."
             )
-        if existing_manifest.get('processing_status') not in ['failed', 'stage_3_partial']:
+        if existing_manifest.get('processing_status') not in ['failed', 'stage_3_partial', 'stage_3_started']:
             raise HTTPException(
                 status_code=400,
                 detail="Job is not in a retryable state. Use force_rebuild=true."
@@ -258,8 +372,8 @@ async def retry_processing(
 
         # Use set to avoid duplicate deletion attempts
         files_to_nuke = set()
-        files_to_nuke.update(CACHE_DIR.glob(f"*{safe_book_id}*"))
-        files_to_nuke.update(CACHE_DIR.glob(f"*{pdf_stem}*"))
+        files_to_nuke.update(CACHE_DIR.glob(f"{safe_book_id}_*"))
+        files_to_nuke.update(CACHE_DIR.glob(f"{pdf_stem}_*"))
 
         # Delete with error handling (Lead's approach)
         for file_path in files_to_nuke:
@@ -281,7 +395,7 @@ async def retry_processing(
             "error_message": None
         }
     else:
-        manifest = existing_manifest
+        manifest = dict(existing_manifest)
         manifest['processing_status'] = 'processing_started'
         manifest['trace_id'] = new_trace_id
         manifest['error_message'] = None
@@ -294,6 +408,151 @@ async def retry_processing(
     )
 
     return {"status": "retry_started", "book_id": safe_book_id, "trace_id": new_trace_id}
+
+
+@app.post("/api/v1/rebuild_selective/{book_id}")
+async def rebuild_selective(
+        book_id: str,
+        background_tasks: BackgroundTasks,
+        chunk_ids: Optional[str] = None,
+        pages: Optional[str] = None,
+):
+    """
+    Selective rebuild: full Stages 1+2, targeted Stage 3.
+
+    Runs identical scorched-earth + full extraction + full semantic chunking.
+    Only Stage 3 (TTS audio generation) is filtered to target chunks.
+
+    Args:
+        book_id: Target book identifier (from URL path).
+        background_tasks: FastAPI background task runner (injected).
+        chunk_ids: Comma-separated chunk IDs, e.g. "0,5,9"
+        pages: Comma-separated page numbers, e.g. "1,3" (resolved to chunk IDs after Stage 2)
+    """
+    logger.info(f"--- SELECTIVE REBUILD: Start for '{book_id}' ---")
+
+    # 1. Resolve book ID
+    safe_book_id = re_sanitize(book_id)
+    manifest_path = OUTPUT_DIR / safe_book_id / "manifest.json"
+
+    # 2. Parse targeting parameters
+    target_chunk_ids = None
+    target_pages = None
+
+    if chunk_ids:
+        try:
+            target_chunk_ids = {int(x.strip()) for x in chunk_ids.split(",") if x.strip()}
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="chunk_ids must be comma-separated integers")
+
+    if pages:
+        try:
+            target_pages = {int(x.strip()) for x in pages.split(",") if x.strip()}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="pages must be comma-separated integers")
+
+    # Union semantics: if both chunk_ids and pages are provided,
+    # the final target set is the union of explicitly named chunks
+    # plus all chunks resolved from the named pages.
+    if not target_chunk_ids and not target_pages:
+        raise HTTPException(
+            status_code=400,
+            detail="Must specify chunk_ids and/or pages. For full rebuild use retry with force_rebuild=true."
+        )
+
+    # 3. Find source filename
+    # NOTE: This resolution logic mirrors retry endpoint (lines 297-344).
+    # Intentional duplication: extracting a shared helper would refactor
+    # the existing endpoint, which is outside scope.
+    source_filename = None
+
+    # Source A: Existing manifest
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                existing_manifest = json.load(f)
+            source_filename = existing_manifest.get('metadata', {}).get('source_filename')
+        except Exception as e:
+            logger.warning(f"Failed to read manifest: {e}")
+
+    # Source B: Scan INPUT_DIR
+    if not source_filename:
+        for pdf_file in INPUT_DIR.glob("*.pdf"):
+            if derive_book_id(pdf_file.stem) == safe_book_id:
+                source_filename = pdf_file.name
+                break
+
+    # Source C: Pattern match
+    if not source_filename:
+        candidates = [
+            f"{safe_book_id}.pdf",
+            f"{safe_book_id.replace('_', ' ')}.pdf",
+            f"{safe_book_id.replace('_', '-')}.pdf",
+        ]
+        for candidate in candidates:
+            if (INPUT_DIR / candidate).exists():
+                source_filename = candidate
+                break
+
+    if not source_filename:
+        raise HTTPException(status_code=404, detail=f"No PDF found for book_id '{safe_book_id}'.")
+
+    if not (INPUT_DIR / source_filename).exists():
+        raise HTTPException(status_code=404, detail=f"Source PDF '{source_filename}' not found.")
+
+    new_trace_id = str(uuid.uuid4())
+
+    # 4. Scorched earth (identical to force_rebuild)
+    logger.warning(f"[{new_trace_id}] Selective Rebuild: Scorched Earth for '{safe_book_id}'")
+
+    book_dir = OUTPUT_DIR / safe_book_id
+    if book_dir.exists():
+        shutil.rmtree(book_dir)
+        logger.info(f"Deleted output directory: {book_dir}")
+    book_dir.mkdir(parents=True, exist_ok=True)
+
+    pdf_stem = Path(source_filename).stem
+    files_to_nuke = set()
+    files_to_nuke.update(CACHE_DIR.glob(f"{safe_book_id}_*"))
+    files_to_nuke.update(CACHE_DIR.glob(f"{pdf_stem}_*"))
+    for file_path in files_to_nuke:
+        try:
+            if file_path.is_file():
+                file_path.unlink()
+                logger.info(f"Deleted cache: {file_path.name}")
+        except Exception as e:
+            logger.warning(f"Failed to delete {file_path.name}: {e}")
+
+    # 5. Fresh manifest
+    manifest = {
+        "metadata": {"source_filename": source_filename},
+        "book_id": safe_book_id,
+        "trace_id": new_trace_id,
+        "processing_status": "processing_started",
+        "total_chunks": 0,
+        "ready_chunks": [],
+        "error_message": None
+    }
+    validate_and_write_manifest(manifest_path, manifest, new_trace_id, logger)
+
+    # 6. Dispatch selective pipeline
+    background_tasks.add_task(
+        run_selective_pipeline,
+        source_filename,
+        safe_book_id,
+        new_trace_id,
+        target_chunk_ids,
+        target_pages,
+    )
+
+    return {
+        "status": "selective_rebuild_started",
+        "book_id": safe_book_id,
+        "trace_id": new_trace_id,
+        "target_chunk_ids": sorted(target_chunk_ids) if target_chunk_ids else None,
+        "target_pages": sorted(target_pages) if target_pages else None,
+    }
 
 
 @app.get("/api/v1/citation/{book_id}")
@@ -346,23 +605,23 @@ async def run_full_pipeline(
 
     pdf_path = INPUT_DIR / pdf_filename
     citation_filename = f"{book_id}_citation_ready.json"
-    citation_path = CACHE_DIR / citation_filename
+    citation_cache_path = CACHE_DIR / citation_filename
     manifest_path = OUTPUT_DIR / book_id / "manifest.json"
-
+    citation_ready_path = citation_cache_path  # Default; overwritten if Stage 2 runs
+    m = None  # Initialized; assigned when manifest is read/created
     try:
         # ====================================================================
         # P0 FIX: Version-Aware Cache Check
         # ====================================================================
         use_cache = False
 
-        if not force_rebuild and citation_path.exists():
+        if not force_rebuild and citation_cache_path.exists():
             # Check 1: Timestamp freshness
-            cache_fresh = not (pdf_path.stat().st_mtime > citation_path.stat().st_mtime)
-
+            cache_fresh = not (pdf_path.stat().st_mtime > citation_cache_path.stat().st_mtime)
             # Check 2: Extractor version match
             version_match = False
             try:
-                with open(citation_path, 'r', encoding='utf-8') as f:
+                with open(citation_cache_path, 'r', encoding='utf-8') as f:
                     cached_data = json.load(f)
                 cached_version = cached_data.get('metadata', {}).get('extractor_version')
                 version_match = (cached_version == EXTRACTOR_VERSION)
@@ -379,12 +638,28 @@ async def run_full_pipeline(
 
         if use_cache:
             logger.info(f"[{trace_id}] Cache hit (v{EXTRACTOR_VERSION}). Skipping extraction.")
-            with open(citation_path, 'r', encoding='utf-8') as f:
+            with open(citation_cache_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+            if not manifest_path.exists():
+                m = {
+                    "metadata": {"source_filename": pdf_filename},
+                    "book_id": book_id,
+                    "trace_id": trace_id,
+                    "processing_status": "processing_started",
+                    "total_chunks": 0,
+                    "ready_chunks": []
+                }
+                validate_and_write_manifest(manifest_path, m, trace_id, logger)
+
             with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
+
+            # Cache hit: reuse citation_ready + update manifest for Stage 2
+            total_chunks = data['processing']['total_chunks']
+
+            # Update manifest metadata
             m['metadata'] = data['metadata']
-            m['total_chunks'] = data['processing']['total_chunks']
+            m['total_chunks'] = total_chunks
             m['processing_status'] = 'stage_2_complete'
             validate_and_write_manifest(manifest_path, m, trace_id, logger)
         else:
@@ -395,36 +670,57 @@ async def run_full_pipeline(
             if not raw_cache_path:
                 raise RuntimeError("Stage 1 failed")
 
-            # Update Manifest
-            with open(manifest_path, 'r') as f:
+            if not manifest_path.exists():
+                m = {
+                    "metadata": {"source_filename": pdf_filename},
+                    "book_id": book_id,
+                    "trace_id": trace_id,
+                    "processing_status": "processing_started",
+                    "total_chunks": 0,
+                    "ready_chunks": []
+                }
+                validate_and_write_manifest(manifest_path, m, trace_id, logger)
+
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
+
             m['processing_status'] = 'stage_1_complete'
             validate_and_write_manifest(manifest_path, m, trace_id, logger)
 
             # Stage 2: Semantic Chunking
             logger.info(f"[{trace_id}] Stage 2: Semantic Chunking...")
-            citation_path = prepare_tts_chunks_with_citations(raw_cache_path, trace_id)
-            if not citation_path:
+            citation_ready_path = prepare_tts_chunks_with_citations(raw_cache_path, trace_id)
+            if not citation_ready_path:
                 raise RuntimeError("Stage 2 failed")
 
             # Update Manifest
-            with open(citation_path, 'r') as f:
+            with open(citation_ready_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            with open(manifest_path, 'r') as f:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
             m['metadata'] = data['metadata']
             m['total_chunks'] = data['processing']['total_chunks']
             m['processing_status'] = 'stage_2_complete'
             validate_and_write_manifest(manifest_path, m, trace_id, logger)
+        # Stage 3: Audio Generation (ALWAYS RUN)
 
-        # Stage 3: Audio Generation
         logger.info(f"[{trace_id}] Stage 3: Audio Generation...")
-        with open(manifest_path, 'r') as f:
+
+        with open(manifest_path, 'r', encoding='utf-8') as f:
             m = json.load(f)
+
         m['processing_status'] = 'stage_3_started'
         validate_and_write_manifest(manifest_path, m, trace_id, logger)
 
-        await generate_audio_streaming(citation_path, book_id, trace_id, manifest_path)
+        stage3_success = await generate_audio_streaming(
+            citation_ready_path,
+            book_id,
+            trace_id,
+            manifest_path
+        )
+
+        if not stage3_success:
+            logger.warning(f"[{trace_id}] Stage 3 completed with failures")
 
         # Final Status Check with Reconciliation
         final_status = reconcile_manifest_with_disk(book_id, manifest_path, trace_id)
@@ -433,13 +729,127 @@ async def run_full_pipeline(
     except Exception as e:
         logger.error(f"[{trace_id}] Critical Failure: {e}", exc_info=True)
         try:
-            with open(manifest_path, 'r') as f:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
             m['processing_status'] = 'failed'
             m['error_message'] = str(e)
             validate_and_write_manifest(manifest_path, m, trace_id, logger)
-        except:
-            pass
+        except Exception as manifest_err:
+            logger.warning(
+                f"[{trace_id}] Failed to update manifest after pipeline failure: {manifest_err}")
+
+
+async def run_selective_pipeline(
+        pdf_filename: str,
+        book_id: str,
+        trace_id: str,
+        target_chunk_ids: Optional[Set[int]] = None,
+        target_pages: Optional[Set[int]] = None,
+):
+    """
+    Selective pipeline: full Stages 1+2, filtered Stage 3.
+
+    Stages 1, 1.5, 2, 2.5 run identically to run_full_pipeline with force_rebuild=True.
+    Stage 3 generates audio only for targeted chunks.
+    """
+    logger.info(f"[{trace_id}] Selective pipeline started for: {pdf_filename}")
+
+    manifest_path = OUTPUT_DIR / book_id / "manifest.json"
+    citation_ready_path = None
+
+    try:
+        # ══════════════════════════════════════════════════════════════
+        # STAGE 1: Extraction (identical to run_full_pipeline)
+        # ══════════════════════════════════════════════════════════════
+        logger.info(
+            f"[{trace_id}] Stage 1: Extraction (extraction_engine v{EXTRACTOR_VERSION})...")
+        raw_cache_path = process_pdf(pdf_filename, book_id, trace_id)
+        if not raw_cache_path:
+            raise RuntimeError("Stage 1 failed")
+
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            m = json.load(f)
+        m['processing_status'] = 'stage_1_complete'
+        validate_and_write_manifest(manifest_path, m, trace_id, logger)
+
+        # ══════════════════════════════════════════════════════════════
+        # STAGE 2: Semantic Chunking (identical to run_full_pipeline)
+        # ══════════════════════════════════════════════════════════════
+        logger.info(f"[{trace_id}] Stage 2: Semantic Chunking...")
+        citation_ready_path = prepare_tts_chunks_with_citations(raw_cache_path, trace_id)
+        if not citation_ready_path:
+            raise RuntimeError("Stage 2 failed")
+
+        with open(citation_ready_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            m = json.load(f)
+        m['metadata'] = data['metadata']
+        m['total_chunks'] = data['processing']['total_chunks']
+        m['processing_status'] = 'stage_2_complete'
+        validate_and_write_manifest(manifest_path, m, trace_id, logger)
+
+        # ══════════════════════════════════════════════════════════════
+        # RESOLVE TARGETING: Merge chunk_ids + pages → final set
+        # ══════════════════════════════════════════════════════════════
+        resolved_chunk_ids = set(target_chunk_ids) if target_chunk_ids else set()
+
+        if target_pages:
+            for chunk in data.get('chunks', []):
+                chunk_page = chunk.get('page')
+                chunk_pages = chunk.get('pages') or ([chunk_page] if chunk_page is not None else [])
+                if any(p in target_pages for p in chunk_pages):
+                    resolved_chunk_ids.add(chunk['chunk_id'])
+            logger.info(
+                f"[{trace_id}] Pages {sorted(target_pages)} resolved; "
+                f"targeting chunks: {sorted(resolved_chunk_ids)}"
+            )
+
+        if not resolved_chunk_ids:
+            logger.warning(
+                f"[{trace_id}] No chunks resolved from targeting parameters. "
+                f"Stage 3 will produce no audio."
+            )
+
+        # ══════════════════════════════════════════════════════════════
+        # STAGE 3: Audio Generation (SELECTIVE)
+        # ══════════════════════════════════════════════════════════════
+        logger.info(
+            f"[{trace_id}] Stage 3: Selective Audio Generation "
+            f"(targeting {len(resolved_chunk_ids)} chunks: {sorted(resolved_chunk_ids)})"
+        )
+
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            m = json.load(f)
+        m['processing_status'] = 'stage_3_started'
+        validate_and_write_manifest(manifest_path, m, trace_id, logger)
+
+        stage3_success = await generate_audio_streaming(
+            citation_ready_path,
+            book_id,
+            trace_id,
+            manifest_path,
+            target_chunk_ids=resolved_chunk_ids,
+        )
+
+        if not stage3_success:
+            logger.warning(f"[{trace_id}] Stage 3 (selective) completed with failures")
+
+        # Final reconciliation
+        final_status = reconcile_manifest_with_disk(book_id, manifest_path, trace_id)
+        logger.info(f"[{trace_id}] Selective Job Finished: {final_status}")
+
+    except Exception as e:
+        logger.error(f"[{trace_id}] Selective Pipeline Failure: {e}", exc_info=True)
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                m = json.load(f)
+            m['processing_status'] = 'failed'
+            m['error_message'] = str(e)
+            validate_and_write_manifest(manifest_path, m, trace_id, logger)
+        except Exception as manifest_err:
+            logger.warning(
+                f"[{trace_id}] Failed to update manifest after selective failure: {manifest_err}")
 
 
 # ========================================
@@ -570,7 +980,15 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
                 page_outputs.append(page_data)
 
             # Stage 1.5: Normalize headers/footers across document
-            extraction_engine.normalize_header_footer_across_document(page_outputs, trace_id=trace_id)
+            extraction_engine.normalize_header_footer_across_document(
+                page_outputs,
+                trace_id=trace_id
+            )
+            # Document-scope bibliography/reference role refinement
+            extraction_engine.refine_roles_across_document(
+                page_outputs,
+                trace_id=trace_id
+            )
 
         # Build output structure compatible with Stage 2
         output_data = {
@@ -622,8 +1040,28 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
         # Stage 2: Compile TTS-ready content using extraction_engine
         tts_result = extraction_engine.compile_tts_ready_content(page_outputs, trace_id)
 
+        # ===============================================================
+        # CONTRACT VALIDATION: Stage 2 Output Integrity
+        # ===============================================================
+        if not isinstance(tts_result, dict) or 'chunks' not in tts_result:
+            raise RuntimeError("Stage 2 contract violation: missing 'chunks' in tts_result")
+
+        if __debug__:
+            for ch in tts_result.get('chunks', []):
+                if not isinstance(ch, dict):
+                    logger.error("[%s] CONTRACT VIOLATION: non-dict chunk emitted", trace_id)
+                    continue
+                if 'sentences' not in ch:
+                    logger.error(
+                        "[%s] CONTRACT VIOLATION: chunk missing sentences: chunk_id=%r",
+                        trace_id, ch.get('chunk_id')
+                    )
+
         # Build citation-ready output
-        book_id = data.get('book_id') or derive_book_id(cache_file_path.stem)
+        stem = cache_file_path.stem
+        if stem.endswith("_raw"):
+            stem = stem[:-4]
+        book_id = data.get('book_id') or derive_book_id(stem)
 
         # ═══════════════════════════════════════════════════════════════════
         # SEMANTIC ARTIFACT: Persist RONC/A2/disposition decisions
@@ -641,6 +1079,26 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
         )
         citation_path = CACHE_DIR / f"{book_id}_citation_ready.json"
 
+        # ===============================================================
+        # DEBUG: Prosodic Metadata Presence Check (belt + suspenders)
+        #
+        # Check BOTH:
+        #   - flattened sentence fields (needs_clause_splitting / prosodic_clauses)
+        #   - runtime tracker (sent['_tts_change_tracker'])
+        # ===============================================================
+        if __debug__:
+            for ch in tts_result.get('chunks', []):
+                for s in ch.get('sentences', []):
+                    needs_split = s.get('needs_clause_splitting', False)
+                    clauses = s.get('prosodic_clauses')
+
+                    if needs_split and not clauses:
+                        logger.error(
+                            "[%s] PROSODY CONTRACT VIOLATION: "
+                            "needs_clause_splitting=True but no clauses present",
+                            trace_id
+                        )
+
         output_data = {
             'metadata': data['metadata'],
             'book_id': book_id,
@@ -648,11 +1106,32 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
             'processing': tts_result['processing'],
             'document_headers': tts_result.get('document_headers', []),
             'document_footers': tts_result.get('document_footers', []),
-            'chunks': _format_chunks_for_manifest(tts_result['chunks']),
-            'highlighting_enabled': True
+            'chunks': tts_result['chunks'],
+            'highlighting_enabled': True,
+            'page_turn_markers': tts_result.get('page_turn_markers', []),
         }
 
         atomic_write_manifest(citation_path, output_data, logger)
+
+        # ═══════════════════════════════════════════════════════════════════
+        # STAGE 2.5: UI PRESENTATION SYNTHESIS (NON-FATAL)
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            _generate_ui_sentences_artifact(
+                citation_ready_path=citation_path,
+                semantic_path=semantic_path,
+                book_id=book_id,
+                trace_id=trace_id
+            )
+        except Exception as e:
+            logger.warning(
+                "[%s] Stage 2.5 UI synthesis failed (non-fatal): %s",
+                trace_id, e
+            )
+
+        if __debug__ and not citation_path.exists():
+            raise RuntimeError("Manifest write failed: citation_ready.json not created")
+
         logger.info(
             f"[{trace_id or 'N/A'}] Stage 2 complete: "
             f"{tts_result['processing']['total_chunks']} chunks, "
@@ -671,16 +1150,45 @@ def _format_chunks_for_manifest(chunks: List[dict]) -> List[dict]:
     """
     formatted = []
     for chunk in chunks:
+        # ===============================================================
+        # CONTRACT CHECK: Chunk Structure
+        # ===============================================================
+        if not isinstance(chunk, dict):
+            raise TypeError("Chunk must be a dict")
+
+        required_keys = ("chunk_id", "text", "page", "sentences", "start_time", "end_time")
+        for k in required_keys:
+            if k not in chunk:
+                raise KeyError(f"Chunk missing required key: {k}")
+
+        pages = chunk.get('pages')
+        if not pages:
+            pages = [chunk.get('page')]
+        pages = sorted(p for p in pages if p is not None)
+
         formatted.append({
             'chunk_id': chunk['chunk_id'],
             'text': chunk['text'],
-            'page': chunk['page'],
-            'pages': chunk.get('pages', [chunk['page']]),
+            'page': pages[0] if pages else chunk.get('page'),
+            'pages': pages,
             'sentences': _format_sentences_for_manifest(chunk['sentences']),
             'start_time': chunk['start_time'],
             'duration_seconds': chunk['duration_seconds'],
             'end_time': chunk['end_time']
         })
+
+    # ===============================================================
+    # DEBUG: Sentence Prosody Visibility Check (final line of defense)
+    # ===============================================================
+    if __debug__:
+        for ch in formatted:
+            for s in ch.get('sentences', []):
+                if s.get('needs_clause_splitting') and not s.get('prosodic_clauses'):
+                    logger.error(
+                        "MANIFEST CONTRACT VIOLATION: "
+                        "needs_clause_splitting=True but prosodic_clauses missing"
+                    )
+
     return formatted
 
 
@@ -722,6 +1230,9 @@ def _format_sentences_for_manifest(sentences: List[dict]) -> List[dict]:
             'end_time': sent.get('end_time', 0.0),
             'duration_seconds': sent.get('duration_seconds', 0.0),
             'paragraph_index': sent.get('paragraph_index'),
+            # Character offsets for future click-seek precision
+            'char_start': sent.get('char_start'),
+            'char_end': sent.get('char_end'),
         }
 
         # ═══════════════════════════════════════════════════════════════════
@@ -729,7 +1240,12 @@ def _format_sentences_for_manifest(sentences: List[dict]) -> List[dict]:
         # ═══════════════════════════════════════════════════════════════════
 
         # Source span canonical IDs (primary join key)
-        source_cids = sent.get('_source_span_ids')
+        source_cids = (
+                sent.get('source_cids')
+                or sent.get('_source_span_ids')
+                or sent.get('_source_cids')
+                or sent.get('source_span_ids')
+        )
         if source_cids:
             # Filter None sentinels for manifest (keep only valid IDs)
             entry['source_cids'] = [cid for cid in source_cids if cid is not None]
@@ -778,9 +1294,588 @@ def _format_sentences_for_manifest(sentences: List[dict]) -> List[dict]:
         if sent.get('boundary_risks'):
             entry['boundary_risks'] = sent['boundary_risks']
 
+        # ═══════════════════════════════════════════════════════════════════
+        # V1.7: Prosodic Clause Metadata Propagation (TTS Decoder Safety)
+        # Prefer flattened sentence fields (survivable), fallback to tracker.
+        # ═══════════════════════════════════════════════════════════════════
+        needs_split = sent.get('needs_clause_splitting')
+        clauses = sent.get('prosodic_clauses')
+
+        if needs_split is None or clauses is None:
+            tracker = sent.get('_tts_change_tracker', {}) or {}
+            if needs_split is None:
+                needs_split = tracker.get('needs_clause_splitting', False)
+            if clauses is None:
+                clauses = tracker.get('prosodic_clauses', None)
+
+        # Always emit needs_clause_splitting for observability
+        entry['needs_clause_splitting'] = bool(needs_split)
+        if needs_split:
+            entry['prosodic_clauses'] = clauses or []
+
         formatted.append(entry)
 
     return formatted
+
+
+# ========================================
+# STAGE 2.5: Backend Contract to Frontend UI Consumption
+# ========================================
+
+def _filter_excluded_cids(cids: List[str], span_lookup: dict) -> List[str]:
+    """
+    Filter CIDs whose spans are marked _tts_excluded.
+
+    Fail-open: CIDs not found in span_lookup are preserved.
+    Used by both UI synthesis and citation API to ensure
+    highlighting excludes non-narrated content.
+    """
+    if not span_lookup or not cids:
+        return cids
+    return [
+        cid for cid in cids
+        if cid and not span_lookup.get(cid, {}).get("_tts_excluded", False)
+    ]
+
+
+def _generate_ui_sentences_artifact(
+        citation_ready_path: Path,
+        semantic_path: Path,
+        book_id: str,
+        trace_id: str = None
+) -> Optional[Path]:
+    """
+    STAGE 2.5: Generate UI presentation synthesis artifact.
+    [docstring unchanged]
+    """
+    try:
+        # ... load source artifacts (unchanged) ...
+
+        with open(citation_ready_path, 'r', encoding='utf-8') as f:
+            citation_data = json.load(f)
+
+        with open(semantic_path, 'r', encoding='utf-8') as f:
+            semantic_data = json.load(f)
+
+        # ─────────────────────────────────────────────────────────────────
+        # CORRECTION 6: Prefer file's book_id over parameter
+        # ─────────────────────────────────────────────────────────────────
+        effective_book_id = citation_data.get("book_id") or book_id
+
+        span_lookup: dict[str, dict] = semantic_data.get("spans", {})
+
+        ui_sentences: List[dict] = []
+        page_index: dict[str, dict] = {}
+
+        cross_page_count = 0
+        stitched_count = 0
+        skipped_no_index = 0  # CORRECTION 3: Track skipped sentences
+        skipped_no_geometry = 0  # Track sentences with no resolved geometry
+        all_pages: set = set()
+
+        for chunk in citation_data.get("chunks", []):
+            chunk_id = chunk.get("chunk_id")
+
+            for sent in chunk.get("sentences", []):
+                global_idx = sent.get("global_index")
+
+                # ─────────────────────────────────────────────────────────
+                # CORRECTION 3: Guard against missing global_index
+                # ─────────────────────────────────────────────────────────
+                if not isinstance(global_idx, int):
+                    skipped_no_index += 1
+                    if trace_id:
+                        logger.warning(
+                            "[%s] Stage 2.5: Skipping sentence with invalid "
+                            "global_index=%r in chunk %s",
+                            trace_id, global_idx, chunk_id
+                        )
+                    continue
+
+                raw_source_cids = sent.get("source_cids", [])
+
+                # ═══════════════════════════════════════════════════════════════
+                # EXCLUSION FILTER: Remove TTS-excluded spans from UI geometry
+                # Provenance preserved in citation_ready.json; filtered here for UI
+                # ═══════════════════════════════════════════════════════════════
+                source_cids = _filter_excluded_cids(raw_source_cids, span_lookup)
+
+                # Resolve geometry (preserves source_cids order)
+                geometry_by_page = _resolve_geometry_by_page_for_ui(
+                    source_cids,
+                    span_lookup
+                )
+
+                pages = sorted(int(p) for p in geometry_by_page.keys())
+
+                # Guard: Skip sentences with no resolved geometry (no UI value)
+                if not pages:
+                    skipped_no_geometry += 1
+                    if trace_id:
+                        logger.warning(
+                            "[%s] Stage 2.5: Sentence %d skipped (no geometry resolved from %d cids)",
+                            trace_id, global_idx, len(source_cids)
+                        )
+                    continue
+
+                all_pages.update(pages)
+
+                # ─────────────────────────────────────────────────────────
+                # BUILD UI SENTENCE RECORD
+                # CORRECTION 2: Add 'cids' field for I1 validation
+                # ─────────────────────────────────────────────────────────
+                ui_sent: dict[str, any] = {
+                    "global_index": global_idx,
+                    "chunk_id": chunk_id,
+                    "text": sent.get("text", ""),
+                    "role": sent.get("role", "body"),
+                    "timing": {
+                        "start": float(sent.get("start_time", 0.0)),
+                        "end": float(sent.get("end_time", 0.0))
+                    },
+                    "pages": pages,
+                    "cids": source_cids,  # NEW: preserves exact order for I1
+                    "geometry": geometry_by_page,
+                    "is_stitched": bool(sent.get("is_stitched", False)),
+                    "alignment_quality": sent.get("alignment_method", "unknown")
+                }
+
+                # Update counters
+                if len(pages) > 1:
+                    cross_page_count += 1
+                if ui_sent["is_stitched"]:
+                    stitched_count += 1
+
+                ui_sentences.append(ui_sent)
+
+                # Build page index
+                for page in pages:
+                    page_key = str(page)
+                    if page_key not in page_index:
+                        page_index[page_key] = {"sentence_indices": []}
+
+                    if global_idx not in page_index[page_key]["sentence_indices"]:
+                        page_index[page_key]["sentence_indices"].append(global_idx)
+
+        # ─────────────────────────────────────────────────────────────────
+        # CORRECTION 4: Sort page_index sentence lists numerically
+        # ─────────────────────────────────────────────────────────────────
+        for page_key in page_index:
+            page_index[page_key]["sentence_indices"].sort()
+
+        # ─────────────────────────────────────────────────────────────────
+        # CORRECTION 1: Attach page turns AFTER sentences are built
+        # Compute from_page from sentence's pages list
+        # ─────────────────────────────────────────────────────────────────
+        page_turn_markers = citation_data.get("page_turn_markers", [])
+        _attach_page_turns_to_sentences(ui_sentences, page_turn_markers)
+
+        # ─────────────────────────────────────────────────────────────────
+        # ASSEMBLE OUTPUT
+        # CORRECTION 6: Use timezone-aware UTC
+        # ═══════════════════════════════════════════════════════════════════
+        # ARCHITECTURAL NOTE: excluded_spans intentionally NOT included
+        #
+        # This artifact serves TTS playback highlighting ONLY (ui_scope).
+        # For visible-but-not-narrated content (headers, figures, etc.):
+        #   → Load semantic.json, filter spans where _tts_excluded == True
+        #
+        # This keeps ui_sentences.json single-purpose and avoids
+        # data duplication with semantic.json.
+        # ─────────────────────────────────────────────────────────────────
+        output: dict[str, any] = {
+            "schema_version": "1.1",
+            "artifact_type": "ui_sentences",
+            "ui_scope": "tts_playback",
+            "book_id": effective_book_id,
+            "trace_id": trace_id,
+            "generated_at": datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
+            "source_artifacts": {
+                "citation_ready": citation_ready_path.name,
+                "semantic": semantic_path.name
+            },
+            "sentences": ui_sentences,
+            "page_index": page_index,
+            "summary": {
+                "total_sentences": len(ui_sentences),
+                "total_pages": len(all_pages),
+                "cross_page_sentences": cross_page_count,
+                "stitched_sentences": stitched_count,
+                "skipped_invalid_index": skipped_no_index,
+                "skipped_no_geometry": skipped_no_geometry
+            }
+        }
+
+        output_path = citation_ready_path.parent / f"{effective_book_id}_ui_sentences.json"
+        atomic_write_manifest(output_path, output, logger)
+
+        logger.info(
+            "[%s] Stage 2.5 complete: %d sentences, %d pages, "
+            "%d cross-page, %d stitched, %d skipped (idx), %d skipped (geom)",
+            trace_id,
+            len(ui_sentences),
+            len(all_pages),
+            cross_page_count,
+            stitched_count,
+            skipped_no_index,
+            skipped_no_geometry
+        )
+
+        return output_path
+
+    except Exception as e:
+        logger.error(
+            "[%s] Stage 2.5 failed (non-fatal, TTS continues): %s",
+            trace_id, e,
+            exc_info=True
+        )
+        return None
+
+
+def _attach_page_turns_to_sentences(
+        ui_sentences: List[dict],
+        page_turn_markers: List[dict]
+) -> None:
+    """
+    CORRECTION 1: Attach page turns to sentences with correctly computed from_page.
+
+    Computes from_page by examining the sentence's own pages list,
+    rather than assuming to_page - 1.
+
+    Mutates ui_sentences in place.
+
+    Args:
+        ui_sentences: List of UISentence dicts (must have 'pages' populated)
+        page_turn_markers: Raw markers from citation_ready.json
+    """
+    # Index sentences by global_index for O(1) lookup
+    sent_by_idx: dict[int, dict] = {
+        s["global_index"]: s for s in ui_sentences
+    }
+
+    for marker in page_turn_markers:
+        sent_idx = marker.get("sentence_global_index")
+        to_page = marker.get("page")
+        turn_time = marker.get("turn_time")
+
+        if sent_idx is None or to_page is None:
+            continue
+
+        sent = sent_by_idx.get(sent_idx)
+        if not sent:
+            continue
+
+        # ─────────────────────────────────────────────────────────────────
+        # Compute from_page from sentence's pages list
+        # Find the page in sentence.pages that precedes to_page
+        # NOTE: from_page may be null if to_page not in sentence.pages
+        #       (can occur with resolution failures or marker edge cases)
+        # ─────────────────────────────────────────────────────────────────
+        sentence_pages = sent.get("pages", [])
+        from_page = None
+
+        if to_page in sentence_pages:
+            # Find the page immediately before to_page in the sentence's page list
+            idx = sentence_pages.index(to_page)
+            if idx > 0:
+                from_page = sentence_pages[idx - 1]
+
+        # Attach page turn
+        sent["page_turn"] = {
+            "from_page": from_page,  # May be None if not determinable
+            "to_page": to_page,
+            "turn_time": float(turn_time) if turn_time is not None else 0.0
+        }
+
+
+def _resolve_geometry_by_page_for_ui(
+        source_cids: List[str],
+        span_lookup: dict[str, dict]
+) -> dict[str, List[dict]]:
+    """
+    Resolve CID list to geometry grouped by page.
+
+    INVARIANT: Output order within each page preserves source_cids order.
+    This is critical for deterministic highlighting.
+
+    Args:
+        source_cids: Ordered list of canonical span IDs
+        span_lookup: CID → span data mapping from semantic.json
+
+    Returns:
+        dict mapping page number (as string) to list of {cid, bbox} dicts.
+        Example: {"1": [{"cid": "P0:2", "bbox": [...]}, ...]}
+    """
+    geometry_by_page: dict[str, List[dict]] = {}
+
+    # Track seen CIDs to enforce uniqueness within sentence
+    seen_cids: set = set()
+
+    for cid in source_cids:
+        # Skip duplicates (invariant I4)
+        if cid in seen_cids:
+            continue
+        seen_cids.add(cid)
+
+        # Lookup span data
+        span = span_lookup.get(cid)
+        if not span:
+            continue
+
+        # Extract required fields
+        page = span.get("page_number")
+        bbox = span.get("bbox")
+
+        # Skip if missing required data
+        if page is None or bbox is None:
+            continue
+
+        # Validate bbox structure
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+
+        # Group by page (preserving insertion order = source_cids order)
+        page_key = str(page)
+        if page_key not in geometry_by_page:
+            geometry_by_page[page_key] = []
+
+        geometry_by_page[page_key].append({
+            "cid": cid,
+            "bbox": list(bbox[:4])  # Ensure list, take first 4 elements
+        })
+
+    return geometry_by_page
+
+
+def validate_ui_sentences_contract(
+        ui_data: dict[str, any],
+        semantic_data: Optional[dict[str, any]] = None
+) -> List[str]:
+    """
+    Validate ui_sentences.json against schema invariants.
+
+    Args:
+        ui_data: Parsed ui_sentences.json content
+        semantic_data: Optional parsed semantic.json for cross-validation
+
+    Returns:
+        List of violation descriptions. Empty list = valid.
+    """
+
+    errors: List[str] = []
+
+    # ─────────────────────────────────────────────────────────────────────
+    # TOP-LEVEL STRUCTURE
+    # ─────────────────────────────────────────────────────────────────────
+    required_top_keys = [
+        "schema_version", "artifact_type", "book_id",
+        "sentences", "page_index", "summary"
+    ]
+    for key in required_top_keys:
+        if key not in ui_data:
+            errors.append(f"Missing required top-level key: {key}")
+
+    if ui_data.get("artifact_type") != "ui_sentences":
+        errors.append(
+            f"Invalid artifact_type: {ui_data.get('artifact_type')} "
+            f"(expected 'ui_sentences')"
+        )
+
+    sentences = ui_data.get("sentences", [])
+    page_index = ui_data.get("page_index", {})
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I1: Geometry Order (enabled by 'cids' field)
+    # ─────────────────────────────────────────────────────────────────────
+    if semantic_data:
+        span_lookup = semantic_data.get("spans", {})
+
+        for sent in sentences:
+            idx = sent.get("global_index", "?")
+            cids = sent.get("cids", [])
+            geometry = sent.get("geometry", {})
+
+            for page_key, page_geom in geometry.items():
+                expected_cids_for_page = []
+                for cid in cids:
+                    span = span_lookup.get(cid, {})
+                    if str(span.get("page_number")) == page_key:
+                        expected_cids_for_page.append(cid)
+
+                actual_cids_for_page = [g.get("cid") for g in page_geom]
+
+                if expected_cids_for_page != actual_cids_for_page:
+                    errors.append(
+                        f"I1 VIOLATION: Sentence {idx} page {page_key} "
+                        f"geometry order mismatch. "
+                        f"Expected: {expected_cids_for_page}, "
+                        f"Actual: {actual_cids_for_page}"
+                    )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I2: Page Consistency
+    # ─────────────────────────────────────────────────────────────────────
+    for sent in sentences:
+        idx = sent.get("global_index", "?")
+        pages = set(str(p) for p in sent.get("pages", []))
+        geometry_pages = set(sent.get("geometry", {}).keys())
+
+        if geometry_pages - pages:
+            errors.append(
+                f"I2 VIOLATION: Sentence {idx} has geometry for pages "
+                f"{geometry_pages - pages} not in pages list {pages}"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I3: Timing Validity
+    # ─────────────────────────────────────────────────────────────────────
+    for sent in sentences:
+        idx = sent.get("global_index", "?")
+        timing = sent.get("timing", {})
+        start = timing.get("start", 0)
+        end = timing.get("end", 0)
+
+        if end <= start:
+            errors.append(
+                f"I3 VIOLATION: Sentence {idx} has invalid timing "
+                f"(start={start}, end={end})"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I4: CID Uniqueness (O(n) using Counter)
+    # ─────────────────────────────────────────────────────────────────────
+    for sent in sentences:
+        idx = sent.get("global_index", "?")
+        all_cids = []
+        for page_geom in sent.get("geometry", {}).values():
+            for entry in page_geom:
+                all_cids.append(entry.get("cid"))
+
+        cid_counts = Counter(all_cids)
+        duplicates = [cid for cid, count in cid_counts.items() if count > 1]
+
+        if duplicates:
+            errors.append(
+                f"I4 VIOLATION: Sentence {idx} has duplicate CIDs: {duplicates}"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I5: Page Index Completeness
+    # ─────────────────────────────────────────────────────────────────────
+    for sent in sentences:
+        idx = sent.get("global_index", "?")
+        for page in sent.get("pages", []):
+            page_key = str(page)
+            page_entry = page_index.get(page_key, {})
+            indices = page_entry.get("sentence_indices", [])
+
+            if idx not in indices:
+                errors.append(
+                    f"I5 VIOLATION: Sentence {idx} on page {page} "
+                    f"not in page_index[{page_key}]"
+                )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I6: No Exclusion Leakage (requires semantic_data)
+    # ─────────────────────────────────────────────────────────────────────
+    if semantic_data:
+        span_lookup = semantic_data.get("spans", {})
+
+        for sent in sentences:
+            idx = sent.get("global_index", "?")
+            for page_geom in sent.get("geometry", {}).values():
+                for entry in page_geom:
+                    cid = entry.get("cid")
+                    span = span_lookup.get(cid, {})
+
+                    if span.get("_tts_excluded", False):
+                        errors.append(
+                            f"I6 VIOLATION: Sentence {idx} contains "
+                            f"excluded span {cid}"
+                        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INVARIANT I7: cids field matches geometry CIDs
+    # ─────────────────────────────────────────────────────────────────────
+    for sent in sentences:
+        idx = sent.get("global_index", "?")
+        cids = set(sent.get("cids", []))
+        geometry_cids = set()
+        for page_geom in sent.get("geometry", {}).values():
+            for entry in page_geom:
+                geometry_cids.add(entry.get("cid"))
+
+        extra_in_geometry = geometry_cids - cids
+        if extra_in_geometry:
+            errors.append(
+                f"I7 VIOLATION: Sentence {idx} geometry contains CIDs "
+                f"not in cids list: {extra_in_geometry}"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # EXCLUSION LIST: Forbidden fields
+    # ─────────────────────────────────────────────────────────────────────
+    forbidden_fields = [
+        "_ronc_contract", "_semantic_confidence", "_semantic_disposition",
+        "_tts_exclude_reason", "_source_span_ids", "cleaned_text", "raw_text",
+        "span_start_index", "span_end_index", "char_start", "char_end"
+    ]
+
+    for sent in sentences:
+        idx = sent.get("global_index", "?")
+
+        for field in forbidden_fields:
+            if field in sent:
+                errors.append(
+                    f"EXCLUSION VIOLATION: Sentence {idx} contains "
+                    f"forbidden field '{field}'"
+                )
+
+        underscore_fields = [k for k in sent.keys() if k.startswith("_")]
+        for field in underscore_fields:
+            errors.append(
+                f"EXCLUSION VIOLATION: Sentence {idx} contains "
+                f"diagnostic field '{field}'"
+            )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # SUMMARY VALIDATION
+    # ─────────────────────────────────────────────────────────────────────
+    summary = ui_data.get("summary", {})
+
+    if summary.get("total_sentences") != len(sentences):
+        errors.append(
+            f"Summary mismatch: total_sentences={summary.get('total_sentences')} "
+            f"but actual={len(sentences)}"
+        )
+
+    actual_cross_page = sum(1 for s in sentences if len(s.get("pages", [])) > 1)
+    if summary.get("cross_page_sentences") != actual_cross_page:
+        errors.append(
+            f"Summary mismatch: cross_page_sentences="
+            f"{summary.get('cross_page_sentences')} but actual={actual_cross_page}"
+        )
+
+    actual_stitched = sum(1 for s in sentences if s.get("is_stitched"))
+    if summary.get("stitched_sentences") != actual_stitched:
+        errors.append(
+            f"Summary mismatch: stitched_sentences="
+            f"{summary.get('stitched_sentences')} but actual={actual_stitched}"
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # PAGE INDEX SORTING
+    # ─────────────────────────────────────────────────────────────────────
+    for page_key, page_entry in page_index.items():
+        indices = page_entry.get("sentence_indices", [])
+        if indices != sorted(indices):
+            errors.append(
+                f"page_index[{page_key}].sentence_indices is not sorted"
+            )
+
+    return errors
 
 
 # ========================================
@@ -819,7 +1914,7 @@ def _save_semantic_artifact(
         },
         "book_id": book_id,
         "trace_id": trace_id,
-        "generated_at": datetime.datetime.utcnow().isoformat(),
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "spans": {}
     }
 
@@ -887,6 +1982,21 @@ def _save_semantic_artifact(
                 "_original_layout_stream": sp.get("_original_layout_stream"),
             }
 
+    # ------------------------------------------------------------------
+    # Bibliography detection audit (non-behavioral, diagnostics only)
+    # ------------------------------------------------------------------
+    bibliography_spans = [
+        cid
+        for cid, sp in semantic_data["spans"].items()
+        if sp.get("_tts_exclude_reason") == "role:footnote"
+    ]
+
+    if bibliography_spans:
+        semantic_data["bibliography_audit"] = {
+            "detected_count": len(bibliography_spans),
+            "span_ids": bibliography_spans,
+        }
+
     semantic_data["summary"] = _build_semantic_summary(semantic_data["spans"])
     atomic_write_manifest(output_path, semantic_data, logger)
     logger.info(
@@ -948,6 +2058,687 @@ def _build_semantic_summary(spans: dict) -> dict:
 # ========================================
 # STAGE 3: TTS Generation (Unchanged)
 # ========================================
+def _prepare_synthesis_units(
+        sent: dict,
+        trace_id: str = None,
+        chunk_id: int = None,
+        sent_idx: int = None,
+) -> List[str]:
+    """
+    Pre-TTS gate: Transform sentence into TTS-safe synthesis units.
+
+    Uses existing flags and constants only:
+        - needs_clause_splitting (from Stage 2)
+        - prosodic_clauses (from Stage 2)
+        - TTS_MAX_CHUNK_CHARS (existing safety constant)
+
+    Returns:
+        List[str]: Synthesis units ready for individual TTS calls
+    """
+    sent_text = sent.get('text', '')
+    if not sent_text or not sent_text.strip():
+        return []
+
+    needs_split = sent.get('needs_clause_splitting', False)
+    prosodic_clauses = sent.get('prosodic_clauses')
+
+    # ── PATH 1: Determine initial synthesis units ──
+    # Stage 2 flags are advisory, not exclusive. Always allow Stage 3
+    # semantic safety logic to assess the sentence for TTS viability.
+    if not needs_split or not prosodic_clauses or len(prosodic_clauses) <= 1:
+        synthesis_units = [sent_text.strip()]
+    else:
+        # ── PATH 2: Start with prosodic_clauses, further split if needed ──
+        synthesis_units = []
+
+        for clause_idx, clause in enumerate(prosodic_clauses):
+            if not clause or not clause.strip():
+                continue
+
+            clause = clause.strip()
+
+            # Check against existing safety constant
+            if len(clause) <= TTS_MAX_CHUNK_CHARS:
+                synthesis_units.append(clause)
+            else:
+                # Further soft-split this oversized clause
+                sub_units = _soft_split_unit(clause, trace_id) or []
+                synthesis_units.extend(sub_units)
+
+                if trace_id:
+                    logger.debug(
+                        f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} "
+                        f"clause {clause_idx} further split into {len(sub_units)} units"
+                    )
+
+    # ────────────────────────────────────────────────────────────
+    # ITERATIVE PROSODIC CONVERGENCE (WORK-QUEUE)
+    #
+    # Apply safety gates repeatedly until the unit set stabilizes.
+    # Convergence is guaranteed by _soft_split_unit contract:
+    # it returns unchanged when no split boundary exists.
+    #
+    # Gates:
+    #   1. Hard length (existing constant)
+    #   2. Punctuation density (existing heuristic)
+    #   3. Structural dominance (sentence-relative, non-arbitrary)
+    #
+    # Note: units accepted into final_units are finalized; only newly
+    # produced sub-units are re-evaluated in subsequent passes.
+    # ────────────────────────────────────────────────────────────
+    sentence_len = len(sent_text) if sent_text else 0
+
+    work_queue = [u.strip() for u in synthesis_units if u and u.strip()]
+    final_units = []
+
+    while work_queue:
+        next_queue = []
+
+        for unit in work_queue:
+            unit = unit.strip()
+            if not unit:
+                continue
+
+            unit_len = len(unit)
+            unit_word_count = len(unit.split())
+            comma_count = unit.count(',')
+            semicolon_count = unit.count(';')
+
+            exceeds_length = unit_len > TTS_MAX_CHUNK_CHARS
+
+            # Boundary evidence: if a unit contains a natural split marker, explore splitting.
+            has_punct_boundary = (comma_count >= 1 or semicolon_count >= 1)
+
+            # Dominance should apply to *remainders*, not the whole sentence.
+            # Prevents "every sentence always attempts split" when starting from sent_text.
+            structurally_dominant = (
+                    sentence_len > 0 and
+                    unit_len < sentence_len and
+                    unit_len >= sentence_len // 2
+            )
+
+            # ── Clause Structure Classification ──
+            # Strong clause structure: multiple commas or semicolons
+            # provide reliable L1 delimiter split points. L1 will
+            # produce meaningful clause-level units.
+            # Weak clause structure: 0-1 commas, no semicolons.
+            # A single comma followed by a conjunction ("period, and")
+            # can be legally collapsed by L1's conjunction-aware merge,
+            # returning the input unchanged.
+            has_strong_clause_structure = (
+                    comma_count >= 2 or
+                    semicolon_count >= 1
+            )
+
+            # ── Monotone Length Risk ──
+            # Long units without strong clause structure risk stochastic
+            # decoder drift: first attempt produces runaway (6-33x ratio),
+            # retry with different decoder seed usually succeeds. Each
+            # failure costs 30-75s (full decode to max_decoder_steps).
+            #
+            # Pre-emptive midpoint splitting feeds into existing L2
+            # strategy in _soft_split_unit → viability gate validates
+            # output. Colons excluded because they provide decoder
+            # attention anchoring and L1 does not split on them
+            # (midpoint would cross the colon boundary).
+            #
+            # Work queue cascade naturally re-evaluates halves:
+            # structurally_dominant catches halves ≥ sentence_len//2,
+            # producing quarters. Entry guard in _soft_split_unit stops
+            # further splitting below min_words_for_split threshold.
+            # Maximum cascade depth: 2 (original → halves → quarters).
+            monotone_length_risk = (
+                    not has_strong_clause_structure and
+                    ':' not in unit and
+                    unit_len > _TTS_PROACTIVE_SPLIT_CHARS and
+                    unit_word_count > _TTS_PROACTIVE_SPLIT_WORDS
+            )
+
+            needs_split_attempt = (
+                    exceeds_length or
+                    has_punct_boundary or
+                    structurally_dominant or
+                    monotone_length_risk
+            )
+
+            if needs_split_attempt:
+                sub_units = _soft_split_unit(unit, trace_id) or []
+                sub_units = [x.strip() for x in sub_units if x and x.strip()]
+
+                split_occurred = (
+                        len(sub_units) > 1 or
+                        (sub_units and sub_units[0] != unit)
+                )
+
+                if split_occurred:
+                    next_queue.extend(sub_units)
+                    if trace_id:
+                        logger.debug(
+                            f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} "
+                            f"unit split → {len(sub_units)} sub-units "
+                            f"(dom={structurally_dominant}, punct={has_punct_boundary}, mono={monotone_length_risk})"
+                        )
+                else:
+                    final_units.append(unit)
+            else:
+                final_units.append(unit)
+
+        work_queue = next_queue
+
+    # ────────────────────────────────────────────────────────────
+    # ORDER PRESERVATION: Sort units by position in original text
+    #
+    # The work-queue convergence loop may produce units out of
+    # original reading order. Audio playback requires units in
+    # textual sequence. Stable-sort by character position ensures
+    # correct TTS concatenation order.
+    #
+    # Contract: Units are substrings of sent_text. Position lookup
+    # is O(n) per unit but total units are bounded by safety gates.
+    # ────────────────────────────────────────────────────────────
+    if final_units and len(final_units) > 1:
+        def _unit_position(unit_text):
+            """Return character index of unit in original sentence."""
+            if not unit_text:
+                return len(sent_text)
+            # Use prefix for matching (handles minor whitespace variance)
+            search_key = unit_text.strip()[:25]
+            pos = sent_text.find(search_key)
+            # Units not found (should not happen) sort to end
+            return pos if pos >= 0 else len(sent_text)
+
+        final_units.sort(key=_unit_position)
+
+    return final_units if final_units else [sent_text.strip()]
+
+
+def _soft_split_unit(
+        text: str,
+        trace_id: str = None,
+        *,
+        emergency: bool = False,
+) -> List[str]:
+    """
+    TTS Unit Splitter — Tiered Strategy Cascade with Viability Enforcement.
+
+    Professional narration pipeline model: split text into TTS-safe units
+    using a strategy cascade, then enforce output viability so no unit is
+    returned that would cause decoder runaway.
+
+    Strategy Cascade (highest to lowest prosodic quality):
+      L1  Delimiter boundaries — comma/semicolon with conjunction awareness.
+          Produces the most natural clause-level units.
+      L2  Balanced word-boundary midpoint — splits at the whitespace nearest
+          to the character midpoint. Produces two roughly equal halves.
+
+    Viability Gate (runs on ALL exits, not just emergency):
+      Every output list passes through viability enforcement before return.
+      Non-viable fragments (isolated compounds, orphaned notation) are merged
+      with neighbors or decomposed into individual words. This eliminates
+      "unsplittable; aborting chunk" failures by catching non-viable units
+      during initial splitting — before they reach TTS.
+
+    Entry Guard:
+      Uses word-based threshold from extraction_engine._TTS_PROSODIC_MIN_CLAUSE_WORDS.
+      Units below (MIN_CLAUSE_WORDS * 2) words without delimiter punctuation
+      skip structural splitting (non-emergency only). Viability enforcement
+      still runs on the early return.
+
+    Args:
+        text: Unit text to split.
+        trace_id: Optional trace ID for observability logging.
+        emergency: If True, skip entry guard (post-validation escalation).
+
+    Returns:
+        List of TTS-viable unit strings. Never empty if input is non-empty.
+    """
+    if not text:
+        return []
+
+    text = text.strip()
+    word_count = len(text.split())
+
+    min_words_for_split = int(
+        getattr(extraction_engine, "_TTS_PROSODIC_MIN_CLAUSE_WORDS", 4)
+    ) * 2
+
+    # ════════════════════════════════════════════════════════════════
+    # INLINE VIABILITY ENGINE
+    #
+    # Nested within _soft_split_unit to prevent module-level sprawl.
+    # All viability logic is scoped to this method's responsibility:
+    # ensuring every returned unit can be synthesized without decoder
+    # runaway.
+    # ════════════════════════════════════════════════════════════════
+
+    def _is_viable(unit_text: str) -> bool:
+        """
+        Per-unit TTS pre-flight check.
+
+        Viability model (empirically derived from TTS failure corpus):
+          - 3+ words: sufficient prosodic context, always viable.
+          - 2 words: adequate attention anchoring, viable.
+          - 1 word with terminal punctuation: punct provides decoder
+            anchor (comma, period, etc.), viable.
+          - 1 word, simple alphabetic, no hyphens: common dictionary
+            word, TTS handles reliably.
+          - 1 word, contains digit: speakable numeric content
+            (citations, statutory refs like "5 U.S.C."), viable.
+          - 1 word, hyphenated compound, no punctuation: NOT VIABLE.
+            Decoder treats hyphens as token boundaries, producing
+            sub-tokens with no sentence-level context → runaway.
+        """
+        stripped = unit_text.strip()
+        if not stripped:
+            return False
+
+        unit_word_count = len(stripped.split())
+
+        # Multi-word units: always viable
+        if unit_word_count >= _TTS_UNIT_MIN_VIABLE_WORDS:
+            return True
+        if unit_word_count == 2:
+            return True
+
+        # ── Single-word analysis ──
+        has_prosodic_anchor = stripped[-1] in '.,;:!?'
+        core = stripped.rstrip('.,;:!?"\')]}\u2019\u201d')
+
+        # Hyphenated compound without anchor: HIGH RISK
+        # "eighteen-year-olds" → 3 sub-tokens, no context → runaway
+        # "eighteen-year-olds," → trailing comma anchors → viable
+        if '-' in core:
+            return has_prosodic_anchor
+
+        # Simple alphabetic: always viable regardless of length
+        # "Nevertheless", "Subsequently", "Geneva" — all succeed
+        if core.isalpha():
+            return True
+
+        # Digit-containing: speakable numeric/citation content
+        # "5 U.S.C.", "[12]", "§ 1983", "42 CFR" — TTS handles numbers
+        # reliably. Prevents over-merging in legal/congressional texts.
+        if any(c.isdigit() for c in core):
+            return True
+
+        # Remaining mixed tokens: require prosodic anchor
+        return has_prosodic_anchor
+
+    def _viability_gate(units: List[str]) -> List[str]:
+        """
+        Post-split viability enforcement.
+
+        Runs on EVERY exit path. Ensures no unit is returned that would
+        cause decoder runaway. Two repair strategies, ordered by audio
+        quality:
+
+          1. Merge non-viable fragment with nearest neighbor (multi-unit).
+             Reconstructs natural phrase, preserves prosody. Prefer
+             merge-left (preceding context sounds more natural).
+          2. Decompose hyphenated compound into individual words
+             (single-unit, no neighbor available). Last resort — each
+             word is a common dictionary entry the model handles.
+
+        Bounded at 3 passes to prevent pathological merge cascades.
+        """
+        if not units:
+            return units
+
+        result = list(units)
+
+        for _ in range(3):
+            changed = False
+            i = 0
+
+            while i < len(result):
+                if _is_viable(result[i]):
+                    i += 1
+                    continue
+
+                # ── Strategy 1: Merge with neighbor ──
+                # Multi-unit list: merge produces a medium-sized unit
+                # with natural phrase-level prosody. Strictly safer
+                # than sending a fragment alone.
+                if len(result) > 1:
+                    if i > 0:
+                        # Merge left (preferred: preceding context)
+                        merged = result[i - 1].rstrip() + ' ' + result[i].lstrip()
+                        if trace_id:
+                            logger.debug(
+                                "[%s] Viability merge-left: '%s' + '%s'",
+                                trace_id,
+                                result[i - 1][:30], result[i][:30]
+                            )
+                        result[i - 1] = merged
+                        result.pop(i)
+                        changed = True
+                        continue
+                    else:
+                        # Merge right (first unit, no left neighbor)
+                        merged = result[i].rstrip() + ' ' + result[i + 1].lstrip()
+                        if trace_id:
+                            logger.debug(
+                                "[%s] Viability merge-right: '%s' + '%s'",
+                                trace_id,
+                                result[i][:30], result[i + 1][:30]
+                            )
+                        result[i] = merged
+                        result.pop(i + 1)
+                        changed = True
+                        continue
+
+                # ── Strategy 2: Hyphenated compound decomposition ──
+                # Single unit, no neighbor to merge with. Decompose
+                # at hyphens if all segments are real words (≥3 chars,
+                # alphabetic). Preserves trailing punctuation on final
+                # segment for decoder anchoring.
+                stripped_unit = result[i].strip()
+                if '-' in stripped_unit:
+                    trailing_punct = ''
+                    decomp_text = stripped_unit
+                    if decomp_text and decomp_text[-1] in '.,;:!?':
+                        trailing_punct = decomp_text[-1]
+                        decomp_text = decomp_text[:-1]
+
+                    segments = [s.strip() for s in decomp_text.split('-') if s.strip()]
+
+                    if (len(segments) >= 2 and all(
+                            len(s) >= _TTS_COMPOUND_SEGMENT_MIN_CHARS
+                            and s.isalpha()
+                            for s in segments
+                    )):
+                        if trailing_punct:
+                            segments[-1] = segments[-1] + trailing_punct
+
+                        if trace_id:
+                            logger.debug(
+                                "[%s] Compound decomposition: '%s' → %s",
+                                trace_id, stripped_unit[:50], segments
+                            )
+
+                        result[i:i + 1] = segments
+                        changed = True
+                        i += len(segments)
+                        continue
+
+                # Non-viable but cannot be improved further.
+                # Return as-is; TTS may still succeed, and the
+                # escalation retry path provides a second chance.
+                i += 1
+
+            if not changed:
+                break
+
+        return result if result else units
+
+    # ════════════════════════════════════════════════════════════════
+    # ENTRY GUARD (non-emergency only)
+    #
+    # Small units without delimiter punctuation cannot be meaningfully
+    # split at clause boundaries. Skip structural splitting but still
+    # enforce viability — catches isolated compounds on the happy path
+    # before they ever reach TTS.
+    # ════════════════════════════════════════════════════════════════
+    if not emergency:
+        if word_count < min_words_for_split and (',' not in text and ';' not in text):
+            return _viability_gate([text])
+
+    # ════════════════════════════════════════════════════════════════
+    # STRATEGY L1: Delimiter Boundaries (comma / semicolon)
+    #
+    # Split on punctuation delimiters with conjunction-aware flushing.
+    # Conjunctions (and, or, but, nor, yet) bind to the following
+    # clause rather than stranding at the end of the current unit.
+    # ════════════════════════════════════════════════════════════════
+    parts = re.split(r'([,;]\s*)', text)
+
+    if len(parts) <= 1:
+        # ────────────────────────────────────────────────────────
+        # STRATEGY L2: Balanced Word-Boundary Midpoint
+        #
+        # No delimiter boundaries exist. Split at the whitespace
+        # nearest to the character midpoint for two roughly balanced
+        # halves. Viability gate on the result handles any fragment
+        # that is too small or isolated.
+        # ────────────────────────────────────────────────────────
+        text_len = len(text)
+        midpoint = text_len // 2
+
+        left = text.rfind(' ', 0, midpoint)
+        right = text.find(' ', midpoint)
+
+        if left == -1 and right == -1:
+            # No whitespace (single token). Viability gate will
+            # decompose if compound, or return as-is.
+            return _viability_gate([text])
+
+        if left == -1:
+            split_at = right
+        elif right == -1:
+            split_at = left
+        else:
+            split_at = (
+                left if (midpoint - left) <= (right - midpoint) else right
+            )
+
+        # Guard: avoid splitting inside brackets, parens, or
+        # citations like [17] or (b)(4). Nudge split point left
+        # to the preceding whitespace if we'd land after an opener.
+        _safe_split = split_at
+        while _safe_split > 0 and text[_safe_split - 1] in '([{':
+            _safe_split = text.rfind(' ', 0, _safe_split - 1)
+            if _safe_split == -1:
+                _safe_split = split_at
+                break
+
+        a = text[:_safe_split].strip()
+        b = text[_safe_split:].strip()
+        if a and b:
+            return _viability_gate([a, b])
+
+        return _viability_gate([text])
+
+    # ────────────────────────────────────────────────────────────
+    # L1 Reconstruction: Flush at delimiter boundaries
+    #
+    # Walk the parts list, accumulating content into a buffer.
+    # On each delimiter, decide whether to flush (create a new unit)
+    # or continue (conjunction lookahead keeps phrase together).
+    # ────────────────────────────────────────────────────────────
+    units = []
+    buffer = ""
+    idx = 0
+
+    while idx < len(parts):
+        seg = parts[idx] or ""
+        if not seg:
+            idx += 1
+            continue
+
+        is_delim = bool(re.match(r'^[,;]\s*$', seg))
+
+        if is_delim:
+            buffer += seg
+
+            # Lookahead: does next content start with a conjunction?
+            next_content = ""
+            if idx + 1 < len(parts):
+                next_content = (parts[idx + 1] or "").strip().lower()
+
+            # Flush unless next segment opens with a conjunction
+            if buffer.strip() and not next_content.startswith(
+                    ('and ', 'or ', 'but ', 'nor ', 'yet ')
+            ):
+                u = buffer.strip()
+                if u:
+                    units.append(u)
+                buffer = ""
+
+            idx += 1
+            continue
+
+        # Content segment
+        buffer += seg
+        idx += 1
+
+    # Finalize remaining buffer
+    if buffer.strip():
+        units.append(buffer.strip())
+
+    # ────────────────────────────────────────────────────────────
+    # Filter and validate
+    # ────────────────────────────────────────────────────────────
+    units = [u for u in units if u and u.strip()]
+
+    if not units:
+        return _viability_gate([text])
+
+        # ────────────────────────────────────────────────────────────
+        # L1→L2 FALLTHROUGH: Conjunction Merge Recovery
+        # L1 can legally produce a single unit identical to the input
+        # when the only comma is followed by a conjunction ("period,
+        # and it decreased..."). Conjunction-aware flushing merges the
+        # split back together — correct for prosody but leaves the
+        # full-length unit intact for TTS, risking decoder drift.
+        #
+        # Fall through to L2 midpoint when clause structure is weak
+        # AND the unit exceeds proactive thresholds. Same structural
+        # definition as work queue has_strong_clause_structure:
+        #   strong = (commas >= 2 OR semicolons >= 1)
+        #   weak = NOT strong AND no colon
+        # ────────────────────────────────────────────────────────────
+    if len(units) == 1 and units[0].strip() == text.strip():
+        _l1_strong_clause = (
+                text.count(',') >= 2 or
+                text.count(';') >= 1
+        )
+        _l1_weak_clause = (
+                not _l1_strong_clause and
+                ':' not in text
+        )
+        if (
+                _l1_weak_clause and
+                len(text) > _TTS_PROACTIVE_SPLIT_CHARS and
+                word_count > _TTS_PROACTIVE_SPLIT_WORDS
+        ):
+            # L1→L2 fallthrough: conjunction merge defeated L1
+            _ft_len = len(text)
+            _ft_mid = _ft_len // 2
+            _ft_left = text.rfind(' ', 0, _ft_mid)
+            _ft_right = text.find(' ', _ft_mid)
+
+            if _ft_left != -1 or _ft_right != -1:
+                if _ft_left == -1:
+                    _ft_split = _ft_right
+                elif _ft_right == -1:
+                    _ft_split = _ft_left
+                else:
+                    _ft_split = (
+                        _ft_left if (_ft_mid - _ft_left) <= (_ft_right - _ft_mid)
+                        else _ft_right
+                    )
+
+                _ft_safe = _ft_split
+                while _ft_safe > 0 and text[_ft_safe - 1] in '([{':
+                    _ft_safe = text.rfind(' ', 0, _ft_safe - 1)
+                    if _ft_safe == -1:
+                        _ft_safe = _ft_split
+                        break
+
+                _ft_a = text[:_ft_safe].strip()
+                _ft_b = text[_ft_safe:].strip()
+                if _ft_a and _ft_b:
+                    if trace_id:
+                        logger.debug(
+                            "[%s] L1→L2 fallthrough: conjunction merge "
+                            "defeated L1, midpoint split %d/%d chars",
+                            trace_id, len(_ft_a), len(_ft_b)
+                        )
+                    return _viability_gate([_ft_a, _ft_b])
+
+        return _viability_gate([text])
+
+    # ════════════════════════════════════════════════════════════════
+    # VIABILITY GATE — Final enforcement on all L1 split results.
+    # Non-viable fragments merged with neighbors or decomposed
+    # before return. Caller never receives a unit likely to cause
+    # decoder runaway.
+    # ════════════════════════════════════════════════════════════════
+    return _viability_gate(units)
+
+
+def _validate_tts_audio(
+        audio_bytes: bytes,
+        expected_duration: float,
+        trace_id: str,
+        chunk_id: int,
+        *,
+        is_clause_aware: bool = False,
+) -> bool:
+    """
+    Validate TTS output duration against expected.
+    Returns False if audio is grossly inflated/deflated (junk).
+
+    Gate order:
+        1. Parse WAV → extract actual duration
+        2. Enforce absolute ceiling (when WAV readable)
+        3. Fail-open if expected is None/non-numeric/tiny
+        4. Enforce ratio bounds
+    """
+    _ = is_clause_aware  # Vestigial; preserved for call-site compatibility
+    # ════════════════════════════════════════════════════════════════
+    # STEP 1: Parse WAV to extract actual duration
+    # Must happen first so ceiling can be enforced regardless of expected
+    # ════════════════════════════════════════════════════════════════
+    try:
+        with wave.open(io.BytesIO(audio_bytes), "rb") as w:
+            actual = w.getnframes() / float(w.getframerate() or 1)
+    except Exception as e:
+        logger.warning(f"[{trace_id}] Chunk {chunk_id} WAV validation failed: {e}")
+        return True  # Fail-open on parse error (ceiling cannot be enforced)
+
+    # ════════════════════════════════════════════════════════════════
+    # STEP 2: Absolute ceiling — ALWAYS enforced when WAV is readable
+    # ════════════════════════════════════════════════════════════════
+    if actual > _TTS_MAX_WAV_SECONDS:
+        logger.error(
+            f"[{trace_id}] Chunk {chunk_id} rejected: actual={actual:.1f}s exceeds {_TTS_MAX_WAV_SECONDS}s"
+        )
+        return False
+
+    # ════════════════════════════════════════════════════════════════
+    # STEP 3: Fail-open for missing/non-numeric/tiny expected duration
+    # Ratio checks not meaningful without valid expected baseline
+    # ════════════════════════════════════════════════════════════════
+    if expected_duration is None:
+        return True  # No expectation available; fail-open on ratio
+
+    try:
+        expected_duration = float(expected_duration)
+    except Exception:
+        return True  # Non-numeric; fail-open on ratio
+
+    if expected_duration < _TTS_MIN_EXPECTED_SECONDS:
+        return True  # Tiny expectation; ratio checks not meaningful
+
+    # ════════════════════════════════════════════════════════════════
+    # STEP 4: Ratio-based validation
+    # ════════════════════════════════════════════════════════════════
+    ratio = actual / float(expected_duration)
+
+    if ratio > _TTS_MAX_DURATION_RATIO:
+        logger.error(
+            f"[{trace_id}] Chunk {chunk_id} rejected: ratio={ratio:.1f}x exceeds {_TTS_MAX_DURATION_RATIO}x"
+        )
+        return False
+
+    if ratio < _TTS_MIN_DURATION_RATIO:
+        logger.error(
+            f"[{trace_id}] Chunk {chunk_id} rejected: ratio={ratio:.2f}x below {_TTS_MIN_DURATION_RATIO}x"
+        )
+        return False
+
+    return True
 
 async def generate_single_chunk(
         chunk: dict,
@@ -956,31 +2747,39 @@ async def generate_single_chunk(
         manifest_path: Path,
         _logger
 ):
+    """
+    Returns:
+        bool: True if chunk audio is ready or successfully generated,
+              False on any recoverable failure.
+    """
     chunk_id = chunk['chunk_id']
     page = chunk['page']
     audio_filename = f"chunk_{chunk_id:04d}_p{page}.wav"
     audio_path = OUTPUT_DIR / book_id / audio_filename
+    logger = _logger
 
     async with TTS_SEMAPHORE:
-        try:
-            with open(manifest_path, 'r') as f:
-                manifest = json.load(f)
-        except:
-            return False
-
-        already_in_manifest = any(c['chunk_id'] == chunk_id for c in manifest['ready_chunks'])
-
+        # ────────────────────────────────────────────────────────────────
+        # RECOVERY PATH: If audio already exists, register in manifest
+        # ────────────────────────────────────────────────────────────────
         if audio_path.exists():
-            if not already_in_manifest:
-                async with MANIFEST_LOCK:
-                    try:
-                        with open(manifest_path, 'r') as f:
-                            manifest = json.load(f)
+            async with MANIFEST_LOCK:
+                try:
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+
+                    if not any(c.get('chunk_id') == chunk_id
+                               for c in manifest.get('ready_chunks', [])):
                         manifest['ready_chunks'].append({
                             "chunk_id": chunk_id,
                             "filename": audio_filename,
                             "page": page,
-                            "pages": chunk.get('pages') or ([page] if page is not None else []),
+                            "pages": (lambda _c, _p: (lambda _s: sorted(
+                                set([x for x in (_c.get('pages') or []) if x is not None] + (
+                                    [_p] if _p is not None else []) + [y for y in _s if
+                                                                       y is not None])))(
+                                [(ss.get('page_number') if isinstance(ss, dict) else None) for ss in
+                                 (_c.get('sentences') or [])]))(chunk, page),
                             "text_snippet": chunk['text'][:50] + "...",
                             "start_time": chunk['start_time'],
                             "duration_seconds": chunk['duration_seconds'],
@@ -990,68 +2789,329 @@ async def generate_single_chunk(
                         manifest['ready_chunks'].sort(key=lambda c: c['chunk_id'])
                         validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
                         logger.info(f"[{trace_id}] Chunk {chunk_id} recovered from disk.")
-                    except Exception as e:
-                        logger.error(f"[{trace_id}] Failed to recover chunk {chunk_id}: {e}",
-                                     exc_info=True)
-            return True
-
-        if already_in_manifest:
-            return True
+                    return True
+                except Exception as e:
+                    logger.error(
+                        f"[{trace_id}] Failed to recover chunk {chunk_id}: {e}",
+                        exc_info=True
+                    )
+                    return False
 
         # ====================================================================
-        # P0 FIX: TTS Overflow Guard (Fail Fast)
+        # NOTE (V1.8): Chunk-level overflow guard removed.
+        # TTS is invoked per-sentence/clause only.
+        # Safety is enforced structurally by synthesis granularity.
+        # Per-sentence guard added below in synthesis loop.
         # ====================================================================
-        text_to_send = chunk['text']
-        if len(text_to_send) > TTS_MAX_CHUNK_CHARS:
-            logger.error(
-                f"[{trace_id}] Chunk {chunk_id} REJECTED: {len(text_to_send)} chars "
-                f"exceeds TTS safety limit ({TTS_MAX_CHUNK_CHARS}). "
-                f"Text preview: '{text_to_send[:80]}...'"
-            )
-            return False  # Fail fast — don't hang TTS service for 60s
-
         # Generate new audio
         try:
-            params = {
-                "text": text_to_send,
-                "speaker_id": "",
-                "style_wav": "",
-                "language_id": ""
-            }
-            response = await client.post(TTS_SERVICE_URL, data=params, timeout=300.0)
-            response.raise_for_status()
+            # ================================================================
+            # V1.8: Per-Sentence TTS Generation (Always)
+            # ================================================================
+            # Every sentence is synthesized independently. If any sentence
+            # fails, the entire chunk fails (preserves Stage-2 timing authority).
+            #
+            # PATH LOGIC (UNIFIED):
+            #   For each sentence:
+            #     → Unitize via _prepare_synthesis_units (uses Stage 2 hints)
+            #     → Synthesize each unit individually
+            #     → Concatenate units into sentence audio
+            #   Concatenate all sentence audios into chunk audio.
+            #
+            # TIMING CONTRACT:
+            #   Chunk fails if any sentence fails. This ensures
+            #   chunk["duration_seconds"] and per-sentence timing fields
+            #   remain authoritative. No silent drift.
+            # ================================================================
+            sentences = chunk.get('sentences', [])
+            if not sentences:
+                logger.warning(f"[{trace_id}] Chunk {chunk_id} has no sentences")
+                return False
 
+            logger.info(
+                f"[{trace_id}] Chunk {chunk_id} START: "
+                f"{len(sentences)} sentences, {len(chunk.get('text', ''))} chars"
+            )
+
+            # ════════════════════════════════════════════════════════════════
+            # PER-SENTENCE SYNTHESIS (always this path)
+            # ════════════════════════════════════════════════════════════════
+            audio_segments = []
+            sentences_succeeded = 0
+
+            for sent_idx, sent in enumerate(sentences):
+                # Contract guard: sentence must be dict
+                if not isinstance(sent, dict):
+                    logger.error(
+                        f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} is not a dict; "
+                        f"failing chunk to preserve contract integrity"
+                    )
+                    return False
+
+                sent_text = sent.get('text', '')
+                sent_text = sent_text.strip() if isinstance(sent_text, str) else ""
+                if not sent_text:
+                    continue
+
+                # ── AUTHORITATIVE SENTENCE TIMING CONTEXT ──
+                sentence_expected_duration = sent.get("duration_seconds", 0.0)
+                sentence_text_len = len(sent_text)
+
+                # ────────────────────────────────────────────────────────────
+                # UNIFIED PATH: Always unitize sentence before TTS
+                # ────────────────────────────────────────────────────────────
+                synthesis_units = _prepare_synthesis_units(
+                    sent,
+                    trace_id=trace_id,
+                    chunk_id=chunk_id,
+                    sent_idx=sent_idx,
+                ) or []
+
+                synthesis_units = [u.strip() for u in synthesis_units if u and u.strip()]
+                if not synthesis_units:
+                    logger.error(
+                        f"[{trace_id}] Chunk {chunk_id} sent {sent_idx}: "
+                        f"no synthesis units produced; failing chunk to preserve timing"
+                    )
+                    return False
+
+                unit_segments = []
+
+                # ════════════════════════════════════════════════════════════
+                # POST-VALIDATION ESCALATION
+                # ════════════════════════════════════════════════════════════
+                # Process units as a mutable queue. If a unit fails validation
+                # after retries, split it further and retry the sub-units.
+                # This closes the loop: pre-TTS splitting → TTS → validation → escalation
+                # ════════════════════════════════════════════════════════════
+                unit_idx = 0
+                escalation_count = 0
+
+                while unit_idx < len(synthesis_units):
+                    unit = synthesis_units[unit_idx]
+                    unit = unit.strip() if isinstance(unit, str) else ""
+                    if not unit:
+                        unit_idx += 1
+                        continue
+
+                    unit_audio = None
+                    unit_params = {
+                        "text": unit,
+                        "speaker_id": "",
+                        "style_wav": "",
+                        "language_id": ""
+                    }
+
+                    # ── UNIT-LEVEL EXPECTED DURATION (DERIVED) ──
+                    # Floor prevents ratio explosion for short units where TTS has
+                    # irreducible minimum output (~1.2-1.5s for any token).
+                    if sentence_expected_duration and sentence_text_len > 0:
+                        unit_expected_duration = max(
+                            sentence_expected_duration * (len(unit) / sentence_text_len),
+                            _TTS_MIN_EXPECTED_SECONDS,
+                        )
+                    else:
+                        unit_expected_duration = max(
+                            sentence_expected_duration or 0.0,
+                            _TTS_MIN_EXPECTED_SECONDS,
+                        )
+
+                    for _attempt in range(2):
+                        try:
+                            r = await client.post(
+                                TTS_SERVICE_URL, data=unit_params, timeout=180.0
+                            )
+                            r.raise_for_status()
+                            candidate_audio = r.content
+
+                            if not _validate_tts_audio(
+                                    candidate_audio,
+                                    unit_expected_duration,
+                                    trace_id,
+                                    chunk_id,
+                                    is_clause_aware=True,
+                            ):
+                                if _attempt == 0:
+                                    logger.warning(
+                                        f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} "
+                                        f"unit {unit_idx} failed validation, retrying..."
+                                    )
+                                    continue
+
+                                sub_units = _soft_split_unit(unit, trace_id, emergency=True) or []
+                                sub_units = [x.strip() for x in sub_units if x and x.strip()]
+
+                                if len(sub_units) <= 1 or (
+                                        len(sub_units) == 1 and sub_units[0] == unit):
+                                    logger.error(
+                                        f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} "
+                                        f"unit {unit_idx} failed validation and is unsplittable; "
+                                        f"aborting chunk. text='{unit[:80]}...'"
+                                    )
+                                    return False
+
+                                escalation_count += 1
+                                logger.info(
+                                    f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} "
+                                    f"unit {unit_idx} ESCALATING (depth={escalation_count}): "
+                                    f"split into {len(sub_units)} sub-units"
+                                )
+
+                                # Replace this unit with sub-units in-place
+                                synthesis_units[unit_idx:unit_idx + 1] = sub_units
+                                unit_audio = None
+                                break
+
+                            unit_audio = candidate_audio
+                            break
+
+
+                        except (httpx.TimeoutException, httpx.NetworkError,
+                                httpx.HTTPStatusError) as e:
+                            if _attempt == 0:
+                                logger.warning(
+
+                                    f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} "
+
+                                    f"unit {unit_idx} transient TTS error ({type(e).__name__}), retrying..."
+
+                                )
+                                continue
+                            raise
+
+                    # If escalation happened, continue at same index (now pointing to first sub-unit)
+                    if unit_audio is None:
+                        continue
+
+                    unit_segments.append(unit_audio)
+                    unit_idx += 1
+
+                # Concatenate units into sentence audio
+                sentence_audio = _concatenate_wav_with_gaps(unit_segments, gap_ms=40)
+
+                # ────────────────────────────────────────────────────────────
+                # TIMING CONTRACT: Fail chunk if sentence fails
+                # ────────────────────────────────────────────────────────────
+                if not sentence_audio:
+                    logger.error(
+                        f"[{trace_id}] Chunk {chunk_id} sent {sent_idx} produced no audio; "
+                        f"failing chunk to preserve timing"
+                    )
+                    return False
+
+                audio_segments.append(sentence_audio)
+                sentences_succeeded += 1
+
+            # ════════════════════════════════════════════════════════════════
+            # CONCATENATE SENTENCES INTO CHUNK AUDIO
+            # ════════════════════════════════════════════════════════════════
+            if not audio_segments:
+                logger.error(f"[{trace_id}] Chunk {chunk_id} produced no audio segments")
+                return False
+
+            final_audio = _concatenate_wav_with_gaps(audio_segments, gap_ms=40)
+
+            # Compute expected duration from Stage 2 sentence timing
+            # NOTE: Only count sentences that were actually synthesized
+            # (empty/whitespace sentences were skipped in the loop above)
+            expected_duration = 0.0
+            duration_count = 0
+            for _s in sentences:
+                _s_text = _s.get('text', '')
+                if not _s_text or not _s_text.strip():
+                    continue  # Skip empty sentences (matches synthesis loop)
+                ds = _s.get("duration_seconds")
+                if isinstance(ds, (int, float)):
+                    expected_duration += float(ds)
+                    duration_count += 1
+
+            if duration_count == 0:
+                logger.error(
+                    f"[{trace_id}] Chunk {chunk_id} has no valid sentence durations; "
+                    f"failing chunk to avoid timing drift"
+                )
+                return False
+
+            if not _validate_tts_audio(
+                    final_audio,
+                    expected_duration,
+                    trace_id,
+                    chunk_id,
+                    is_clause_aware=True,
+            ):
+                return False
+
+            # Write audio file
             with open(audio_path, 'wb') as f:
-                f.write(response.content)
+                f.write(final_audio)
 
+            # Verify write succeeded (defense against partial writes)
+            if not audio_path.exists() or audio_path.stat().st_size == 0:
+                logger.error(
+                    f"[{trace_id}] Chunk {chunk_id} audio write failed or empty"
+                )
+                if audio_path.exists():
+                    audio_path.unlink()
+                return False
+
+            logger.info(
+                f"[{trace_id}] Chunk {chunk_id} generated via sentence-first path "
+                f"({sentences_succeeded}/{len(sentences)} sentences)"
+            )
+
+            # Register in manifest
+            async with MANIFEST_LOCK:
+                try:
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        manifest = json.load(f)
+                    if not any(c.get('chunk_id') == chunk_id for c in
+                               manifest.get('ready_chunks', [])):
+                        manifest['ready_chunks'].append({
+                            "chunk_id": chunk_id,
+                            "filename": audio_filename,
+                            "page": page,
+                            "pages": chunk.get('pages') or (
+                                [page] if page is not None else []),
+                            "text_snippet": chunk['text'][:50] + "...",
+                            "start_time": chunk['start_time'],
+                            "duration_seconds": chunk['duration_seconds'],
+                            "end_time": chunk['end_time'],
+                            "sentences": chunk.get('sentences', [])
+                        })
+                        manifest['ready_chunks'].sort(key=lambda c: c['chunk_id'])
+                        validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
+                except Exception as e:
+                    logger.error(
+                        f"[{trace_id}] Failed to update manifest for chunk {chunk_id}: {e}"
+                    )
+
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPError as e:
+            logger.error(
+                f"[{trace_id}] TTS HTTP failure for chunk {chunk_id}: {e}",
+                exc_info=True
+            )
+            return False
         except Exception as e:
-            logger.error(f"[{trace_id}] TTS Failed Chunk {chunk_id}: {e}")
+            logger.error(
+                f"[{trace_id}] TTS internal error for chunk {chunk_id}: {e}",
+                exc_info=True
+            )
             return False
 
-        # Atomic Manifest Update
-        async with MANIFEST_LOCK:
-            try:
-                with open(manifest_path, 'r') as f:
-                    manifest = json.load(f)
-                manifest['ready_chunks'].append({
-                    "chunk_id": chunk_id,
-                    "filename": audio_filename,
-                    "page": page,
-                    "pages": chunk.get('pages') or ([page] if page is not None else []),
-                    "text_snippet": chunk['text'][:50] + "...",
-                    "start_time": chunk['start_time'],
-                    "duration_seconds": chunk['duration_seconds'],
-                    "end_time": chunk['end_time'],
-                    "sentences": chunk.get('sentences', [])
-                })
-                manifest['ready_chunks'].sort(key=lambda c: c['chunk_id'])
-                validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
-                logger.info(f"[{trace_id}] Chunk {chunk_id} ready.")
-            except Exception as e:
-                logger.error(f"[{trace_id}] Failed to update manifest for chunk {chunk_id}: {e}",
-                             exc_info=True)
-
         return True
+
+    # ------------------------------------------------------------------
+    # SAFETY NET:
+    # This function is semantically boolean. Falling through without an
+    # explicit return indicates a logic regression.
+    # ------------------------------------------------------------------
+    logger.error(
+        f"[{trace_id}] INTERNAL ERROR: generate_single_chunk() "
+        f"fell through without return (chunk_id={chunk_id})"
+    )
+    return False
 
 
 async def generate_audio_streaming(
@@ -1059,10 +3119,11 @@ async def generate_audio_streaming(
         book_id: str,
         trace_id: str,
         manifest_path: Path,
-        limit=None
+        limit=None,
+        target_chunk_ids: Optional[Set[int]] = None
 ):
     if not citation_json_path.exists():
-        return None
+        return False
 
     with open(citation_json_path, 'r') as f:
         data = json.load(f)
@@ -1070,6 +3131,19 @@ async def generate_audio_streaming(
     (OUTPUT_DIR / book_id).mkdir(parents=True, exist_ok=True)
 
     chunks = data['chunks'][:limit] if limit else data['chunks']
+
+    # Selective rebuild filter: generate only targeted chunks
+    if target_chunk_ids is not None:
+        pre_filter_count = len(chunks)
+        chunks = [c for c in chunks if c.get('chunk_id') in target_chunk_ids]
+        logger.info(
+            f"[{trace_id}] Stage 3 selective: "
+            f"{len(chunks)}/{pre_filter_count} chunks targeted"
+        )
+
+    if not chunks:
+        logger.warning(f"[{trace_id}] Stage 3 invoked with zero chunks")
+        return False
     tasks = [
         generate_single_chunk(c, book_id, trace_id, manifest_path, logger)
         for c in chunks
@@ -1077,16 +3151,47 @@ async def generate_audio_streaming(
 
     try:
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        successes = sum(1 for r in results if r is True)
-        failures = sum(1 for r in results if r is not True)
-        logger.info(f"[{trace_id}] Stage 3 Summary: {successes}/{len(chunks)} chunks generated")
+
+        successes = 0
+        failures = 0
+        for i, r in enumerate(results):
+            if r is True:
+                successes += 1
+            else:
+                failures += 1
+                chunk_id = chunks[i].get('chunk_id', '?')
+                if isinstance(r, Exception):
+                    logger.error(
+                        f"[{trace_id}] Chunk {chunk_id} raised exception during Stage 3",
+                        exc_info=r
+                    )
+                else:
+                    logger.error(
+                        f"[{trace_id}] Chunk {chunk_id} returned False (generation failed)"
+                    )
+
+        logger.info(
+            f"[{trace_id}] Stage 3 Summary: {successes}/{len(chunks)} chunks generated"
+        )
+
         if failures > 0:
             logger.warning(f"[{trace_id}] {failures} chunks failed to generate")
+            try:
+                with open(manifest_path, 'r', encoding='utf-8') as f:
+                    m = json.load(f)
+                m["processing_status"] = "stage_3_partial"
+                m["error_message"] = f"{failures} chunks failed during Stage 3"
+                validate_and_write_manifest(manifest_path, m, trace_id, logger)
+            except Exception as e:
+                logger.error(
+                    f"[{trace_id}] Failed to update manifest after partial Stage 3 failure: {e}"
+                )
+
         return successes == len(chunks)
     except Exception as e:
         logger.error(f"[{trace_id}] Stage 3 Crash: {e}", exc_info=True)
         try:
-            with open(manifest_path, 'r') as f:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
             m['processing_status'] = 'stage_3_partial'
             m['error_message'] = f"Stage 3 crashed: {str(e)}"
@@ -1105,12 +3210,16 @@ def reconcile_manifest_with_disk(book_id: str, manifest_path: Path, trace_id: st
     Final pass: Ensure manifest ready_chunks matches actual files on disk.
     """
     try:
-        with open(manifest_path, 'r') as f:
+        with open(manifest_path, 'r', encoding='utf-8') as f:
             manifest = json.load(f)
 
         audio_dir = OUTPUT_DIR / book_id
         actual_files = {f.name for f in audio_dir.glob("chunk_*.wav")}
-        manifest_files = {c['filename'] for c in manifest['ready_chunks']}
+        manifest_files = {
+            c.get('filename')
+            for c in manifest.get('ready_chunks', [])
+            if c.get('filename')
+        }
 
         # Remove entries for missing files
         orphaned = manifest_files - actual_files
@@ -1122,19 +3231,81 @@ def reconcile_manifest_with_disk(book_id: str, manifest_path: Path, trace_id: st
 
         # Log any files missing from manifest
         missing = actual_files - manifest_files
-        if missing:
+        if (
+                missing
+                and manifest.get("processing_status") in ("stage_3_started", "stage_3_partial")
+                and manifest.get("total_chunks", 0) > 0
+        ):
+            logger.warning(
+                f"[{trace_id}] {len(missing)} audio files not in manifest, attempting safe recovery..."
+            )
+
+            for filename in missing:
+                match = re.match(r'chunk_(\d+)_p(\d+)\.wav', filename)
+                if not match:
+                    logger.warning(f"[{trace_id}] Could not parse chunk info from: {filename}")
+                    continue
+
+                chunk_id = int(match.group(1))
+                page = int(match.group(2))
+
+                # HARD GUARD: do not invent chunks
+                if chunk_id >= manifest["total_chunks"]:
+                    logger.warning(
+                        f"[{trace_id}] Skipping recovery of chunk {chunk_id} "
+                        f"(exceeds total_chunks={manifest['total_chunks']})"
+                    )
+                    continue
+
+                # DUPLICATE GUARD: idempotent reconciliation
+                if any(c.get("chunk_id") == chunk_id for c in manifest.get("ready_chunks", [])):
+                    continue
+
+                manifest["ready_chunks"].append({
+                    "chunk_id": chunk_id,
+                    "filename": filename,
+                    "page": page,
+                    "pages": [page],
+                    "text_snippet": "[recovered_from_disk_nonsemantic]",
+                    "start_time": 0.0,
+                    "duration_seconds": 0.0,
+                    "end_time": 0.0,
+                    "sentences": []
+                })
+
+                logger.info(
+                    f"[{trace_id}] Recovered chunk {chunk_id} from disk (non-semantic)"
+                )
+
+            manifest["ready_chunks"].sort(key=lambda c: c["chunk_id"])
+
+        elif missing:
             logger.warning(f"[{trace_id}] {len(missing)} audio files not in manifest: {missing}")
 
         # Update status based on reconciled count
         completed = len(manifest['ready_chunks'])
         total = manifest['total_chunks']
 
-        if completed == total:
+        if total > 0 and completed == total:
             manifest['processing_status'] = 'stage_3_complete'
         elif completed > 0:
-            manifest['processing_status'] = 'stage_3_partial'
+            if manifest.get('processing_status') != 'stage_3_complete':
+                manifest['processing_status'] = 'stage_3_partial'
         else:
             manifest['processing_status'] = 'stage_3_failed'
+
+        # Build sentence_index for O(1) frontend lookup
+        sentence_index = {}
+        for chunk in manifest.get('ready_chunks', []):
+            chunk_id = chunk.get('chunk_id')
+            for sent in chunk.get('sentences', []):
+                sid = sent.get('global_index')
+                if sid:
+                    sentence_index[sid] = {
+                        'chunk_id': chunk_id,
+                        **sent
+                    }
+        manifest['sentence_index'] = sentence_index
 
         validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
         return manifest['processing_status']
@@ -1183,50 +3354,121 @@ def get_citation_at_timestamp(path, timestamp):
 
     V1.9 Phase 1 Fix #4: Uses per-sentence timing instead of interpolation.
     Falls back to interpolation for legacy manifests without sentence timing.
+
+    V2.0: Filters _tts_excluded spans from source_cids for UI highlighting.
     """
     try:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        for chunk in data['chunks']:
+        # ═══════════════════════════════════════════════════════════════════
+        # LOAD SEMANTIC LOOKUP FOR EXCLUSION FILTERING (fail-open)
+        # ═══════════════════════════════════════════════════════════════════
+        span_lookup = {}
+        try:
+            semantic_path = Path(path).with_name(
+                Path(path).name.replace("_citation_ready.json", "_semantic.json")
+            )
+            if semantic_path.exists():
+                with open(semantic_path, 'r', encoding='utf-8') as sf:
+                    span_lookup = json.load(sf).get("spans", {})
+        except Exception:
+            span_lookup = {}  # Fail-open: no filtering if semantic unavailable
+
+        for chunk in data.get('chunks', []):
             # Check if timestamp falls within this chunk
             if chunk['start_time'] <= timestamp < chunk['end_time'] + 0.0001:
                 sentences = chunk.get('sentences', [])
-
                 if not sentences:
                     continue
 
-                # V1.9: Try per-sentence timing first
-                for s in sentences:
-                    sent_start = s.get('start_time')
-                    sent_end = s.get('end_time')
+                # Defensive ordering: never trust implicit sentence order
+                sentences = sorted(
+                    sentences,
+                    key=lambda s: (
+                        s.get('start_time', float('inf')),
+                        s.get('global_index', float('inf'))
+                    )
+                )
 
+                # V1.9: Try per-sentence timing first
+                for sent in sentences:
+                    sent_start = sent.get('start_time')
+                    sent_end = sent.get('end_time')
                     # Use per-sentence timing if available
                     if sent_start is not None and sent_end is not None:
                         if sent_start <= timestamp < sent_end + 0.0001:
+                            # Resolve authoritative join key for highlighting
+                            source_cids = (
+                                    sent.get('source_cids')
+                                    or sent.get('_source_span_ids')
+                                    or sent.get('_source_cids')
+                                    or sent.get('source_span_ids')
+                            )
+                            if source_cids:
+                                source_cids = [cid for cid in source_cids if cid is not None]
+                            else:
+                                source_cids = []
+
+                            # Filter excluded spans for UI highlighting
+                            source_cids = _filter_excluded_cids(source_cids, span_lookup)
+
                             return {
-                                'page': s.get('page_number', chunk['page']),
-                                'span_start_index': s['span_start_index'],
-                                'span_end_index': s['span_end_index'],
-                                'role': s.get('role', 'body'),
+                                'page': sent.get('page_number', chunk['page']),
+                                'span_start_index': sent.get('span_start_index'),  # advisory
+                                'span_end_index': sent.get('span_end_index'),  # advisory
+                                'source_cids': source_cids,  # authoritative (filtered)
+                                'role': sent.get('role', 'body'),
                                 'highlighting_enabled': data.get('highlighting_enabled', True),
-                                'sentence_text': s.get('text', '')[:50],
+                                'sentence_text': sent.get('text', '')[:50],
                             }
 
                 # Fallback: Legacy interpolation for old manifests
-                prog = (timestamp - chunk['start_time']) / chunk['duration_seconds']
-                idx = int(min(prog, 0.999) * len(sentences))
-                s = sentences[idx]
+                duration = chunk.get('duration_seconds', 0.0)
+                if duration <= 0:
+                    # Cannot interpolate safely; fall back to first sentence
+                    selected_sentence = sentences[0]
+                else:
+                    prog = (timestamp - chunk['start_time']) / duration
+                    idx = int(min(max(prog, 0.0), 0.999) * len(sentences))
+                    selected_sentence = sentences[idx]
+
+                # Resolve authoritative join key for highlighting (legacy-safe)
+                source_cids = (
+                        selected_sentence.get('source_cids')
+                        or selected_sentence.get('_source_span_ids')
+                        or selected_sentence.get('_source_cids')
+                        or selected_sentence.get('source_span_ids')
+                )
+                if source_cids:
+                    source_cids = [cid for cid in source_cids if cid is not None]
+                else:
+                    source_cids = []
+
+                # Filter excluded spans for UI highlighting
+                source_cids = _filter_excluded_cids(source_cids, span_lookup)
 
                 return {
-                    'page': s.get('page_number', chunk['page']),
-                    'span_start_index': s['span_start_index'],
-                    'span_end_index': s['span_end_index'],
-                    'role': s.get('role', 'body'),
+                    'page': selected_sentence.get('page_number', chunk['page']),
+                    'span_start_index': selected_sentence.get('span_start_index'),  # advisory
+                    'span_end_index': selected_sentence.get('span_end_index'),  # advisory
+                    'source_cids': source_cids,  # authoritative (filtered)
+                    'role': selected_sentence.get('role', 'body'),
                     'highlighting_enabled': data.get('highlighting_enabled', True),
-                    'sentence_text': s.get('text', '')[:50],
+                    'sentence_text': selected_sentence.get('text', '')[:50],
                 }
-    except Exception:
-        pass
+
+
+    except Exception as e:
+        # Citation lookup must never crash the API,
+        # but silent failure makes debugging impossible.
+        try:
+            logger.error(
+                "[citation] Failed lookup at timestamp %.3f: %s",
+                timestamp, str(e),
+                exc_info=True
+            )
+        except Exception:
+            pass
 
     return None

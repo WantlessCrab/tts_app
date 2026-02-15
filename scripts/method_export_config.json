@@ -2,32 +2,13 @@
   "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
   "target_files": [
     {
-      "file": "/home/wantless/TTS/my_app/static/audio-backend.js",
-      "mode": "file"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/static/event-emitter.js",
-      "mode": "file"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/static/native-audio-backend.js",
-      "mode": "file"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/static/player.js",
-      "mode": "file"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/static/wavesurfer-backend.js",
-      "mode": "file"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/templates/player.html",
-      "mode": "file"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/audio_server.py",
-      "mode": "file"
+      "file": "/home/wantless/TTS/my_app/pdf_processor/extraction_engine.py",
+      "mode": "methods",
+      "methods": [
+        "_assign_roles",
+        "_resolve_semantic_continuity"
+      ],
+      "comment": "phase 1 cat b methods"
     }
   ],
   "max_file_size_mb": 10

@@ -159,112 +159,180 @@
     gap: 15px;
     }
 
-    /* Player Bar - Top Controls */
+    /* ══════════════════════════════════════════════════════════
+   PLAYER BAR - 2-Row Grid Layout
+   Row 1: Play | Seek Slider (with time label below)
+   Row 2: Volume | Speed | Skip Buttons | Loop
+   ══════════════════════════════════════════════════════════ */
+
     #player-bar {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    grid-template-rows: auto auto;
-    gap: 10px;
-    padding: 10px;
-    margin-bottom: 0;
-    align-items: center;
+	    display: grid;
+	    grid-template-columns: auto 1fr; /* Row 1 */
+	    grid-template-rows: auto auto;
+	    gap: 12px 15px;
+	    padding: 15px;
+	    align-items: center;
     }
 
-    /* Row 1: Play + Seek + Time */
+    /* ─────────────────────────────────────────────────────────
+       ROW 1: Play Button + Seek
+       ───────────────────────────────────────────────────────── */
+
     #play-pause-button {
-    grid-column: 1;
-    grid-row: 1;
-    width: 50px;
-    height: 50px;
-    border-radius: 50%;
-    font-size: 18px;
-    padding: 0;
-    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%) !important;
-    color: white !important;
-    border: none;
-    cursor: pointer;
-    display: block;
-    z-index: 1;
+	    grid-column: 1;
+	    grid-row: 1;
+	    width: 50px;
+	    height: 50px;
+	    border-radius: 50%;
+	    font-size: 16px;
+	    padding: 0;
+	    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
+	    color: white;
+	    border: none;
+	    cursor: pointer;
     }
 
-    #seek {
-    grid-column: 2;
-    grid-row: 1;
-    min-width: 0;
-    width: 100%;
+    #seek-control {
+	    grid-column: 2;
+	    grid-row: 1;
     }
 
-    #time-display {
-    grid-column: 3;
-    grid-row: 1;
-    font-size: 14px;
-    color: #a0a0a0;
-    min-width: 90px;
-    text-align: center;
-    white-space: nowrap;
-    }
+    /* ─────────────────────────────────────────────────────────
+       ROW 2: Volume | Speed | Skip Buttons | Loop
+       ───────────────────────────────────────────────────────── */
 
-    /* Row 2: Volume + Speed + Loop */
     #volume-control {
-    grid-column: 1;
-    grid-row: 2;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    justify-self: start;
+	    grid-column: 1;
+	    grid-row: 2;
+	    justify-self: start;
     }
 
-    #volume-control span {
-    display: inline-block;
-    }
-
-    #volume-value {
-    min-width: 40px;
-    text-align: right;
-    color: #00b894;
-    font-weight: bold;
-    }
-
-    /* 3.1 FIX: Speed Control CSS */
     #speed-control {
-    grid-column: 2;
-    grid-row: 2;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    justify-self: center;
+	    grid-column: 2;
+	    grid-row: 2;
+	    justify-self: start;
+	    max-width: 150px;
     }
 
-    .control-label {
-    color: #ff69b4; /* Hot pink */
-    font-size: 12px;
-    font-weight: 600;
-    margin-right: 2px;
-    }
-
-    #speed-value {
-    min-width: 35px;
-    text-align: right;
-    color: #00b894;
-    font-weight: bold;
+    #skip-control {
+	    grid-column: 2;
+	    grid-row: 2;
+	    justify-self: center;
+	    display: flex;
+	    flex-direction: column;
+	    align-items: center;
+	    gap: 4px;
     }
 
     #loop-button {
-    grid-column: 3;
-    grid-row: 2;
-    white-space: nowrap;
-    justify-self: end;
-    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
-    color: white;
-    padding: 8px 15px;
-    border-radius: 20px;
-    border: none;
-    cursor: pointer;
+	    grid-column: 2;
+	    grid-row: 2;
+	    justify-self: end;
     }
 
-    #volume, #speed {
-    width: 80px;
+    /* ─────────────────────────────────────────────────────────
+       SLIDER CONTROL - Consistent Format
+       Slider on top, label/value underneath
+       ───────────────────────────────────────────────────────── */
+
+    .slider-control {
+	    display: flex;
+	    flex-direction: column;
+	    gap: 4px;
     }
+
+    .slider-control input[type="range"] {
+	    width: 100%;
+	    height: 6px;
+	    border-radius: 3px;
+	    background: #4a4a4a;
+	    outline: none;
+	    -webkit-appearance: none;
+    }
+
+    .slider-control input[type="range"]::-webkit-slider-thumb {
+	    -webkit-appearance: none;
+	    width: 14px;
+	    height: 14px;
+	    border-radius: 50%;
+	    background: #74b9ff;
+	    cursor: pointer;
+    }
+
+    .control-value {
+	    font-size: 12px;
+	    color: #a0a0a0;
+	    text-align: center;
+    }
+
+    .control-value span {
+	    color: #00b894;
+	    font-weight: bold;
+    }
+
+    /* ─────────────────────────────────────────────────────────
+   SKIP CONTROL - Customizable Jump Duration
+   ───────────────────────────────────────────────────────── */
+    #skip-control {
+	    display: flex;
+	    flex-direction: column;
+	    align-items: center;
+	    gap: 6px;
+    }
+
+    #skip-buttons {
+	    display: flex;
+	    gap: 12px;
+    }
+
+    #skip-buttons button {
+	    width: 40px;
+	    height: 40px;
+	    border-radius: 50%;
+	    background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
+	    color: #ff69b4;
+	    border: none;
+	    font-size: 16px;
+	    cursor: pointer;
+	    transition: all 0.2s;
+    }
+
+    #skip-buttons button:hover {
+	    background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
+	    transform: scale(1.1);
+    }
+
+    #skip-buttons button:active {
+	    transform: scale(0.95);
+    }
+
+    #skip-amount {
+	    width: 120px;
+    }
+
+    #skip-value {
+	    color: #00b894;
+	    font-weight: bold;
+    }
+
+    /* ─────────────────────────────────────────────────────────
+   SECONDARY CONTROLS - Bottom Row
+   ───────────────────────────────────────────────────────── */
+    #secondary-controls {
+	    display: flex;
+	    gap: 15px;
+	    justify-content: center;
+	    align-items: center;
+	    padding-top: 10px;
+	    flex-wrap: wrap;
+    }
+
+    #secondary-controls > button {
+	    background: #4a4a4a;
+	    color: #ff69b4;
+	    padding: 8px 15px;
+    }
+
 
     /* PDF VIEWER - Replaces Waveform Position */
     #pdf-viewer-container {
@@ -359,11 +427,6 @@
     cursor: not-allowed;
     }
 
-    #click-seek-toggle.active {
-    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
-    color: #ff69b4;
-    }
-
     #page-indicator {
     color: #a0a0a0;
     font-size: 14px;
@@ -398,21 +461,6 @@
     transform: none;
     }
 
-    /* Secondary Controls - Bottom Controls */
-    #secondary-controls {
-    display: flex;
-    gap: 10px;
-    justify-content: center;
-    padding-top: 5px;
-    flex-wrap: wrap;
-    }
-
-    #secondary-controls button {
-    background: #4a4a4a;
-    color: #ff69b4;
-    padding: 8px 15px;
-    }
-
     /* Waveform - Hidden but present for wavesurfer backend */
     #waveform {
     visibility: hidden;
@@ -424,42 +472,20 @@
     left: -9999px;
     }
 
+    /* ══════════════════════════════════════════════════════════
+       HIGHLIGHT CONTAINER & RECTANGLES
+       JS controls all visual properties via inline styles.
+       CSS provides only structural/positioning defaults.
+       ══════════════════════════════════════════════════════════ */
+
     #highlight-container {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none; /* Allow clicks to pass through */
-    z-index: 10; /* Above canvas but below controls */
-    }
-
-    /* Final Highlight CSS Contract (Action 3.2: Required Classes) */
-    .highlight-rect {
-    position: absolute;
-    border-radius: 2px;
-    transition: opacity 0.2s ease;
-    pointer-events: none;
-    background-color: rgba(255, 235, 59, 0.1); /* Base styling for structural integrity */
-    z-index: 1;
-    }
-
-    .highlight-rect.sentence {
-    background-color: rgba(100, 200, 255, 0.4); /* Blue for sentences */
-    }
-
-    .highlight-rect.current {
-    background-color: rgba(255, 235, 59, 0.6); /* Yellow for active sentence */
-    animation: pulse 1s infinite;
-    }
-
-    @keyframes pulse {
-    0%, 100% {
-    opacity: 0.6;
-    }
-    50% {
-    opacity: 0.8;
-    }
+	    position: absolute;
+	    top: 0;
+	    left: 0;
+	    width: 100%;
+	    height: 100%;
+	    pointer-events: none;
+	    z-index: 10;
     }
 
     #pdf-canvas.seek-enabled {
@@ -470,170 +496,6 @@
     background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
     color: white;
     font-weight: bold;
-    }
-
-    /* Status/Error Banner */
-    .status-banner {
-	    border-radius: 15px;
-	    padding: 15px;
-	    margin-bottom: 20px;
-	    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-	    animation: slideDown 0.3s ease-out;
-    }
-
-    @keyframes slideDown {
-	    from {
-		    opacity: 0;
-		    transform: translateY(-20px);
-	    }
-	    to {
-		    opacity: 1;
-		    transform: translateY(0);
-	    }
-    }
-
-    .banner-content {
-	    display: flex;
-	    align-items: center;
-	    gap: 12px;
-    }
-
-    .banner-icon {
-	    font-size: 24px;
-	    flex-shrink: 0;
-    }
-
-    .banner-text {
-	    flex: 1;
-    }
-
-    .banner-message {
-	    font-weight: 600;
-	    font-size: 14px;
-	    margin-bottom: 4px;
-    }
-
-    .banner-details {
-	    font-size: 12px;
-	    opacity: 0.8;
-    }
-
-    .banner-actions {
-	    display: flex;
-	    gap: 8px;
-	    flex-shrink: 0;
-    }
-
-    /* Banner States */
-    .status-banner.error {
-	    background: linear-gradient(135deg, #fab1a0 0%, #e17055 100%);
-	    color: white;
-    }
-
-    .status-banner.warning {
-	    background: linear-gradient(135deg, #ffeaa7 0%, #fdcb6e 100%);
-	    color: #2d3436;
-    }
-
-    .status-banner.processing {
-	    background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
-	    color: #2d3436;
-    }
-
-    .status-banner.info {
-	    background: linear-gradient(135deg, #74b9ff 0%, #a29bfe 100%);
-	    color: white;
-    }
-
-    .status-banner.success {
-	    background: linear-gradient(135deg, #55efc4 0%, #00b894 100%);
-	    color: white;
-    }
-
-    /* ✅ NEW: Success state */
-
-    /* Banner Action Buttons */
-    .banner-btn {
-	    padding: 8px 16px;
-	    border: none;
-	    border-radius: 20px;
-	    font-size: 12px;
-	    font-weight: bold;
-	    cursor: pointer;
-	    transition: transform 0.2s;
-    }
-
-    .banner-btn:hover {
-	    transform: translateY(-2px);
-    }
-
-    .banner-btn.primary {
-	    background: white;
-	    color: #6c5ce7;
-    }
-
-    .banner-btn.secondary {
-	    background: rgba(255, 255, 255, 0.3);
-	    color: white;
-    }
-
-    .status-banner.error .banner-btn.primary {
-	    color: #e17055;
-    }
-
-    .status-banner.warning .banner-btn.primary {
-	    color: #fdcb6e;
-    }
-
-    .status-banner.success .banner-btn.primary {
-	    color: #00b894;
-    }
-
-    /* ✅ NEW: Success button color */
-
-    /* ✅ NEW: Card Body and Detail Classes (Used by updateStatusBanner) */
-    .card-body {
-	    padding: 15px;
-	    background: rgba(255, 255, 255, 0.95);
-	    border-radius: 10px;
-	    margin-top: 10px;
-    }
-
-    .card-body h3 {
-	    margin: 0 0 10px 0;
-	    font-size: 16px;
-	    color: #2d3436;
-    }
-
-    .card-body p {
-	    margin: 5px 0;
-	    font-size: 13px;
-	    color: #636e72;
-    }
-
-    .error-detail {
-	    color: #d63031 !important;
-	    font-weight: 600;
-	    padding: 8px 12px;
-	    background: rgba(214, 48, 49, 0.1);
-	    border-radius: 8px;
-	    border-left: 3px solid #d63031;
-    }
-
-    .warning-detail {
-	    color: #e17055 !important;
-	    font-weight: 600;
-	    padding: 8px 12px;
-	    background: rgba(225, 112, 85, 0.1);
-	    border-radius: 8px;
-	    border-left: 3px solid #e17055;
-    }
-
-    .trace-info {
-	    font-family: 'Courier New', monospace;
-	    font-size: 11px;
-	    color: #b2bec3 !important;
-	    word-break: break-all;
     }
 
     </style>
@@ -648,19 +510,33 @@
 
         <div id="audio-player-component">
             <div id="player-bar">
+                <!-- ROW 1: Play + Seek + Time -->
                 <button id="play-pause-button">Play</button>
-                <input type="range" id="seek" min="0" max="100" value="0" step="0.1">
-                <span id="time-display">0:00 / 0:00</span>
-                <div id="volume-control">
-                    <span>&#128266;</span>
-                    <span id="volume-value" class="value-display">100%</span>
+                <div id="seek-control" class="slider-control">
+                    <input type="range" id="seek" min="0" max="100" value="0" step="0.1">
+                    <span id="time-display" class="control-value">0:00 / 0:00</span>
+                </div>
+
+                <!-- ROW 2: Volume | Speed | Skip | Loop -->
+                <div id="volume-control" class="slider-control">
                     <input type="range" id="volume" min="0" max="100" value="100" step="5">
+                    <span class="control-value">&#128266; <span id="volume-value">100%</span></span>
                 </div>
-                <div id="speed-control">
-                    <span class="control-label">Speed:</span>
-                    <span id="speed-value" class="value-display">1.0x</span>
+
+                <div id="speed-control" class="slider-control">
                     <input type="range" id="speed" min="0.5" max="2.0" value="1.0" step="0.05">
+                    <span class="control-value">Speed: <span id="speed-value">1.0x</span></span>
                 </div>
+
+                <div id="skip-control">
+                    <div id="skip-buttons">
+                        <button id="skip-backward" title="Skip Backward">«</button>
+                        <button id="skip-forward" title="Skip Forward">»</button>
+                    </div>
+                    <input type="range" id="skip-amount" min="0" max="10" value="3" step="1">
+                    <span class="control-value">Skip: <span id="skip-value">10s</span></span>
+                </div>
+
                 <button id="loop-button">Loop: <span id="loop-status">Off</span></button>
             </div>
 
@@ -694,10 +570,6 @@
             </div>
 
             <div id="secondary-controls">
-                <button id="skip-back-10">Back 10s</button>
-                <button id="skip-back-5">Back 5s</button>
-                <button id="skip-forward-5">Forward 5s</button>
-                <button id="skip-forward-10">Forward 10s</button>
                 <button id="reset-settings-button">Reset Settings</button>
                 <button id="download-button">Download File</button>
             </div>

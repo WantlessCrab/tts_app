@@ -371,9 +371,25 @@ _REASON_NOISE_PUNCTUATION: str = "noise_punctuation"
 _REASON_NOISE_FRAGMENT: str = "noise_fragment"
 _REASON_VISUAL_OVERLAP: str = "visual_overlap"
 
+# A2 chain protection: noise reasons eligible for inline continuation rescue
+_A2_NOISE_REASONS: frozenset[str] = frozenset({
+    _REASON_NOISE_SINGLE_CHAR,
+    _REASON_NOISE_DIGIT_ONLY,
+    _REASON_NOISE_PUNCTUATION,
+    _REASON_NOISE_FRAGMENT,
+})
+
 # STAGE 1 SOFT CLASSIFICATION CONSTANTS (Schema v2.0)
 _SOFT_CLASSIFY_NEAR_THRESHOLD_RATIO: float = 0.02  # 2% of page dimension
 _SOFT_CLASSIFY_OVERLAP_THRESHOLD: float = 0.50  # 50% overlap = "inside"
+
+_BOUNDARY_BODY_FONT_TOLERANCE: float = 0.25
+_BOUNDARY_BODY_MIN_TEXT_LENGTH: int = 3
+_BOUNDARY_BODY_PERCENTILE: float = 0.90
+_BOUNDARY_GAP_MULTIPLIER: float = 2.5
+_BOUNDARY_FOOTER_CEILING: float = 0.70
+_BOUNDARY_FOOTER_FLOOR: float = 0.92
+_REASON_PUBLISHER_METADATA: str = "publisher_metadata"
 
 # --- Filter Threshold Constants ---
 
@@ -743,6 +759,17 @@ _FRAGMENT_MIDWORD_PREFIXES: frozenset[str] = frozenset({
 # Ragged-Edge Magnet
 MAGNET_GAP_EM: float = 2.0
 
+# Roles NOT eligible for a2-based magnet reclassification
+_MAGNET_A2_NON_PROMOTABLE_ROLES: frozenset[str] = frozenset({
+    TextRole.TABLE_CELL.value,
+    TextRole.CAPTION.value,
+    TextRole.FIGURE_LABEL.value,
+    TextRole.FOOTNOTE.value,
+    TextRole.PAGE_NUMBER.value,
+    TextRole.HEADER_ARTIFACT.value,
+    TextRole.FOOTER_ARTIFACT.value,
+})
+
 # --- Margin Detection (Histogram Analysis) ---
 
 # Histogram bin configuration
@@ -778,6 +805,7 @@ _SEMANTIC_NEVER_OVERRIDE_ROLES: frozenset[str] = frozenset({
     TextRole.PAGE_NUMBER.value,
     TextRole.HEADER_ARTIFACT.value,
     TextRole.FOOTER_ARTIFACT.value,
+    TextRole.FOOTNOTE.value,
 })
 
 # Disposition vocabulary (E2 P0 alignment)
@@ -915,6 +943,12 @@ _STITCH_COMMON_SENTENCE_STARTERS: frozenset[str] = frozenset({
     "Figure", "Table"
 })
 
+# Margin-stream inline connectives: single-word spans that signal
+# continuation rather than standalone content (used by _resolve_semantic_continuity)
+_MARGIN_INLINE_CONNECTIVES: frozenset[str] = frozenset({
+    "or", "and", "but", "is", "are", "was", "were",
+})
+
 # --- Punctuation Classification ---
 
 _STITCH_CONTINUING_PUNCT: frozenset[str] = frozenset({",", ";", ":", ")", "]", '"', "'"})
@@ -1023,6 +1057,74 @@ _ROLE_SUBHEADING_FONT_RATIO: float = 1.08
 _ROLE_HEADING_MAX_WORDS: int = 12
 _ROLE_HEADING_MAX_CHARS: int = 80
 _ROLE_TERMINAL_PUNCTUATION: frozenset[str] = frozenset(".,;:?!")
+
+# Content-based heading detection: section number pattern.
+# Matches spans like "1 Introduction", "3.2 White Space", "3.10 Long Name".
+# The uppercase letter after whitespace confirms title text follows the number.
+# Used as an alternative to font-size/weight signals for heading classification.
+_HEADING_SECTION_NUMBER_PATTERN: re.Pattern[str] = re.compile(
+    r'^\d+(?:\.\d+)*\s+[A-Z]'
+)
+
+# Font weight hints for heading detection.
+# Replaces inline ("bold", "heavy", "black") tuple at Priority 6.
+# Extended with "semibold" and "demibold" to cover font families where
+# PyMuPDF reports weight variants rather than plain "bold".
+_HEADING_FONT_WEIGHT_HINTS: frozenset[str] = frozenset({
+    "bold", "heavy", "black", "semibold", "demibold",
+})
+
+# Layout-separation multiplier for heading detection.
+# Measured as a multiple of estimated line height.
+# 1.5–2.0 typical; tuned conservatively to avoid false positives.
+_HEADING_VERTICAL_ISOLATION_MULTIPLIER: float = 1.75
+
+# Font weight hints that qualify as heading-weight ONLY when combined with
+# a section number pattern match. "medium" weight fonts are used for headings
+# in some academic publishers (e.g., Springer LNNS) but are too ambiguous
+# as a standalone heading signal — many body fonts contain "medium" in name.
+_HEADING_FONT_WEIGHT_CONDITIONAL_HINTS: frozenset[str] = frozenset({
+    "medium",
+})
+
+
+# 2. Keyword prefixes (e.g., "Section 1", "Chapter 2")
+_HEADING_KEYWORD_PREFIX_PATTERN: re.Pattern[str] = re.compile(
+    r'^(?:Section|Chapter|Article|Part|Appendix)\s+\d+',
+    re.IGNORECASE,
+)
+
+_HEADING_LEGAL_SYMBOL_PATTERN: re.Pattern[str] = re.compile(
+    r'^§\s*\d'
+)
+
+# Letter-prefix section numbering (outline format).
+# Matches: "A. Background", "B. Methods", "I. Introduction"
+# Single uppercase letter followed by period, whitespace, and uppercase
+# start of title text. Common in legal briefs, policy documents, and
+# outline-format academic papers. This pattern directly resolves the
+# conflict with caption pattern ^[A-Z]\.\s+ at Priority 4.
+_HEADING_LETTER_PREFIX_PATTERN: re.Pattern[str] = re.compile(
+    r'^[A-Z]\.\s+[A-Z]'
+)
+
+# Multi-character roman numeral prefix.
+# Matches: "II. Scope", "III. Definitions", "IV. Liability", "XII. Termination"
+# Two or more roman numeral characters followed by period, whitespace,
+# and uppercase. These do NOT conflict with the caption pattern (which
+# requires exactly one letter before the period) but need Path 2
+# coverage for correct heading classification at Priority 6.
+_HEADING_ROMAN_NUMERAL_PREFIX_PATTERN: re.Pattern[str] = re.compile(
+    r'^[IVXLCDM]{2,}\.\s+[A-Z]'
+)
+
+_HEADING_STRUCTURAL_PREFIX_PATTERNS: tuple[re.Pattern[str], ...] = (
+    _HEADING_SECTION_NUMBER_PATTERN,
+    _HEADING_KEYWORD_PREFIX_PATTERN,
+    _HEADING_LEGAL_SYMBOL_PATTERN,
+    _HEADING_LETTER_PREFIX_PATTERN,
+    _HEADING_ROMAN_NUMERAL_PREFIX_PATTERN,
+)
 
 # --- Role Assignment: Footnotes ---
 
@@ -1185,6 +1287,13 @@ _HEALING_CUT_INDICATORS: frozenset[str] = frozenset({
     # Demonstratives
     "this", "that", "these", "those",
 })
+
+_HEAL_SHORT_FRAGMENT_MAX_WORDS: int = 4
+
+# Minimum character length for the last word to qualify as a "real word"
+# rather than an abbreviation suffix. Words like "al" (et al.), "vs",
+# "cf", "eq" are typically abbreviation tails, not fragment endings.
+_HEAL_SHORT_FRAGMENT_MIN_LAST_WORD_LEN: int = 3
 
 NOISE_PUNCTUATION: frozenset[str] = frozenset({
     ".", ",", ";", ":", "-", "–", "—", "/",
@@ -1371,11 +1480,63 @@ _LIST_ITEM_PATTERN: re.Pattern[str] = re.compile(
     r")"
 )
 
+# ===========================================================================
+# BIBLIOGRAPHY / REFERENCE BLOCK DETECTION (cluster-based, no magic headings)
+# Used by _refine_roles_via_content_flow() to demote confirmed reference blocks
+# into TextRole.FOOTNOTE (already non-viable for TTS).
+# ===========================================================================
+
+_BIBLIO_HEADING_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"^\s*references\s*$",
+        r"^\s*bibliography\s*$",
+    )
+)
+
+_BIBLIO_ENTRY_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern) for pattern in (
+        r"^\d{1,3}\.\s+[A-Z]",  # "1. Author..."
+        r"^\[\d{1,3}\]\s*[A-Z]",  # "[1] Author..."
+        r"^[A-Z][a-z]{1,15},\s+[A-Z]\.",  # "Smith, J."
+    )
+)
+
+_BIBLIO_CONTINUATION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\(\d{4}[a-z]?\)",  # (2022) or (2022a)
+        r"\bpp?\.\s*\d",  # pp. 123 / p. 45
+        r"\bvol\.\s*\d",  # vol. 4
+        r"\bno\.\s*\d",  # no. 2
+        r"\bdoi\s*:\s*",  # doi:
+        r"\b10\.\d{4,9}/",  # DOI prefix
+        r"https?://",  # URLs
+        r"\bwww\.",  # URLs
+    )
+)
+
+_BIBLIO_JOURNAL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern) for pattern in (
+        r"\b[A-Z][a-z]{1,8}\.\s+[A-Z]",  # "Proc. ACM", "J. Comp."
+        r"\bTrans\.\s+[A-Z]",  # "Trans. Vis."
+        r"\bInt\.\s+J\.",  # "Int. J."
+    )
+)
+
+_BIBLIO_MIN_CLUSTER_SIZE: int = 3
+_BIBLIO_CLUSTER_SCORE_THRESHOLD: float = 0.4
+_BIBLIO_CLUSTER_RATIO_THRESHOLD: float = 0.55
+_BIBLIO_PUNCT_DENSITY_THRESHOLD: float = 0.08
+_BIBLIO_SMALL_FONT_RATIO: float = 0.94
+
 # --- Cleaning Patterns ---
 
 _EMPTY_BRACKETS_PATTERN: re.Pattern[str] = re.compile(r"[\(\[\{]\s*[\)\]\}]")
 _PUNCT_ONLY_BRACKETS_PATTERN: re.Pattern[str] = re.compile(r"[\(\[]\s*[,;:.]\s*[\)\]]")
 _WHITESPACE_PATTERN: re.Pattern[str] = re.compile(r"\s+")
+
+# Collapses whitespace immediately preceding sentence-terminal punctuation.
+_PRE_PUNCT_WHITESPACE_PATTERN: re.Pattern[str] = re.compile(r'\s+([,.;:])')
+
 _CHEMICAL_SUBSCRIPT_PATTERN: re.Pattern[str] = re.compile(r"([A-Za-z])([₀-₉]+)")
 
 # --- Cleaning Patterns ---
@@ -1444,8 +1605,14 @@ _CAPTION_PROSE_CONTINUATION_PATTERN: re.Pattern[str] = re.compile(
     r"[:\.]\s+\S"
 )
 
+_RAWDICT_WORD_GAP_RATIO = 0.10
+
+# Fallback font size when span metadata is missing or zero.
+_RAWDICT_FALLBACK_FONT_SIZE = 10.0
+
 # ✦───────────── 6 DERIVED CONSTANTS ─────────────✦
 
+# Glyph-level word boundary detection (rawdict mode)
 _SUBSCRIPT_TABLE: dict[int, str] = str.maketrans(SUBSCRIPT_DIGITS)
 _SUPERSCRIPT_TABLE: dict[int, str] = str.maketrans(SUPERSCRIPT_DIGITS)
 
@@ -1505,8 +1672,14 @@ _RONC_V2_EXCLUDED_ROLES: frozenset[str] = frozenset({
     TextRole.PAGE_NUMBER.value,
     TextRole.HEADER_ARTIFACT.value,
     TextRole.FOOTER_ARTIFACT.value,
+    TextRole.FOOTNOTE.value,
 })
 
+_NUMBER_DECOMPOUND_PATTERN: re.Pattern[str] = re.compile(
+    r"\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+    r"(one|two|three|four|five|six|seven|eight|nine)\b",
+    re.IGNORECASE,
+)
 # Roles that CAN be candidates but with reduced priority (Phase 3 scoring)
 _RONC_V2_DEPRIORITIZED_ROLES: frozenset[str] = frozenset({
     TextRole.TABLE_CELL.value,
@@ -1540,6 +1713,33 @@ _RONC_V2_MAX_CONFIDENCE: float = 1.0
 
 # Minimum link confidence to trigger protection
 _RONC_V2_PROTECTION_THRESHOLD: float = 0.60
+
+_REASON_DOCUMENT_METADATA: str = "document_metadata"
+
+# ════════════════════════════════════════════════════════════════
+# STRUCTURAL AUTHORITY CONSTANTS
+# Span-level exclusion domains that override rescue and contract
+# logic. Enforces the authority hierarchy:
+#   Structural > Contractual (RONC) > Rescue > Default
+# ════════════════════════════════════════════════════════════════
+
+_STRUCTURAL_EXCLUSION_REASONS: frozenset[str] = frozenset({
+    _REASON_DOCUMENT_METADATA,
+    _REASON_PUBLISHER_METADATA,
+    _REASON_HEADER_BAND,
+    _REASON_FOOTER_BAND,
+    _REASON_HEADER_ARTIFACT,
+})
+
+_STRUCTURAL_EXCLUSION_OUTLIER_REASONS: frozenset[str] = frozenset({
+    "bibliography_heading",
+    "bibliography_heading_spurious",
+    "bibliography_cluster",
+})
+
+# RONC veto reasons now alias structural exclusion reasons
+# (identical set; centralized source of truth)
+_RONC_V2_PROTECTION_VETO_REASONS = _STRUCTURAL_EXCLUSION_REASONS
 
 # Protection reasons (for audit trail)
 _RONC_V2_PROTECTION_ANCHOR: str = "anchor" # Has outgoing link
@@ -1583,7 +1783,6 @@ _TTS_HARD_GATE_SHORT_WORD_ALLOWED_ROLES: tuple[str, ...] = (
     TextRole.HEADING.value,
     TextRole.SUBHEADING.value,
     TextRole.BODY.value,
-    TextRole.LIST_ITEM.value,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1741,9 +1940,49 @@ _RONC_V2_AUTHORITY_NUMERIC: dict = {
 _RONC_V2_DISQ_CROSS_STREAM: str = "cross_stream"
 _RONC_V2_DISQ_MISSING_STREAM: str = "missing_layout_stream"
 
+# =============================================================================
+# PROSODIC CLAUSE SPLITTING CONSTANTS (v1.5.0 - TTS Decoder Safety)
+# =============================================================================
+# Thresholds and patterns for splitting clause-dense sentences into
+# decoder-safe segments for audio-level TTS generation.
+#
+# ARCHITECTURAL NOTE:
+#   Clause metadata is computed in _sanitize_for_tts() and stored in change_tracker.
+#   Actual audio splitting + concatenation happens in process.py at TTS generation time.
+#   Return type of _sanitize_for_tts() remains str (no breaking changes).
+
+_TTS_PROSODIC_SPLIT_CHAR_THRESHOLD: int = 120  # Match existing decoder risk trigger
+_TTS_PROSODIC_SPLIT_COMMA_THRESHOLD: int = 1  # Match existing decoder risk trigger
+_TTS_PROSODIC_MIN_CLAUSE_WORDS: int = 4  # Safety: no tiny fragments
+_TTS_PROSODIC_MAX_CLAUSES: int = 4  # Safety: cap clause count
+
+# Clause boundary patterns (ordered by prosodic break strength)
+# These patterns split AT the boundary, keeping the connector with the following clause
+_TTS_PROSODIC_CLAUSE_PATTERNS: Tuple[re.Pattern, ...] = (
+    # Priority 1: Relative/subordinate clauses (strongest break)
+    re.compile(r",\s+(which|that|who|whom|where)\s+", re.IGNORECASE),
+    # Priority 2: Discourse markers
+    re.compile(r",\s+(however|therefore|moreover|nevertheless|in contrast|by contrast)\s+",
+               re.IGNORECASE),
+    # Priority 3: Participial/state verb phrases (common in academic text)
+    re.compile(r",\s+(arising from|consisting of|including|is also|can be|are also)\s+",
+               re.IGNORECASE),
+    # Priority 4: Conjunctions (weakest - use only as fallback)
+    re.compile(r",\s+(and|or|but)\s+", re.IGNORECASE),
+)
+
 # ✦────────────────────✦────────────────────✦
 #                ✿   METHODS  ✿
 # ✦────────────────────✦────────────────────✦
+
+def _contains_greek(text: str) -> bool:
+    """
+    Return True if text contains at least one Unicode Greek character.
+    Greek Unicode block: U+0370–U+03FF
+    """
+    if not text:
+        return False
+    return any('\u0370' <= ch <= '\u03FF' for ch in text)
 
 # ✦                  ✦                  ✦                  ✦
 # ✦──────── 1 RONC v2.0 — Contract-Maker Architecture ───────✦
@@ -2863,6 +3102,26 @@ def _ronc_v2_assign_protection(
         next_mutual = next_link.get("mutual", False)
 
         # ─────────────────────────────────────────────────────────────
+        # Structural Boilerplate Veto (v4.0)
+        # Spans flagged as publisher metadata (copyright, DOI, proceedings
+        # citations) must never receive continuity protection — they are
+        # not prose and should not anchor or continue reading chains.
+        #
+        # IMPORTANT: Do NOT early-continue; linked_unit_cids must still
+        # be built for audit/debug even when protection is vetoed.
+        # ─────────────────────────────────────────────────────────────
+        candidate_reasons = set(span.get("_exclusion_candidate_reasons") or [])
+        veto_protection = bool(candidate_reasons & _RONC_V2_PROTECTION_VETO_REASONS)
+
+        if veto_protection and trace_id:
+            logger.debug(
+                "[%s] RONC v2.0 Phase 5: Veto must_include for '%s...' (reasons=%s)",
+                trace_id,
+                (span.get("cleaned_text") or span.get("text") or span.get("raw_text") or "")[:30],
+                sorted(candidate_reasons & _RONC_V2_PROTECTION_VETO_REASONS),
+            )
+
+        # ─────────────────────────────────────────────────────────────
         # Protection Logic (Priority Order)
         # ─────────────────────────────────────────────────────────────
 
@@ -2892,8 +3151,8 @@ def _ronc_v2_assign_protection(
             reasons.append(f"{_RONC_V2_PROTECTION_CONTINUATION}:{prev_cid}")
             audit["continuations_protected"] += 1
 
-        # Apply protection
-        if protection_applied:
+        # Apply protection (unless vetoed by structural boilerplate check)
+        if protection_applied and not veto_protection:
             protection["must_include"] = True
             protection["reason"] = "+".join(reasons)
             audit["total_protected"] += 1
@@ -2938,6 +3197,11 @@ def _ronc_v2_assign_protection(
 
         # If unit has no other members in this window, nothing to protect
         if unit_counts.get(unit_id, 0) < 2:
+            continue
+
+        # Structural boilerplate veto (same reasons as main loop)
+        candidate_reasons = set(span.get("_exclusion_candidate_reasons") or [])
+        if candidate_reasons & _RONC_V2_PROTECTION_VETO_REASONS:
             continue
 
         # Veto check: some anchors must never be protected
@@ -4811,6 +5075,19 @@ def _translate_exclusion_flags(
             _inc(sp["_tts_exclude_reason"])
             continue
 
+        # ════════════════════════════════════════════════════════════════
+        # STRUCTURAL AUTHORITY GATE (after semantic, before rescue)
+        # Structural exclusion overrides rescue/protection logic.
+        # Authority: Structural > Contractual (RONC) > Rescue > Default
+        # ════════════════════════════════════════════════════════════════
+        candidate_reasons_set = set(sp.get("_exclusion_candidate_reasons") or [])
+        outlier_reasons_set = set(sp.get("_outlier_reasons") or [])
+        if (candidate_reasons_set & _STRUCTURAL_EXCLUSION_REASONS
+                or outlier_reasons_set & _STRUCTURAL_EXCLUSION_OUTLIER_REASONS):
+            if not sp.get("_exclusion_protected", False):
+                _exclude(sp, "structural_exclusion")
+                continue
+
         # ------------------------------------------------------------
         # Priority 1: Semantic interruption (treat as excluded for TTS)
         # ------------------------------------------------------------
@@ -4835,11 +5112,9 @@ def _translate_exclusion_flags(
 
             if trace_id:
                 logger.debug(
-                    "[%s] RONC Override: Rescued interruption '%s...' (reason=%s)",
-                    trace_id, (sp.get("cleaned_text") or "")[:20], protection.get("reason")
+                    "[%s] Excluding interruption '%s...' (no RONC protection)",
+                    trace_id, (sp.get("cleaned_text") or "")[:20]
                 )
-                continue
-
             _exclude(sp, "semantic_interruption")
             continue
 
@@ -4898,35 +5173,62 @@ def _translate_exclusion_flags(
         if contract:
             protection = contract.get("protection", {})
             if protection.get("must_include"):
-                # Contract says this span must be included
-                sp["_tts_excluded"] = False
-                sp["_tts_exclude_reason"] = None
-                sp["_tts_include_reason"] = f"ronc_v2_contract:{protection.get('reason')}"
-                audit["included"] += 1
+                current_role = sp.get("role", "")
 
-                if trace_id:
-                    span_text = (
-                                        sp.get("cleaned_text")
-                                        or sp.get("text")
-                                        or sp.get("raw_text")
-                                        or ""
-                                )[:40]
-                    logger.debug(
-                        "[%s] RONC v2.0: Contract protection applied: '%s...' reason=%s",
-                        trace_id, span_text, protection.get('reason')
+                # ──────────────────────────────────────────────────
+                # GUARD (v10.0): Non-viable roles require physical
+                # continuation evidence to override exclusion.
+                #
+                # RONC mutual links can form across role boundaries
+                # (e.g., inside_figure ↔ body) via proximity scoring
+                # alone. Without A2 edges or whitelist protection,
+                # the span has no physical evidence of text-flow
+                # membership. Author metadata and figure labels with
+                # RONC links must not bypass role-based exclusion.
+                #
+                # Spans WITH evidence (e.g., somatosensory P0:2/P0:3
+                # with _a2_qualified + greek_symbol whitelist) pass
+                # this guard and receive protection as before.
+                # ──────────────────────────────────────────────────
+                allow_override = True
+                if current_role in _TTS_NON_VIABLE_ROLES:
+                    has_continuation_evidence = (
+                            sp.get("_a2_qualified", False)
+                            or sp.get("_a2_edge_exists", False)
+                            or sp.get("_whitelist_protected") is not None
                     )
+                    if not has_continuation_evidence:
+                        allow_override = False
+                        if trace_id:
+                            logger.info(
+                                "[%s] RONC v2.0: must_include blocked for "
+                                "non-viable role '%s' without continuation "
+                                "evidence (no A2/whitelist). text=%r",
+                                trace_id, current_role,
+                                (sp.get("cleaned_text") or "")[:40]
+                            )
 
-                continue  # Skip to next span
+                if allow_override:
+                    # Contract says this span must be included
+                    sp["_tts_excluded"] = False
+                    sp["_tts_exclude_reason"] = None
+                    sp["_tts_include_reason"] = f"ronc_v2_contract:{protection.get('reason')}"
+                    audit["included"] += 1
 
-        # ------------------------------------------------------------
-        # Priority 3: Pass 1 rescued spans (HARDEN already applied)
-        # ------------------------------------------------------------
-        if sp.get("_tts_rescued", False):
-            sp["_tts_excluded"] = False
-            sp["_tts_exclude_reason"] = None
-            sp["_tts_include_reason"] = "pass1_rescued"
-            audit["included"] += 1
-            continue
+                    if trace_id:
+                        span_text = (
+                                            sp.get("cleaned_text")
+                                            or sp.get("text")
+                                            or sp.get("raw_text")
+                                            or ""
+                                    )[:40]
+                        logger.debug(
+                            "[%s] RONC v2.0: Contract protection applied: '%s...' reason=%s",
+                            trace_id, span_text, protection.get('reason')
+                        )
+
+                    continue  # Skip to next span
+                    # else: fall through to Priority 3+ chain
 
         # ------------------------------------------------------------
         # Priority 3.5: inside_figure rescue (PATCH 7B authoritative)
@@ -4943,82 +5245,40 @@ def _translate_exclusion_flags(
         # ------------------------------------------------------------
         role = sp.get("role", "")
 
-        if role in _TTS_NON_VIABLE_ROLES:
-            # =================================================================
-            # PATCH 7B-A (E3 + E2 HARDENED)
-            # Rescue body-like inside_figure roles, INCLUDING short continuations
-            # =================================================================
-            if role == "inside_figure":
-                text = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
-                word_count = len(text.split()) if text else 0
-                has_sentence_punct = text and text[-1] in ".!?,"
-                layout_stream = sp.get("layout_stream", "")
+        # Priority 4: Non-viable role OR spatial inside-figure
+        is_role_nv = role in _TTS_NON_VIABLE_ROLES
+        is_spatial_fig = (sp.get("_spatial_context") or {}).get("inside_figure", False)
 
-                # Short continuation heuristic (PATCH 7B-F: >= 2 words)
-                is_short_continuation = (
-                        2 <= word_count <= 5 and
-                        text and (
-                                text[0].islower() or text[0] in ",;:)"
-                        )
-                )
+        if is_role_nv or is_spatial_fig:
+            # Inside-figure rescue opportunity (role-based or spatial-based)
+            can_attempt_rescue = (
+                    (role == "inside_figure")
+                    or (is_spatial_fig and not is_role_nv and "visual_overlap" not in (
+                    sp.get("_exclusion_candidate_reasons") or []))
+            )
 
-                is_body_like = word_count >= 5 or has_sentence_punct or is_short_continuation
-                is_body_stream = isinstance(layout_stream, str) and layout_stream.startswith(
-                    "body_col")
-
-                text_lower = text.lower() if text else ""
-                is_boilerplate = (
-                        "html" in text_lower or
-                        "css" in text_lower or
-                        "examples of how to" in text_lower or
-                        text_lower.startswith("figure ") or
-                        text_lower.startswith("table ")
-                )
-                _exclude(sp, "non_viable_role")
+            if can_attempt_rescue and _is_rescuable_inside_figure(sp):
+                sp["_tts_excluded"] = False
+                sp["_tts_exclude_reason"] = None
+                sp["_tts_include_reason"] = "inside_figure_rescued"
+                sp["_tts_rescued"] = True
+                sp["_inside_figure_rescued"] = True
+                sp["_semantic_disposition"] = _SEM_DISP_INCLUDED
+                existing_reasons = list(sp.get("_semantic_reasons") or [])
+                existing_reasons.append("flag_translated:inside_figure_rescued")
+                sp["_semantic_reasons"] = existing_reasons
+                audit["included"] += 1
                 continue
 
-        spatial = sp.get("_spatial_context") or {}
-        if spatial.get("inside_figure", False):
-            # =================================================================
-            # PATCH 7B-B (E3 HARDENED)
-            # Rescue body-like spans misclassified spatially as inside_figure
-            # =================================================================
-            exclusion_reasons = sp.get("_exclusion_candidate_reasons", [])
-
-            if "visual_overlap" not in exclusion_reasons:
-                text = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
-                word_count = len(text.split()) if text else 0
-                has_sentence_punct = text and text[-1] in ".!?,"
-                layout_stream = sp.get("layout_stream", "")
-
-                # PATCH 7B-F: >= 2 words minimum
-                is_short_continuation = (
-                        2 <= word_count <= 5 and
-                        text and (
-                                text[0].islower() or text[0] in ",;:)"
-                        )
-                )
-
-                is_body_like = word_count >= 5 or has_sentence_punct or is_short_continuation
-                is_body_stream = isinstance(layout_stream, str) and layout_stream.startswith(
-                    "body_col")
-
-                text_lower = text.lower() if text else ""
-                is_boilerplate = (
-                        "html" in text_lower or
-                        "css" in text_lower or
-                        "examples of how to" in text_lower or
-                        text_lower.startswith("figure ") or
-                        text_lower.startswith("table ")
-                )
-
-                _exclude(sp, "inside_figure")
-                continue
+            # Determine exclusion reason
+            if is_role_nv:
+                _exclude(sp, f"role:{role}" if role != "inside_figure" else "non_viable_role")
             else:
                 _exclude(sp, "inside_figure")
-                continue
+            continue
 
-        if sp.get("_is_table_content", False) or spatial.get("inside_table", False):
+        if sp.get("_is_table_content", False) or (sp.get("_spatial_context") or {}).get(
+                "inside_table", False):
             _exclude(sp, "inside_table")
             continue
 
@@ -5452,6 +5712,40 @@ def _init_stage1_soft_fields(span: Dict) -> None:
     span.setdefault("_exclusion_candidate", False)
     span.setdefault("_exclusion_candidate_reasons", [])
     span.setdefault("_requires_semantic_review", False)
+
+
+def _is_rescuable_inside_figure(sp: Dict) -> bool:
+    """Single source of truth for inside_figure rescue eligibility.
+
+    Consolidates identical logic from Priority 4a (role-based) and
+    Priority 4b (spatial-based) in _translate_exclusion_flags.
+
+    NOT used by:
+      - Pass 2 rescue (_resolve_semantic_continuity): different criteria
+        (a2 body anchor, role promotion, confidence scoring)
+      - Narration gate P11 (_passes_narration_gate): different criteria
+        (character-length threshold, role whitelist)
+    """
+    text = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
+    if not text:
+        return False
+    word_count = len(text.split())
+    has_sentence_punct = text[-1] in ".!?,"
+    is_short_continuation = (
+            2 <= word_count <= 5
+            and (text[0].islower() or text[0] in ",;:)")
+    )
+    is_body_like = word_count >= 5 or has_sentence_punct or is_short_continuation
+    layout_stream = sp.get("layout_stream", "")
+    is_body_stream = isinstance(layout_stream, str) and layout_stream.startswith("body_col")
+    text_lower = text.lower()
+    is_boilerplate = (
+            "html" in text_lower or "css" in text_lower
+            or "examples of how to" in text_lower
+            or text_lower.startswith("figure ")
+            or text_lower.startswith("table ")
+    )
+    return is_body_like and is_body_stream and not is_boilerplate
 
 
 def _flag_candidate(
@@ -6084,12 +6378,87 @@ def _detect_columns(
                     min_gap = gap
                     nearest_col = int(b.get("column_index", 0) or 0)
 
-            # Safe-harbor threshold
+            # Safe-harbor threshold (existing behavior)
             if min_gap <= (MAGNET_GAP_EM * fs):
                 m["is_margin_content"] = False
                 m["column_index"] = nearest_col
                 m["layout_stream"] = f"body_col_{nearest_col}"
                 magnet_reclassified += 1
+
+            # FM2 ADDITION (from e2, approved):
+            # Within-VLG a2 fallback when gap fails but body-majority already holds
+            elif (
+                    m.get("role") not in _MAGNET_A2_NON_PROMOTABLE_ROLES
+                    and (m.get("a2_continues_from_previous")
+                         or m.get("a2_continues_to_next"))
+            ):
+                m["is_margin_content"] = False
+                m["column_index"] = nearest_col
+                m["layout_stream"] = f"body_col_{nearest_col}"
+                m["_a2_magnet_reclassified"] = True
+                magnet_reclassified += 1
+
+    # ─────────────────────────────────────────────────────────────────────
+    # FM2 (your design): Cross-VLG A2 Magnet Fallback
+    # Handles split line_id cases (Diagnostic A)
+    # NO body-majority requirement — a2 + body anchor replaces it
+    # ─────────────────────────────────────────────────────────────────────
+    row_key_groups = defaultdict(list)
+    for span in spans:
+        rk = span.get("row_key")
+        if rk is not None:
+            row_key_groups[rk].append(span)
+
+    for rk, group in row_key_groups.items():
+        body_on_row = [
+            s for s in group
+            if not s.get("is_margin_content")
+               and str(s.get("layout_stream", "")).startswith("body_col")
+        ]
+        if not body_on_row:
+            continue
+
+        for m in group:
+            if not m.get("is_margin_content"):
+                continue
+            if m.get("role") in _MAGNET_A2_NON_PROMOTABLE_ROLES:
+                continue
+            if not (m.get("a2_continues_from_previous")
+                    or m.get("a2_continues_to_next")):
+                continue
+
+            m_rect = span_rect_map.get(id(m))
+            if not m_rect:
+                continue
+
+            mx0, mx1 = float(m_rect[0]), float(m_rect[2])
+            nearest_col = 0
+            min_gap = float("inf")
+
+            for b in body_on_row:
+                b_rect = span_rect_map.get(id(b))
+                if not b_rect:
+                    continue
+                bx0, bx1 = float(b_rect[0]), float(b_rect[2])
+                gap = min(abs(mx0 - bx1), abs(bx0 - mx1))
+                if gap < min_gap:
+                    min_gap = gap
+                    nearest_col = int(b.get("column_index", 0) or 0)
+
+            m["is_margin_content"] = False
+            m["column_index"] = nearest_col
+            m["layout_stream"] = f"body_col_{nearest_col}"
+            m["_a2_magnet_reclassified"] = True
+            magnet_reclassified += 1
+
+    # FM2 cross-VLG observability
+    if trace_id:
+        a2_cross_vlg = sum(1 for s in spans if s.get("_a2_magnet_reclassified"))
+        if a2_cross_vlg:
+            logger.info(
+                "[%s] FM2 cross-VLG: %d spans reclassified via a2 chain",
+                trace_id, a2_cross_vlg
+            )
 
     # =========================================================================
     # PHASE 2.2: Line-End Punctuation Guard (REQUIRED)
@@ -6498,17 +6867,44 @@ def _row_key(span_obj):
 
 
 def _flatten_to_raw_spans(
-        text_page: Dict,
+        text_page: dict,
         page_num: int,
         trace_id: str = None
 ) -> List[Dict]:
     """
     Flatten PyMuPDF block/line/span hierarchy into a linear list of span dicts.
-
     Phase 1.5:  Deterministic order stabilization (row_key → x1 → x0 → index)
     Phase 1.75: Horizontal adjacency signaling (metadata-only, lossless)
     A2-V: Vertical continuation detection within block
     """
+
+    def _reconstruct_text_from_chars(span_dict: Dict) -> str:
+        """
+        Reconstruct span text from rawdict character array, inserting spaces
+        at detected word boundaries based on inter-glyph gaps.
+
+        Falls back to span["text"] if no chars array is present (dict mode compat).
+        """
+        chars = span_dict.get("chars")
+        if not chars:
+            return span_dict.get("text", "")
+
+        fs = float(span_dict.get("size") or _RAWDICT_FALLBACK_FONT_SIZE)
+        gap_threshold = fs * _RAWDICT_WORD_GAP_RATIO
+
+        parts = []
+        for i, ch in enumerate(chars):
+            c = ch.get("c", "")
+            if i > 0 and c != " " and parts and parts[-1] != " ":
+                prev_bbox = chars[i - 1].get("bbox")
+                curr_bbox = ch.get("bbox")
+                if prev_bbox and curr_bbox:
+                    gap = curr_bbox[0] - prev_bbox[2]
+                    if gap >= gap_threshold:
+                        parts.append(" ")
+            parts.append(c)
+
+        return "".join(parts)
 
     raw_spans: List[Dict] = []
     skipped_count = 0
@@ -6572,7 +6968,12 @@ def _flatten_to_raw_spans(
             for s in spans:
                 s["_row_key"] = _row_key(s)
 
-            line_text_canonical = "".join(s.get("text", "") for s in spans)
+            # Cache reconstructed text per span (rawdict chars → text is deterministic)
+            # Hoisted: avoids redundant char-array iteration across adjacency + assignment sites
+            for s in spans:
+                s["_text"] = _reconstruct_text_from_chars(s)
+
+            line_text_canonical = "".join(s["_text"] for s in spans)
 
             # =========================================================
             # PHASE 1.75: Horizontal Adjacency Signaling (Lossless)
@@ -6587,13 +6988,14 @@ def _flatten_to_raw_spans(
                 if curr["_row_key"] != nxt["_row_key"]:
                     continue
 
-                curr_text = (curr.get("text") or "").rstrip()
-                next_text = (nxt.get("text") or "").lstrip()
+                curr_text = curr["_text"].rstrip()
+                curr_text_stripped = curr_text.rstrip(" '\"')]}")
+                next_text = nxt["_text"].lstrip()
 
                 if not curr_text or not next_text:
                     continue
 
-                if curr_text.endswith((".", "?", "!")):
+                if curr_text_stripped.endswith((".", "?", "!")):
                     continue
 
                 if curr_text.endswith("-"):
@@ -6657,7 +7059,7 @@ def _flatten_to_raw_spans(
                     origin = span.get("origin", (x0, y1))
                     baseline_y = float(origin[1])
                     line_y_band = round(baseline_y, 2)
-                    raw_text = span.get("text", "")
+                    raw_text = span["_text"]
 
                     # =========================================================
                     # REVISION A2-V: Vertical Continuation Detection
@@ -6679,32 +7081,33 @@ def _flatten_to_raw_spans(
                                 carry_block_id == curr_block_id
                         )
 
-                        # Guard 2: Previous span must not end with hard sentence boundary
-                        prev_tail_stripped = prev_text.rstrip(" '\"”’)]}")
+                        # ═══════════════════════════════════════════════════════════════════
+                        # Guard 2: AUTHORITATIVE — Sentence boundary detection
+                        # This is the definitive signal. If no terminal punctuation,
+                        # the sentence is unfinished BY DEFINITION.
+                        # ═══════════════════════════════════════════════════════════════════
+                        prev_tail_stripped = prev_text.rstrip(" '\"')]}")
                         prev_hard_end = prev_tail_stripped.endswith((".", "?", "!"))
 
-                        # IMPORTANT (Phase 1 Guardrail):
-                        # Uppercase/punctuation checks here may ONLY suppress/allow continuation SIGNALS.
-                        # They MUST NOT introduce sentence boundaries or segmentation decisions.
+                        # Derived: If no terminal punctuation, sentence is mid-flight
+                        sentence_is_unfinished = not prev_hard_end
 
-                        # Guard 3: Context-aware uppercase handling (RELAXED for scientific text)
-                        # Allow uppercase continuation if previous line is clearly unfinished
+                        # Guard 3: ADVISORY — Uppercase heuristic
+                        # Uppercase can ONLY signal a new sentence if the previous sentence ended.
                         curr_starts_upper = len(curr_text) > 0 and curr_text[0].isupper()
-                        prev_clearly_unfinished = prev_tail_stripped.endswith(
-                            (",", ";", ":", "-", "—", "(", "[", "{")
-                        )
-                        # Block uppercase only if it genuinely looks like a new sentence
+
                         curr_looks_new_sentence = (
-                                curr_starts_upper and
-                                not prev_clearly_unfinished and
-                                not prev_text.endswith("-")  # Hyphen wrap is always safe
+                                curr_starts_upper and prev_hard_end
                         )
 
-                        # Guard 4: Geometry sanity (vertical gap + indent within tolerance)
+                        # ═══════════════════════════════════════════════════════════════════
+                        # Guard 4: CONDITIONAL — Geometry sanity
+                        # Strict when sentence ended; lenient when mid-sentence.
+                        # PDF bbox jitter should not break legitimate continuations.
+                        # ═══════════════════════════════════════════════════════════════════
                         allow_geom = False
                         prev_bbox = carry_tail.get("bbox")
 
-                        # PHASE 0/1: Geometry checks only valid if current bbox exists
                         if bbox is not None and prev_bbox is not None and len(prev_bbox) >= 4:
                             v_gap = bbox[1] - prev_bbox[3]  # curr_y0 - prev_y1
                             indent_dx = abs(bbox[0] - prev_bbox[0])  # x-offset
@@ -6713,28 +7116,59 @@ def _flatten_to_raw_spans(
                             max_v_gap = max(2.0, fs * 1.8)
                             max_indent = max(12.0, fs * 3.5)
 
-                            allow_geom = (v_gap <= max_v_gap) and (indent_dx <= max_indent)
+                            geom_within_tolerance = (v_gap <= max_v_gap) and (
+                                        indent_dx <= max_indent)
 
-                        # Set metadata if all guards pass (NO geometry mutation)
+                            if sentence_is_unfinished:
+                                lenient_v_gap = max_v_gap * 2.0
+                                lenient_indent = max_indent * 2.0
+                                geom_lenient = (v_gap <= lenient_v_gap) and (
+                                            indent_dx <= lenient_indent)
+                                allow_geom = geom_within_tolerance or geom_lenient
+                            else:
+                                allow_geom = geom_within_tolerance
+                        else:
+                            # Geometry unavailable — do not block mid-sentence continuation
+                            allow_geom = sentence_is_unfinished
+
+                        # ═══════════════════════════════════════════════════════════════════
+                        # FINAL DECISION: Establish vertical A2 edge
+                        # Guard 1 (same_block) + Guard 2 (not ended) + Guard 4 (geometry)
+                        # Guard 3 only blocks when sentence actually ended
+                        # ═══════════════════════════════════════════════════════════════════
+                        vertical_continuation_applied = False
+
                         if same_block and allow_geom and not prev_hard_end and not curr_looks_new_sentence:
                             carry_tail["a2_continues_to_next"] = True
+                            vertical_continuation_applied = True
 
-                            if prev_text.endswith("-"):
+                            if prev_tail_stripped.endswith(("-", "\u00AD")):
                                 carry_tail["a2_continuation_mode"] = "hyphen_wrap"
                                 carry_tail["a2_continuation_reason"] = "a2_vertical_hyphen"
-                                # NEW: Mark current span as continuation target
                                 vertical_continuation_pending = ("hyphen_wrap",
                                                                  "a2_vertical_hyphen")
                             else:
                                 carry_tail["a2_continuation_mode"] = "space_join"
                                 carry_tail["a2_continuation_reason"] = "a2_vertical_same_block"
-                                # NEW: Mark current span as continuation target
                                 vertical_continuation_pending = ("space_join",
                                                                  "a2_vertical_same_block")
 
                             vertical_link_count += 1
                         else:
                             vertical_continuation_pending = None
+
+                        # ═══════════════════════════════════════════════════════════════
+                        # DIAGNOSTIC: Record why vertical continuation was not applied
+                        # (No behavioral change; enables future audit/debugging)
+                        # ═══════════════════════════════════════════════════════════════
+                        if not vertical_continuation_applied and sentence_is_unfinished:
+                            # Sentence was mid-flight but continuation blocked — worth tracking
+                            carry_tail["_a2_vertical_attempted"] = True
+                            carry_tail["_a2_vertical_blocked_by"] = (
+                                "block_mismatch" if not same_block else
+                                "geometry" if not allow_geom else
+                                "unknown"
+                            )
 
                         # CRITICAL: Clear carry_tail after processing to prevent unbounded chaining
                         # Each vertical link applies to exactly one line transition
@@ -6816,7 +7250,7 @@ def _flatten_to_raw_spans(
                     skipped_count += 1
                     # HARDENED: Fallback for malformed spans
                     raw_spans.append({
-                        "raw_text": span.get("text", ""),
+                        "raw_text": _reconstruct_text_from_chars(span),
                         "cleaned_text": None,
                         "bbox": None,
                         "flags": ["span_exception"],
@@ -7065,9 +7499,17 @@ def _soft_classify_spans(
         # --- Y-BAND calculation ---
         y_band = round(span_y / y_band_precision) * y_band_precision
 
-        # === GREEK WHITELIST BYPASS ===
+        # === GREEK WHITELIST BYPASS (STRICT) ===
+        # Only protect actual Greek symbols, not ASCII letters that happen to be
+        # in VALID_SINGLE_CHARS (those will be handled by normal classification)
         text_lower = text.lower()
-        if text in VALID_SINGLE_CHARS or text_lower in GREEK_WORD_FORMS:
+
+        is_greek_symbol = (
+                _contains_greek(text) or
+                text_lower in GREEK_WORD_FORMS
+        )
+
+        if is_greek_symbol:
             if y_band not in header_bands and y_band not in footer_bands:
                 span["_whitelist_protected"] = "greek_symbol"
                 classified.append(span)
@@ -7078,20 +7520,154 @@ def _soft_classify_spans(
         in_footer_band = y_band in footer_bands
 
         if in_header_band:
-            # Check for lowercase continuation (protection)
-            if text and text[0].islower():
+            # ─────────────────────────────────────────────────────────
+            # Band continuation: A span starting with sentence-boundary
+            # punctuation AND having A2 continuation from the previous
+            # span is body text crossing a band coordinate, not a band
+            # artifact. The A2 requirement prevents false rescue of
+            # actual header/footer content (which never has A2 chains
+            # from body text on the same line).
+            # ─────────────────────────────────────────────────────────
+            is_band_continuation = text and (
+                    text[0].islower()
+                    or (text[0] in '.,;:)]}?!' and span.get("a2_continues_from_previous", False))
+            )
+            if is_band_continuation:
                 span["_exclusion_protected"] = True
                 span.setdefault("_exclusion_protection_reasons", []).append(
                     "lowercase_continuation")
             else:
                 _flag_candidate(span, _REASON_HEADER_BAND, requires_review=False)
         elif in_footer_band:
-            if text and text[0].islower():
+            is_band_continuation = text and (
+                    text[0].islower()
+                    or (text[0] in '.,;:)]}?!' and span.get("a2_continues_from_previous", False))
+            )
+            if is_band_continuation:
                 span["_exclusion_protected"] = True
                 span.setdefault("_exclusion_protection_reasons", []).append(
                     "lowercase_continuation")
             else:
                 _flag_candidate(span, _REASON_FOOTER_BAND, requires_review=False)
+
+        # === PUBLISHER / CITATION METADATA FLAG (SEMANTIC BACKSTOP) ===
+        # Flags spans that look like publisher metadata even if they do not
+        # repeat across pages or fall outside footer bands.
+        #
+        # Contract:
+        #   - NEVER excludes directly
+        #   - ONLY flags for downstream semantic confirmation
+        #   - Geometry-agnostic (handles first-page-only metadata)
+
+        text_lower = text.lower()
+
+        matches_publisher_metadata = False
+
+        # Core publisher / license markers
+        if any(token in text_lower for token in (
+                "©",
+                "copyright",
+                "the author(s)",
+                "exclusive license",
+                "springer",
+                "springer nature",
+                "elsevier",
+                "ieee",
+                "acm",
+                "taylor & francis",
+        )):
+            matches_publisher_metadata = True
+
+        # Citation / proceedings markers
+        elif any(token in text_lower for token in (
+                "pp.",
+                "vol.",
+                "eds.",
+                "doi.org",
+                "doi:",
+                "10.1007/",
+                "10.1109/",
+                "10.1145/",
+                "lnns",
+                "lncs",
+                "proceedings",
+                "arxiv:",
+                "arxiv.org",
+                "issn",
+                "isbn",
+        )):
+            matches_publisher_metadata = True
+
+        if matches_publisher_metadata:
+            # Lowercase continuation protection still applies
+            if text and text[0].islower():
+                span["_exclusion_protected"] = True
+                span.setdefault("_exclusion_protection_reasons", []).append(
+                    "publisher_metadata_continuation")
+            else:
+                _flag_candidate(
+                    span,
+                    _REASON_PUBLISHER_METADATA,
+                    requires_review=True
+                )
+
+        # === DOCUMENT METADATA FLAG (v10.0) ===
+        # Flags author blocks, affiliations, and email addresses on
+        # page 1 that should not narrate. Follows the publisher_metadata
+        # pattern: flag only, no exclusion. Downstream flag translation,
+        # RONC veto (Point 3), and narration gate (Point 6) handle
+        # actual exclusion decisions.
+        #
+        # Scoping constraints (all required to enter detection):
+        #   1. Page 1 only (page_number == 1)
+        #   2. Above 35% of page height (title/author region)
+        #
+        # Detection paths (either triggers):
+        #   Path A — Standalone email line (always metadata on page 1)
+        #   Path B — Author name list shape (short, high cap ratio,
+        #            contains list indicators: commas, "and", or "@")
+        page_number = span.get("page_number", 0)
+        if page_number == 1 and span_y < effective_page_height * 0.35:
+            text_words = text.split()
+            word_count = len(text_words)
+
+            # Path A: Email lines are always metadata on page 1
+            # (e.g., "100428305@alumnos.uc3m.es")
+            is_email_line = "@" in text and word_count <= 5
+
+            # Path B: Author name list shape
+            # High capitalization ratio + list indicators + short length
+            # Guards against body text: word_count <= 12 prevents
+            # matching sentences; cap ratio >= 0.5 prevents matching
+            # lowercase prose that mentions names in passing.
+            capitalized_ratio = (
+                    sum(1 for w in text_words if w[:1].isupper())
+                    / max(word_count, 1)
+            )
+            has_list_indicators = (
+                    "," in text
+                    or " and " in f" {text_lower} "
+                    or "@" in text
+            )
+            is_author_block = (
+                    word_count <= 12
+                    and capitalized_ratio >= 0.5
+                    and has_list_indicators
+            )
+
+            if is_email_line or is_author_block:
+                # Lowercase continuation protection still applies
+                # (matches publisher_metadata pattern)
+                if text and text[0].islower():
+                    span["_exclusion_protected"] = True
+                    span.setdefault("_exclusion_protection_reasons", []).append(
+                        "document_metadata_continuation")
+                else:
+                    _flag_candidate(
+                        span,
+                        _REASON_DOCUMENT_METADATA,
+                        requires_review=True
+                    )
 
         # === HEADER ARTIFACT ZONE ===
         if span_y < header_artifact_zone_y:
@@ -7166,17 +7742,28 @@ def _soft_classify_spans(
                 else:
                     _flag_candidate(span, _REASON_NOISE_SINGLE_CHAR, requires_review=False)
 
-        # Digit-only noise (with year/significant digit protection)
+        # Digit-only noise (with structural context / year / significant digit protection)
+        # ─────────────────────────────────────────────────────────────
+        # INVARIANT: Noise classification must respect structural units.
+        # A span that shares its line with other spans is structurally
+        # contextual and must not be classified as noise based on content
+        # alone. Noise is defined by isolation, not by content.
+        # ─────────────────────────────────────────────────────────────
         if text.isdigit():
+            is_line_contextual = span.get("span_count_in_line", 1) > 1
             is_year = len(text) == 4 and text.startswith(("19", "20"))
             is_significant = len(text) >= 3
-
-            if is_year:
+            if is_line_contextual:
+                span["_exclusion_protected"] = True
+                span.setdefault("_exclusion_protection_reasons", []).append(
+                    "line_context_digit")
+            elif is_year:
                 span["_exclusion_protected"] = True
                 span.setdefault("_exclusion_protection_reasons", []).append("year")
             elif is_significant:
                 span["_exclusion_protected"] = True
-                span.setdefault("_exclusion_protection_reasons", []).append("significant_digits")
+                span.setdefault("_exclusion_protection_reasons", []).append(
+                    "significant_digits")
             else:
                 _flag_candidate(span, _REASON_NOISE_DIGIT_ONLY, requires_review=False)
 
@@ -7212,6 +7799,30 @@ def _soft_classify_spans(
 
             if not (is_letter or is_protected_word or is_connector):
                 _flag_candidate(span, _REASON_NOISE_FRAGMENT, requires_review=False)
+
+        # ─────────────────────────────────────────────────────────────
+        # FM1: A2 CHAIN INLINE NOISE PROTECTION
+        # Protect noise-flagged spans ONLY when:
+        #  - a2 chain exists
+        #  - AND a body_col span exists on the SAME line_id
+        # span_index_in_line is line-local; do NOT compare across lines.
+        # ─────────────────────────────────────────────────────────────
+        if (span.get("_exclusion_candidate")
+                and not span.get("_exclusion_protected")):
+            reasons = set(span.get("_exclusion_candidate_reasons") or [])
+            if (reasons & _A2_NOISE_REASONS
+                    and (span.get("a2_continues_from_previous")
+                         or span.get("a2_continues_to_next"))):
+                lid = span.get("line_id")
+                if lid and any(
+                        s is not span
+                        and s.get("line_id") == lid
+                        and str(s.get("layout_stream", "")).startswith("body_col")
+                        for s in spans
+                ):
+                    span["_exclusion_protected"] = True
+                    span.setdefault("_exclusion_protection_reasons", []).append(
+                        "a2_inline_continuation")
 
         classified.append(span)
 
@@ -7342,9 +7953,16 @@ def _filter_spans(
         # =====================================================================
         # WHITELIST CHECK — Greek/scientific symbols bypass ALL filters
         # Must be checked BEFORE any exclusion logic
+        # STRICT: Only actual Greek characters, not ASCII letters
         # =====================================================================
         text_lower = text.lower()
-        if text in VALID_SINGLE_CHARS or text_lower in GREEK_WORD_FORMS:
+
+        is_greek_symbol = (
+                _contains_greek(text) or
+                text_lower in GREEK_WORD_FORMS
+        )
+
+        if is_greek_symbol:
             if y_band not in header_bands and y_band not in footer_bands:
                 valid.append(span)
                 continue
@@ -7568,19 +8186,17 @@ def _clean_spans(spans: List[Dict], trace_id: str = None) -> None:
     This method is the SOLE owner of structural normalization
     (Unicode normalization, control/zero-width character removal,
     and whitespace normalization).
-
     It must NOT perform:
       - Semantic deletion (e.g. removing "noise" words)
       - Sentence-level repair or healing
       - Pronunciation or TTS-specific adjustments
-
     Operations performed:
         1. Unicode NFKC normalization
         2. Control / zero-width character removal
         3. Whitespace normalization (collapsing to single spaces)
 
     An empty cleaned_text ("") indicates a STRUCTURAL artifact,
-    not semantic deletion. Downstream phases MUST NOT treat it as noise.
+    not semantic deletion. Downstream processes MUST NOT treat it as noise.
     """
     if not spans:
         return
@@ -7927,6 +8543,8 @@ def _format_cell(
 def _detect_page_regions(
         page: "fitz.Page",
         raw_spans: List[Dict],
+        *,
+        global_median_font_size: float = None,
         trace_id: str = None
 ) -> Dict:
     """
@@ -8204,6 +8822,61 @@ def _detect_page_regions(
             logger.debug("[%s] Link detection failed: %s", trace_id, e)
 
     # =========================================================================
+    # 3.5 DERIVE ADAPTIVE FOOTER BOUNDARY (GEOMETRY-ONLY, PRE-ROLE)
+    # =========================================================================
+    # Identify body-like spans using geometry proxy (no roles available yet)
+    body_like_y_bottoms = []
+
+    for span in raw_spans:
+        bbox = span.get("bbox")
+        if not bbox or len(bbox) < 4:
+            continue
+
+        text = (span.get("raw_text") or "").strip()
+        if len(text) < 3:
+            continue
+        if not any(c.isalpha() for c in text):
+            continue
+
+        fs = span.get("font_size", 0)
+        if fs <= 0:
+            continue
+
+        # Font size must be within ±25% of document median
+        if global_median_font_size:
+            if not (0.75 * global_median_font_size <= fs <= 1.25 * global_median_font_size):
+                continue
+
+        # Exclude spans inside detected figures or tables
+        span_x0, span_y0, span_x1, span_y1 = bbox
+        inside_structure = False
+        for fx0, fy0, fx1, fy1 in regions["figures"]:
+            if span_x0 >= fx0 and span_x1 <= fx1 and span_y0 >= fy0 and span_y1 <= fy1:
+                inside_structure = True
+                break
+        if inside_structure:
+            continue
+
+        body_like_y_bottoms.append(span_y1)
+
+    footer_zone_min_y = None
+    if body_like_y_bottoms:
+        # Use high percentile to avoid single-line outliers
+        body_like_y_bottoms.sort()
+        idx = int(len(body_like_y_bottoms) * 0.90)
+        idx = min(idx, len(body_like_y_bottoms) - 1)
+        footer_zone_min_y = body_like_y_bottoms[idx]
+
+        # Apply safety clamps (geometry-only)
+        max_ceiling = page_height * 0.70
+        min_floor = page_height * 0.92
+        footer_zone_min_y = max(footer_zone_min_y, max_ceiling)
+        footer_zone_min_y = min(footer_zone_min_y, min_floor)
+    else:
+        # Fallback to legacy behavior if no body-like spans found
+        footer_zone_min_y = page_height * (1.0 - _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT)
+
+    # =========================================================================
     # 4. HEADER/FOOTER BAND DETECTION (MODIFIED v3.3 — Permissive Candidates)
     # =========================================================================
     y_bands: Dict[int, int] = {}
@@ -8221,10 +8894,8 @@ def _detect_page_regions(
     for y, count in y_bands.items():
         norm_y = y / page_height if page_height > 0 else 0
 
-        # FIXED v3.3: Use Global Constants for consistent Zone Definitions (15%)
-        # Was: _LAYOUT_HEADER_THRESHOLD_Y (20%) / _LAYOUT_FOOTER_THRESHOLD_Y (80%)
         is_header_zone = norm_y < _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT
-        is_footer_zone = norm_y > (1.0 - _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT)
+        is_footer_zone = y >= footer_zone_min_y
 
         # HARDEN: still permissive by zone, but ignore ultra-rare bands (noise)
         if count >= _REGION_MIN_BAND_COUNT:
@@ -8251,6 +8922,9 @@ def _detect_page_regions(
 
     regions["header_bands"] = sorted(set(regions["header_bands"]))
     regions["footer_bands"] = sorted(set(regions["footer_bands"]))
+
+    # Persist adaptive footer boundary for downstream global scan
+    regions["footer_zone_min_y"] = footer_zone_min_y
 
     return regions
 
@@ -9109,6 +9783,9 @@ def _assign_roles(
     previous_y: float = 0.0
     previous_x: float = 0.0
     previous_text: str = ""
+    # Path 3 (Layout Separation): Track Y-position of last body-classified
+    # span. Updated ONLY when a span receives the body role. Isolates the
+    prev_body_y: Optional[float] = None
 
     # Caption chain tracking
     caption_chain_start_y: Optional[float] = None
@@ -9160,6 +9837,24 @@ def _assign_roles(
         word_count = len(span_text.split()) if span_text else 0
         char_count = len(span_text)
 
+        # ─────────────────────────────────────────────────────────────
+        # HEADING EVIDENCE SIGNALS (computed once, referenced by
+        # Priorities 2, 3, and 6)
+        # ─────────────────────────────────────────────────────────────
+
+        # Path 2: Structural prefix match (section numbers, keywords, symbols).
+        has_structural_prefix = any(
+            p.match(span_text) for p in _HEADING_STRUCTURAL_PREFIX_PATTERNS
+        ) if span_text else False
+
+        # Path 3: Significant vertical gap from last body-classified span.
+        # Only meaningful after at least one body span has been seen.
+        has_vertical_isolation = (
+                prev_body_y is not None and
+                abs(span_y - prev_body_y) >
+                estimated_line_height * _HEADING_VERTICAL_ISOLATION_MULTIPLIER
+        )
+
         # Skip empty spans
         if not span_text:
             span["role"] = TextRole.EMPTY.value
@@ -9190,10 +9885,10 @@ def _assign_roles(
                     # being lost. The span will fall through to PRIORITY 6.
                     # ═══════════════════════════════════════════════════════════
                     is_heading_candidate = (
-                            font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO and
-                            word_count <= _ROLE_HEADING_MAX_WORDS and
-                            char_count <= _ROLE_HEADING_MAX_CHARS and
-                            span_text and span_text[0].isupper() and
+                            (font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO
+                             or has_structural_prefix
+                             or has_vertical_isolation) and
+                            span_text and (span_text[0].isupper() or has_structural_prefix) and
                             span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
                             span.get("span_index_in_line", 0) == 0 and
                             not span.get("a2_continues_from_previous", False)
@@ -9231,8 +9926,9 @@ def _assign_roles(
                 # Headings near figures should not be demoted to labels.
                 # ═══════════════════════════════════════════════════════════════
                 is_heading_candidate = (
-                        font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO and
-                        span_text and span_text[0].isupper() and
+                        (font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO
+                         or has_structural_prefix) and
+                        span_text and (span_text[0].isupper() or has_structural_prefix) and
                         span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
                         span.get("span_index_in_line", 0) == 0 and
                         not span.get("a2_continues_from_previous", False)
@@ -9265,11 +9961,34 @@ def _assign_roles(
             )
 
             if is_explicit_caption:
-                role = TextRole.CAPTION.value
-                role_origin = "content_pattern"
-                caption_chain_start_y = span_y
-                caption_chain_start_font_size = font_size
-                caption_chain_length = 1
+                # ═════════════════════════════════════════════════════════
+                # Heading Rescue Guard for Caption (mirrors P2/P3 guards)
+                #
+                # Letter-prefixed headings ("A. Background", "B. Methods",
+                # "I. Introduction") match caption pattern ^[A-Z]\.\s+ but
+                # are structural section markers. Don't classify as caption
+                # if heading evidence is present — let Priority 6 handle.
+                #
+                # Guard uses has_structural_prefix ONLY (not vertical
+                # isolation). Caption patterns are content-based; a span
+                # matching a caption pattern AND having a vertical gap is
+                # more likely a figure caption after whitespace than a
+                # heading. Structural prefix is the stronger override.
+                # ═════════════════════════════════════════════════════════
+                is_heading_candidate = (
+                        has_structural_prefix and
+                        word_count <= _ROLE_HEADING_MAX_WORDS and
+                        char_count <= _ROLE_HEADING_MAX_CHARS and
+                        span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
+                        span.get("span_index_in_line", 0) == 0 and
+                        not span.get("a2_continues_from_previous", False)
+                )
+                if not is_heading_candidate:
+                    role = TextRole.CAPTION.value
+                    role_origin = "content_pattern"
+                    caption_chain_start_y = span_y
+                    caption_chain_start_font_size = font_size
+                    caption_chain_length = 1
 
             # Caption continuation check — guarded
             elif previous_role == TextRole.CAPTION.value:
@@ -9340,38 +10059,144 @@ def _assign_roles(
                     role_origin = "geometry"
 
         # =====================================================================
-        # PRIORITY 6: Heading
+        # PRIORITY 6: Heading — Structural Evidence Framework
+        #
+        # A span is classified as heading only when it satisfies textual
+        # heading constraints AND exhibits at least one structural evidence
+        # source. Evidence sources are boolean gates, not scores.
+        #
+        # Evidence sources (enumerated, finite):
+        #   Typographic emphasis — font size or weight above baseline
+        #   Structural prefix   — section numbers, keywords, legal symbols
+        #   Layout separation   — vertical gap from prior body text
+        #                         (subordinate: requires is_title_case)
+        #
+        # Three classification paths, each with full guard stacks.
+        # Paths are independent — any single path firing classifies the
+        # span as heading. Separate paths preserve relaxed_length for
+        # visual headings and role_origin differentiation for tracing.
         # =====================================================================
         if role == TextRole.BODY.value:
+
+            # ─────────────────────────────────────────────────────────
+            # SHARED TEXTUAL GUARDS
+            # Every classification path requires these properties.
+            # ─────────────────────────────────────────────────────────
             is_large = font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO
             is_bold = any(
                 hint in font_name
-                for hint in ("bold", "heavy", "black")
+                for hint in _HEADING_FONT_WEIGHT_HINTS
+            )
+            # Extended font weight: "medium" qualifies ONLY with
+            # structural prefix evidence. Prevents body fonts with
+            # "medium" in the name from triggering heading detection.
+            is_conditional_weight = (
+                    has_structural_prefix and any(
+                hint in font_name
+                for hint in _HEADING_FONT_WEIGHT_CONDITIONAL_HINTS
+            )
             )
             is_short = (
                     word_count <= _ROLE_HEADING_MAX_WORDS and
                     char_count <= _ROLE_HEADING_MAX_CHARS
             )
-            is_title_case = span_text and (span_text[0].isupper() or span_text.isupper())
-            no_terminal_punct = span_text and span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION
+            is_title_case = span_text and (
+                    span_text[0].isupper() or span_text.isupper()
+            )
+            no_terminal_punct = span_text and (
+                    span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION
+            )
 
-            # HARDENED: Allow longer headings if visual signal is strong (Bold/Large)
-            is_strong_visual = (is_large or is_bold)
+            # ─────────────────────────────────────────────────────────
+            # EVIDENCE: Typographic emphasis
+            # ─────────────────────────────────────────────────────────
+            has_typographic_emphasis = (
+                    is_large or is_bold or is_conditional_weight
+            )
             relaxed_length = word_count <= (_ROLE_HEADING_MAX_WORDS * 2.0)
 
-            # GUARD: Headings should not start with lowercase (unless all caps)
-            # This protects sentence continuations from being promoted
+            # GUARD: Lowercase start disqualifies unless all caps
             starts_like_sentence = span_text and span_text[0].islower()
             if starts_like_sentence and not span_text.isupper():
-                is_strong_visual = False  # Force strict checks or fail
+                has_typographic_emphasis = False
             elif span_text.isupper() and word_count > _ROLE_HEADING_MAX_WORDS:
-                is_strong_visual = False
+                has_typographic_emphasis = False
 
+            # ─────────────────────────────────────────────────────────
+            # EVIDENCE: Structural independence
+            # Required for structural prefix and layout separation
+            # paths. Heading must be at line start and not a
+            # continuation fragment.
+            # ─────────────────────────────────────────────────────────
+            is_structurally_independent = (
+                    span.get("span_index_in_line", 0) == 0 and
+                    not span.get("a2_continues_from_previous", False)
+            )
+
+            # ─────────────────────────────────────────────────────────
+            # PATH 1: Typographic emphasis (Original + Prong B)
+            #
+            # Font-based heading detection. Allows relaxed length
+            # (up to 2× max words) when typographic signal is strong.
+            # ─────────────────────────────────────────────────────────
             if (is_short or (
-                    is_strong_visual and relaxed_length)) and is_title_case and no_terminal_punct:
-                if is_strong_visual:
+                    has_typographic_emphasis and relaxed_length
+            )) and is_title_case and no_terminal_punct:
+                if has_typographic_emphasis:
                     role = TextRole.HEADING.value
                     role_origin = "content_pattern"
+
+            # ─────────────────────────────────────────────────────────
+            # PATH 2: Structural prefix detection
+            #
+            # Section numbers ("1 Introduction", "3.2 White Space"),
+            # keyword prefixes ("Section 1", "Article 2", "Chapter 3"),
+            # or legal symbols ("§ 1.1") classify as heading WITHOUT
+            # requiring typographic signals.
+            #
+            # Bypasses: has_typographic_emphasis, is_title_case
+            #   (pattern confirms structural prefix — digit-leading
+            #   spans fail the standard isupper() check).
+            # Requires: is_short, no_terminal_punct, structural
+            #   independence.
+            # ─────────────────────────────────────────────────────────
+            if role == TextRole.BODY.value:
+                if (has_structural_prefix and is_short
+                        and no_terminal_punct
+                        and is_structurally_independent):
+                    role = TextRole.HEADING.value
+                    role_origin = "content_pattern:structural_prefix"
+
+            # ─────────────────────────────────────────────────────────
+            # PATH 3: Layout separation detection
+            #
+            # Significant vertical whitespace above the last body-
+            # classified span, combined with heading-like textual
+            # properties, classifies as heading WITHOUT requiring
+            # typographic signals or structural prefixes.
+            #
+            # SUBORDINATION CONSTRAINT: This path requires is_title_case
+            # in addition to all other textual guards. Structural prefix
+            # (Path 2) does NOT require is_title_case because the
+            # pattern itself confirms structural intent. Layout
+            # separation is a weaker signal — title case is the
+            # additional evidence that prevents false promotion of
+            # body fragments after paragraph-level vertical gaps.
+            #
+            # Gap measured from prev_body_y (last body-classified
+            # span's Y), not previous_y, to avoid corruption from
+            # intervening figures, captions, or empty spans.
+            #
+            # Covers: "References", "Acknowledgements", "Appendix",
+            # "Terms and Conditions", legal section breaks without
+            # numbering, policy documents with spacing-only headers.
+            # ─────────────────────────────────────────────────────────
+            if role == TextRole.BODY.value:
+                if (has_vertical_isolation and is_short
+                        and is_title_case and no_terminal_punct
+                        and is_structurally_independent):
+                    role = TextRole.HEADING.value
+                    role_origin = "content_pattern:layout_separation"
 
         # =====================================================================
         # PRIORITY 7: Subheading
@@ -9538,6 +10363,10 @@ def _assign_roles(
         previous_x = span_x
         previous_text = span_text
 
+        # Path 3 state: track last body span's Y for isolation measurement
+        if role == TextRole.BODY.value:
+            prev_body_y = span_y
+
         if trace_id and role not in (TextRole.BODY.value, TextRole.EMPTY.value):
             logger.debug(
                 "[%s] Role: '%s' -> %s (font=%.1f, baseline=%.1f)",
@@ -9635,7 +10464,21 @@ def _apply_continuity_role_resolution(
         # Continuity sources (ordered by strength):
         # 1. Local physical adjacency (available at Stage 2.4)
         # 2. Semantic inclusion (available after Stage 2.8 second pass)
-        in_active_flow = continues_from or continues_to or semantic_included
+        #
+        # GUARD (v10.0): Non-viable roles (inside_figure, figure_label,
+        # etc.) require physical continuity evidence for promotion.
+        # semantic_included alone is insufficient — it can originate
+        # from RONC proximity scoring without confirming text-flow
+        # membership. This prevents author metadata or isolated figure
+        # labels from being promoted to body via RONC mutual links.
+        #
+        # Spans with physical continuity (lowercase start, non-terminal
+        # predecessor, adjacency) still promote correctly — this only
+        # restricts the semantic_included-only path for non-viable roles.
+        if current_role in _TTS_NON_VIABLE_ROLES:
+            in_active_flow = continues_from or continues_to
+        else:
+            in_active_flow = continues_from or continues_to or semantic_included
 
         if in_active_flow:
             # CONTINUITY WINS: Preserve stream integrity
@@ -9845,37 +10688,24 @@ def _build_sliding_window_spans(
         trace_id: str = None
 ) -> Tuple[List[Dict], Tuple[int, int]]:
     """
-    PHASE 2.0: Build a sliding window of spans for cross-page aware segmentation.
-
-    Uses PRE-PASS cached spans to ensure all spans have identical viability
-    processing (Phase 1.5 continuity, Phase 1.3 rescue, etc.).
-
-    SCHEMA v2.0 CHANGE:
-        Window is now LOSSLESS. Sidebar/margin spans are no longer skipped.
-        Instead, they are tagged with _stage1_nonviable_hint=True and included.
-        The semantic resolution phase decides final disposition.
-
+    Build a sliding window of spans for cross-page aware segmentation.
+        - Uses PRE-PASS cached spans to ensure all spans have identical viability
+    processing
+        - Window is LOSSLESS. Sidebar/margin spans are  tagged with _stage1_nonviable_hint=True and 
+    included.
     Window structure:
     - Last N spans from previous page (deep copied, tagged)
     - ALL spans from current page (deep copied, tagged with _page_local_idx)
     - First N spans from next page (deep copied, tagged)
-
+    - All spans tagged with _source_page_idx for attribution
+    - Current page spans tagged with _page_local_idx for remapping
     Args:
         page_span_cache: Dict mapping page_idx → processed spans_for_text
         current_page_idx: Index of current page being processed
         trace_id: Optional trace ID for logging
-
-    Returns:
-        Returns: Tuple of:
-            - window_spans: Combined span list for the window (deep copies)
-            - page_span_range: (start_idx, end_idx) marking current page in window
-
-
-    Invariants:
-        - All spans are deep copies (no mutation of cache)
-        - Current page spans tagged with _page_local_idx for remapping
-        - All spans tagged with _source_page_idx for attribution
-        - SCHEMA v2.0: No spans are skipped; non-viable hints are tagged
+    Returns: Tuple of:
+        - window_spans: Combined span list for the window (deep copies)
+        - page_span_range: (start_idx, end_idx) marking current page in window
     """
 
     def _copy_span_for_window(source_span: Dict, source_page_idx: int,
@@ -9886,7 +10716,6 @@ def _build_sliding_window_spans(
             copied.get("_requires_semantic_review", False)
         )
 
-        # RONC v2.0 invariant: every span must have a canonical ID
         # Prefer upstream CID if present; otherwise generate stable page-local CID
         # Canonical format MUST match the rest of pipeline: P{page}:{idx}
         if "_canonical_span_id" not in copied:
@@ -9896,15 +10725,14 @@ def _build_sliding_window_spans(
 
     def _get_same_line_body_anchor_stream(span: Dict, all_spans: List[Dict]) -> Optional[str]:
         """
-        P6 FIX: Check if margin span shares a line with a body_col span.
+        Check if margin span shares a line with a body_col span.
 
         Mid-line italic text can have high x0 coordinates causing misclassification
         as margin_right. If the span shares a line_id with a body_col span,
         return that body stream for promotion instead of marking nonviable.
 
-        Gate: Returns None if zero or multiple distinct body_col streams exist
+        Returns None if zero or multiple distinct body_col streams exist
         on the line, to avoid ambiguous promotion in multi-column layouts.
-
         Returns: body_col stream name if exactly one body stream on line, None otherwise.
         """
         line_id = span.get("line_id")
@@ -9949,9 +10777,7 @@ def _build_sliding_window_spans(
                 role = span.get("role", "")
                 layout_stream = span.get("layout_stream", "")
 
-                # ─────────────────────────────────────────────────────────────
-                # SCHEMA v2.0: Lossless window — never skip, tag instead
-                # ─────────────────────────────────────────────────────────────
+                # Never skip, tag instead
                 is_sidebar_or_margin = (
                         role == TextRole.SIDEBAR.value
                         or (isinstance(layout_stream, str) and layout_stream.startswith("margin"))
@@ -9966,26 +10792,25 @@ def _build_sliding_window_spans(
                 if "_original_role" not in span_copy:
                     span_copy["_original_role"] = span.get("role")
 
-                # P6 INTEGRATED FIX: Handle both unpromoted margins AND "Zombie" spans
-                # Zombie = Patch 9B promoted stream but not role (sidebar + body_col)
+                # Handle both unpromoted margins AND "Zombie" spans
                 is_zombie = (role == TextRole.SIDEBAR.value and str(layout_stream).startswith(
                     "body_col"))
                 already_promoted = span.get("_tts_promoted_to_body_stream", False)
 
                 if is_sidebar_or_margin and (not already_promoted or is_zombie):
-                    # P6 FIX: Check for same-line body anchor before marking nonviable
+                    # Check for same-line body anchor before marking nonviable
                     body_anchor_stream = _get_same_line_body_anchor_stream(span, prev_spans)
                     if body_anchor_stream:
                         span_copy["_original_layout_stream"] = span_copy.get("layout_stream")
                         span_copy["layout_stream"] = body_anchor_stream
-                        # P6 FIX: Force role to body so it merges with neighbors
+                        # Force role to body so it merges with neighbors
                         # SAFEGUARD: Only convert 'sidebar' (ambiguous); preserve captions/headers.
                         if span_copy.get("role") == TextRole.SIDEBAR.value:
                             span_copy["_original_role"] = span_copy.get("role")
                             span_copy["role"] = "body"
                         span_copy["_same_line_promoted"] = True
                     elif is_zombie:
-                        # HARDENING: Zombie already has body_col stream; fix role only
+                        # Zombie already has body_col stream; fix role only
                         if span_copy.get("role") == TextRole.SIDEBAR.value:
                             span_copy["_original_role"] = span_copy.get("role")
                             span_copy["role"] = "body"
@@ -10032,12 +10857,12 @@ def _build_sliding_window_spans(
         already_promoted = span.get("_tts_promoted_to_body_stream", False)
 
         if is_sidebar_or_margin and (not already_promoted or is_zombie):
-            # P6 FIX: Check for same-line body anchor before marking nonviable
+            # Check for same-line body anchor before marking nonviable
             body_anchor_stream = _get_same_line_body_anchor_stream(span, current_spans)
             if body_anchor_stream:
                 span_copy["_original_layout_stream"] = span_copy.get("layout_stream")
                 span_copy["layout_stream"] = body_anchor_stream
-                # P6 FIX: Force role to body so it merges with neighbors
+                # Force role to body so it merges with neighbors
                 # SAFEGUARD: Only convert 'sidebar' (ambiguous); preserve captions/headers.
                 if span_copy.get("role") == TextRole.SIDEBAR.value:
                     span_copy["_original_role"] = span_copy.get("role")
@@ -10095,12 +10920,12 @@ def _build_sliding_window_spans(
                 already_promoted = span.get("_tts_promoted_to_body_stream", False)
 
                 if is_sidebar_or_margin and (not already_promoted or is_zombie):
-                    # P6 FIX: Check for same-line body anchor before marking nonviable
+                    # Check for same-line body anchor before marking nonviable
                     body_anchor_stream = _get_same_line_body_anchor_stream(span, next_spans)
                     if body_anchor_stream:
                         span_copy["_original_layout_stream"] = span_copy.get("layout_stream")
                         span_copy["layout_stream"] = body_anchor_stream
-                        # P6 FIX: Force role to body so it merges with neighbors
+                        # Force role to body so it merges with neighbors
                         # SAFEGUARD: Only convert 'sidebar' (ambiguous); preserve captions/headers.
                         if span_copy.get("role") == TextRole.SIDEBAR.value:
                             span_copy["_original_role"] = span_copy.get("role")
@@ -10172,7 +10997,9 @@ def _filter_sentences_to_page(
 
     Invariants:
         - Only sentences STARTING in current page are returned
-        - span_start_index and span_end_index are page-local (not window)
+        - span_start_index and span_end_index remain WINDOW-space indices (segmentation authority)
+        - page-local span indices (debug/analytics only) are stored in:
+          _page_local_span_start / _page_local_span_end
         - page_number is correctly set
     """
     page_start, page_end = page_span_range
@@ -10335,10 +11162,182 @@ def _refine_roles_via_content_flow(spans: List[Dict], trace_id: str = None) -> N
         TextRole.CODE.value,
     }
 
+    # Heading-aware bibliography demotion:
+    # After a "References"/"Bibliography" heading, treat subsequent content as non-narrative.
+    _biblio_heading_roles_to_skip = {
+        TextRole.PAGE_NUMBER.value,
+        TextRole.HEADER_ARTIFACT.value,
+        TextRole.FOOTER_ARTIFACT.value,
+        TextRole.CAPTION.value,
+    }
+
+    def _sort_key(sp):
+        pn = sp.get("page_number", 0)
+        cid = str(sp.get("_canonical_span_id") or "")
+        try:
+            idx = int(cid.split(":")[1])
+        except:
+            idx = 0
+        return (pn, idx)
+
+    in_biblio_section = False
+    for span in sorted(spans, key=_sort_key):
+        text_raw = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
+        if not text_raw:
+            continue
+
+        role = span.get("role", TextRole.BODY.value)
+
+        # Heading handling: start/stop bibliography section
+        if role == TextRole.HEADING.value:
+            if any(p.match(text_raw) for p in _BIBLIO_HEADING_PATTERNS):
+                in_biblio_section = True
+            elif in_biblio_section:
+                # ── Validate before resetting: spurious headings within
+                # bibliography (e.g. "Springer, Cham (2022)") must not
+                # kill the section flag. Uses module-level patterns only
+                # (_biblio_span_score is defined later, not yet callable). ──
+                has_biblio_signals = any(
+                    p.search(text_raw) for p in _BIBLIO_CONTINUATION_PATTERNS
+                )
+                text_raw_lower = text_raw.lower()
+                has_publisher = any(
+                    pub in text_raw_lower
+                    for pub in ("springer", "ieee", "acm", "elsevier")
+                )
+                has_year_pattern = bool(re.search(r'\(\d{4}\)', text_raw))
+                if has_biblio_signals or (has_publisher and has_year_pattern):
+                    # Spurious heading — demote to footnote, keep flag alive
+                    span["role"] = TextRole.FOOTNOTE.value
+                    span["_outlier_score"] = 0.90
+                    span["_outlier_reasons"] = ["bibliography_heading_spurious"]
+                    if trace_id:
+                        logger.debug(
+                            "[%s] Bibliography: spurious heading demoted, "
+                            "section flag preserved. text=%r",
+                            trace_id, text_raw[:60]
+                        )
+                else:
+                    in_biblio_section = False
+            else:
+                in_biblio_section = False
+            continue
+
+        if not in_biblio_section:
+            continue
+
+        # Skip structural artifacts (page numbers, headers/footers, captions)
+        if role in _biblio_heading_roles_to_skip:
+            continue
+
+        span["role"] = TextRole.FOOTNOTE.value
+        span["_outlier_score"] = 0.90
+        span["_outlier_reasons"] = ["bibliography_heading"]
+
+    # ---- A.2) Bibliography-like scoring helper (inline) ----
+    def _biblio_span_score(text_raw: str, font_ratio: float) -> float:
+        """
+        Score bibliography-likelihood for a single span.
+        Returns score in [0, 1]. Uses only structural/text-shape signals.
+        """
+        if not text_raw:
+            return 0.0
+
+        text = text_raw.strip()
+        if not text:
+            return 0.0
+
+        score = 0.0
+
+        # Entry start patterns
+        for p in _BIBLIO_ENTRY_PATTERNS:
+            if p.match(text):
+                score += 0.30
+                break
+
+        # Continuation markers (counted, diminishing returns)
+        cont_matches = 0
+        for p in _BIBLIO_CONTINUATION_PATTERNS:
+            if p.search(text):
+                cont_matches += 1
+        if cont_matches >= 1:
+            score += min(0.25, cont_matches * 0.10)
+
+        # Journal abbreviations (high specificity)
+        for p in _BIBLIO_JOURNAL_PATTERNS:
+            if p.search(text):
+                score += 0.20
+                break
+
+        # Punctuation density
+        punct_count = sum(1 for c in text if c in ".,;:()[]")
+        punct_density = punct_count / max(len(text), 1)
+        if punct_density > _BIBLIO_PUNCT_DENSITY_THRESHOLD:
+            score += 0.15
+
+        # Small font (relative to median body font)
+        if font_ratio < _BIBLIO_SMALL_FONT_RATIO:
+            score += 0.10
+
+        # Clamp
+        if score < 0.0:
+            score = 0.0
+        if score > 1.0:
+            score = 1.0
+
+        return score
+
+    # ---- A.3) Bibliography cluster detection (layout_stream + block_id) ----
+    # We only demote spans when there is block-level structural evidence.
+    biblio_cluster_keys: set[tuple[str, int, int]] = set()
+
+    groups: Dict[tuple[str, int, int], List[Dict]] = {}
+    for s in geo_spans:
+        stream = str(s.get("layout_stream") or "")
+        bid = int(s.get("block_id", 0))
+        page_num = s.get("page_number", 0)  # ← FIXED: use `s`
+        key = (stream, bid, page_num)
+        groups.setdefault(key, []).append(s)
+
+    for key, group in groups.items():
+        if len(group) < _BIBLIO_MIN_CLUSTER_SIZE:
+            continue
+
+        high_score = 0
+        for s in group:
+            t_raw = (s.get("cleaned_text") or s.get("raw_text") or "").strip()
+            fsz = float(s.get("font_size", median_font))
+            fr = fsz / max(1e-6, median_font)
+            if _biblio_span_score(t_raw, fr) >= _BIBLIO_CLUSTER_SCORE_THRESHOLD:
+                high_score += 1
+
+        ratio = high_score / max(len(group), 1)
+        if high_score >= _BIBLIO_MIN_CLUSTER_SIZE and ratio >= _BIBLIO_CLUSTER_RATIO_THRESHOLD:
+            biblio_cluster_keys.add(key)
+
+            if trace_id:
+                logger.debug(
+                    "[%s] Bibliography cluster detected: layout_stream=%s block_id=%d high_score=%d/%d (%.0f%%)",
+                    trace_id, key[0], key[1], high_score, len(group), ratio * 100.0
+                )
+
     # ---- B) Single-pass scoring ----
     for span in spans:
         bbox = span.get("bbox")
         if not bbox or len(bbox) != 4:
+            continue
+
+        # NEW: Bibliography cluster membership (highest confidence demotion)
+        if span.get("_outlier_reasons") == ["bibliography_heading"]:
+            continue
+
+        stream = str(span.get("layout_stream") or "")
+        bid = int(span.get("block_id", 0))
+        page_num = span.get("page_number", 0)
+        if (stream, bid, page_num) in biblio_cluster_keys:
+            span["role"] = TextRole.FOOTNOTE.value
+            span["_outlier_score"] = 0.90
+            span["_outlier_reasons"] = ["bibliography_cluster"]
             continue
 
         # Respect structural roles (don’t “override ground truth”)
@@ -10351,7 +11350,8 @@ def _refine_roles_via_content_flow(spans: List[Dict], trace_id: str = None) -> N
             continue
 
         # Text for semantic patterns
-        text = (span.get("cleaned_text") or span.get("raw_text") or "").strip().lower()
+        text_raw = (span.get("cleaned_text") or span.get("raw_text") or "").strip()
+        text = text_raw.lower() if text_raw else ""
         if not text:
             continue
 
@@ -10415,14 +11415,14 @@ def _refine_roles_via_content_flow(spans: List[Dict], trace_id: str = None) -> N
             span["_outlier_score"] = round(score, 2)
             span["_outlier_reasons"] = reasons
 
-        # Summary logging
-        if trace_id:
-            demoted_count = sum(1 for s in spans if s.get("_outlier_score", 0) >= 0.70)
-            if demoted_count > 0:
-                logger.debug(
-                    "[%s] Content-flow refinement: demoted %d outlier spans",
-                    trace_id, demoted_count
-                )
+    # Summary logging
+    if trace_id:
+        demoted_count = sum(1 for s in spans if s.get("_outlier_score", 0) >= 0.70)
+        if demoted_count > 0:
+            logger.debug(
+                "[%s] Content-flow refinement: demoted %d outlier spans",
+                trace_id, demoted_count
+            )
 
 
 def _associate_captions_to_figures(
@@ -10579,7 +11579,6 @@ def _associate_captions_to_figures(
                     best_dist if best_dist != float("inf") else -1,
                     max_caption_distance
                 )
-
 
 # ✦                  ✦                  ✦                  ✦
 # ✦───────────── 3 Table & Structure Logic ─────────────✦
@@ -11651,24 +12650,22 @@ def _stitch_helper_merge(curr: Dict, next_sent: Dict) -> Dict:
 
     # Collect canonical span provenance IDs (v2.1: _source_span_ids)
     # Must preserve order and keep None sentinels (provenance gaps) without dropping.
-    prev_ids = curr.get("_source_span_ids") or []
-    next_ids = next_sent.get("_source_span_ids") or []
+    # --- source_cids merge (contribution truth, Pass 1 addition) ---
+    prev_source_cids = curr.get("source_cids") or []
+    next_source_cids = next_sent.get("source_cids") or []
 
-    combined = list(prev_ids) + list(next_ids)
+    combined_cids = list(prev_source_cids) + list(next_source_cids)
 
-    # Deduplicate while preserving order; keep None as a stable sentinel
-    seen = set()
-    deduped = []
-    for cid in combined:
-        if cid is None:
-            deduped.append(None)
-            continue
-        if cid not in seen:
-            seen.add(cid)
-            deduped.append(cid)
+    # Dedupe exact CID duplicates only, preserve order
+    seen_cids = set()
+    deduped_cids = []
+    for cid in combined_cids:
+        if cid is not None and cid not in seen_cids:
+            seen_cids.add(cid)
+            deduped_cids.append(cid)
 
-    if deduped:
-        merged["_source_span_ids"] = deduped
+    if deduped_cids:
+        merged["source_cids"] = deduped_cids
 
     # ─────────────────────────────────────────────────────────────────────────
     # RONC v2.1 FIX: Use _ronc_atomic_units (list), not _ronc_atomic_unit_id
@@ -12394,8 +13391,8 @@ def _resolve_semantic_continuity(
 
                 # INLINE WHITELIST (strict):
                 is_punct_only = len(text) <= 3 and text and not any(c.isalnum() for c in text)
-                INLINE_CONNECTIVES = {"or", "and", "but", "is", "are", "was", "were"}
-                is_connective = word_count == 1 and text.lower().strip(",.;:") in INLINE_CONNECTIVES
+                is_connective = word_count == 1 and text.lower().strip(
+                    ",.;:") in _MARGIN_INLINE_CONNECTIVES
                 if is_punct_only or is_connective:
                     _set(span, _SEM_DISP_INCLUDED,
                          ["ronc:must_include_protected", "margin_origin:inline_whitelisted"], 1.0)
@@ -12439,10 +13436,9 @@ def _resolve_semantic_continuity(
                     not any(c.isalnum() for c in text)
             )
 
-            INLINE_CONNECTIVES = {"or", "and", "but", "is", "are", "was", "were"}
             is_connective = (
                     word_count == 1 and
-                    text.lower().strip(",.;:") in INLINE_CONNECTIVES
+                    text.lower().strip(",.;:") in _MARGIN_INLINE_CONNECTIVES
             )
 
             if is_punct_only or is_connective:
@@ -12555,6 +13551,33 @@ def _resolve_semantic_continuity(
 
         # Visual overlap resolution
         if "visual_overlap" in candidate_reasons:
+            # ── Structural exclusion precedence: spans carrying any
+            # structural exclusion reason skip rescue entirely. Stage 1
+            # correctly identified these spans as non-content (metadata,
+            # header/footer bands, header artifacts).
+            # Do NOT force-exclude here — the span retains its Pass 1
+            # disposition (included/default/0.5) which falls through
+            # Priority 2 in _translate_exclusion_flags (requires non-default
+            # reasons + confidence >= 0.6), reaching the structural
+            # authority gate or Priority 4+ where _exclusion_candidate
+            # is respected.
+            #
+            # NOTE: continue skips bare_caption and invalid_bbox checks
+            # for this iteration. Verified harmless — structural exclusion
+            # spans are geometrically disjoint from caption patterns and
+            # have valid bboxes by prerequisite. If future Pass 2 checks
+            # are added that should apply to structural spans, revisit. ──
+            if candidate_reasons & _STRUCTURAL_EXCLUSION_REASONS:
+                if trace_id:
+                    logger.debug(
+                        "[%s] Pass 2: visual_overlap rescue skipped for "
+                        "structural exclusion span. reasons=%s text=%r cid=%s",
+                        trace_id,
+                        sorted(candidate_reasons & _STRUCTURAL_EXCLUSION_REASONS),
+                        text[:50],
+                        cur_span.get("_canonical_span_id")
+                    )
+                continue
             # =================================================================
             # PATCH 7B-E: Rescue body-like / continuation prose BEFORE diagram_label hard exclude
             #
@@ -12635,26 +13658,101 @@ def _resolve_semantic_continuity(
                 elif next_text and _is_body_like(next_text):
                     is_glue_word_rescue = True
 
-            # --- PATCH 7B-F: Final rescue gate (AUTHORITATIVE) ---
+            # FM3: A2 BODY ANCHOR (STRUCTURAL, PASS-2)
+            has_a2_body_anchor = False
+            if cur_span.get("a2_continues_to_next") or cur_span.get("a2_continues_from_previous"):
+                cur_lid = cur_span.get("line_id")
+                cur_sil = cur_span.get("span_index_in_line", -1)
+                if cur_lid is not None:
+                    for ws in window_spans:
+                        if ws is cur_span:
+                            continue
+                        if ws.get("line_id") != cur_lid:
+                            continue
+                        ws_sil = ws.get("span_index_in_line", -1)
+                        in_chain_dir = (
+                                (cur_span.get("a2_continues_to_next") and ws_sil > cur_sil) or
+                                (cur_span.get("a2_continues_from_previous") and ws_sil < cur_sil)
+                        )
+                        if not in_chain_dir:
+                            continue
+                        ws_survives = (
+                                not ws.get("_exclusion_candidate")
+                                or ws.get("_exclusion_protected")
+                        )
+                        if ws_survives:
+                            has_a2_body_anchor = True
+                            break
+            # Cross-line fallback: if same-line_id search found nothing,
+            # follow the a2 chain to the immediate neighbor in reading order.
+            # The a2 flag itself proves glyph-level adjacency — line_id is
+            # redundant when the extraction engine has already asserted the link.
+            if not has_a2_body_anchor:
+                cur_idx_in_window = None
+                for wi, ws in enumerate(window_spans):
+                    if ws is cur_span:
+                        cur_idx_in_window = wi
+                        break
+                if cur_idx_in_window is not None:
+                    if cur_span.get(
+                            "a2_continues_from_previous") and cur_idx_in_window > 0:
+                        prev_ws = window_spans[cur_idx_in_window - 1]
+                        if (isinstance(prev_ws, dict)
+                                and prev_ws.get("a2_continues_to_next")):
+                            if (not prev_ws.get("_exclusion_candidate")
+                                    or prev_ws.get("_exclusion_protected")):
+                                has_a2_body_anchor = True
+                    if (not has_a2_body_anchor
+                            and cur_span.get("a2_continues_to_next")
+                            and cur_idx_in_window + 1 < len(window_spans)):
+                        next_ws = window_spans[cur_idx_in_window + 1]
+                        if (isinstance(next_ws, dict)
+                                and next_ws.get("a2_continues_from_previous")):
+                            if (not next_ws.get("_exclusion_candidate")
+                                    or next_ws.get("_exclusion_protected")):
+                                has_a2_body_anchor = True
             rescue_as_body = (
-                    is_body_stream and
-                    not is_boilerplate and
-                    not is_true_label_like and
-                    not (is_diagram_heavy_block and word_count <= 3 and not is_glue_word_rescue) and
+                is_body_stream and
+                not is_boilerplate and
+                (
+                    (has_a2_body_anchor and not is_true_label_like) or
                     (
+                        not is_true_label_like and
+                        not (is_diagram_heavy_block and word_count <= 3
+                             and not is_glue_word_rescue) and
+                        (
                             body_like or
                             is_short_continuation or
                             is_glue_word_rescue or
                             (prev_incomplete and this_lower) or
                             (this_lower and next_lower)
+                        )
                     )
+                )
             )
 
             if rescue_as_body:
-                # Optional audit flag; not required, but helps tracing
                 cur_span["_inside_figure_rescued"] = True
-                _set(cur_span, _SEM_DISP_INCLUDED, ["visual_overlap:body_like_rescue"], 0.85)
-
+                # ─────────────────────────────────────────────────────────
+                # ROLE PROMOTION: Stage 3 gates on role, not disposition.
+                # Mirrors _apply_continuity_role_resolution's mutation for
+                # spans that Phase 1.5 could not reach (e.g. exclusion
+                # candidates rescued here via a2 anchor or body heuristic).
+                # ─────────────────────────────────────────────────────────
+                if cur_span.get("role") == "inside_figure":
+                    cur_span["_original_geometry_role"] = cur_span["role"]
+                    cur_span["role"] = "body"
+                    cur_span["_continuity_override"] = True
+                    cur_span["_continuity_override_reason"] = (
+                        "semantic_rescue:a2_body_anchor" if has_a2_body_anchor
+                        else "semantic_rescue:body_like"
+                    )
+                if has_a2_body_anchor:
+                    _set(cur_span, _SEM_DISP_INCLUDED,
+                         ["visual_overlap:a2_body_anchor_rescue"], 0.90)
+                else:
+                    _set(cur_span, _SEM_DISP_INCLUDED,
+                         ["visual_overlap:body_like_rescue"], 0.85)
                 # ─────────────────────────────────────────────────────────────────
                 # P5 FIX: Protect headings from diagram_label exclusion
                 # Headings may be short and contain technical terms (triggering
@@ -12816,6 +13914,7 @@ def _reconstruct_text_for_segmentation(
     prev_column: Optional[int] = None
     prev_para: Optional[int] = None
     prev_page: Optional[int] = None
+    prev_block: Optional[int] = None
 
     # REVISION B: Initialize reference tracker for A2 signals
     prev_span_ref: Optional[Dict] = None
@@ -12967,6 +14066,7 @@ def _reconstruct_text_for_segmentation(
         curr_column = span.get("column_index", 0) or 0
         curr_para = span.get("paragraph_index", 0) or 0
         curr_page = span.get("page_number", 0)
+        curr_block = span.get("block_id")
 
         # Determine prefix based on boundaries
         prefix = ""  # Default for first span (no predecessor)
@@ -13035,6 +14135,12 @@ def _reconstruct_text_for_segmentation(
         if prefix is None and prev_page is not None and curr_page != prev_page:
             prefix = " "
 
+        # PRIORITY 2.5: Block break (same page, different structural block)
+        if prefix is None and prev_block is not None and curr_block is not None and curr_block != prev_block and curr_page == prev_page:
+            prefix = " " if same_atomic_unit else "\n"
+            if same_atomic_unit:
+                ronc_atomic_welds += 1
+
         # PRIORITY 3: Paragraph break
         if prefix is None and prev_para is not None and curr_para != prev_para:
             prefix = " " if same_atomic_unit else "\n"
@@ -13084,6 +14190,7 @@ def _reconstruct_text_for_segmentation(
         prev_column = curr_column
         prev_para = curr_para
         prev_page = curr_page
+        prev_block = curr_block
         prev_span_ref = span
 
     if trace_id:
@@ -13107,6 +14214,16 @@ def _reconstruct_text_for_segmentation(
             logger.warning(
                 "[%s] Phase 2.7: Unbalanced parentheses in stream (open=%d, close=%d)",
                 trace_id, open_parens, close_parens
+            )
+
+    open_brackets = full_text.count("[")
+    close_brackets = full_text.count("]")
+    if open_brackets != close_brackets:
+        if trace_id:
+            logger.warning(
+                "[%s] Phase 2.7: Unbalanced square brackets in stream "
+                "(open=%d, close=%d, likely orphaned by citation exclusion)",
+                trace_id, open_brackets, close_brackets
             )
 
     return full_text, span_map, char_to_span
@@ -13502,26 +14619,44 @@ def _heal_truncated_sentences(
         curr_ronc_units = set(curr.get("_ronc_atomic_units") or [])
         ronc_triggered = False
 
+        curr_boundary_risks = curr.get("boundary_risks") or []
+        is_short_fragment = "short_no_terminal_punct" in curr_boundary_risks
+
         if curr_ronc_units:
             MAX_RONC_LOOKAHEAD = 5
             for j in range(i + 1, min(i + 1 + MAX_RONC_LOOKAHEAD, len(sentences))):
                 next_sent = sentences[j]
 
-                # Same-page constraint (cross-page deferred to Phase 8)
+                # Stop if we hit a new page (same-page healer only)
                 if next_sent.get("page_number") != curr_page:
                     break
 
                 if next_sent.get("_consumed"):
                     continue
 
-                # ─────────────────────────────────────────────────────────────
-                # FIX: Define next_text HERE so the Guard can see it
-                # ─────────────────────────────────────────────────────────────
                 next_text = (next_sent.get("text") or "").strip()
-
                 next_ronc_units = set(next_sent.get("_ronc_atomic_units") or [])
 
-                # RONC INTERSECTION = ILLEGAL SPLIT → MERGE
+                # ─────────────────────────────────────────────────────────────
+                # RONC BARRIER FOR SHORT NON-TERMINAL FRAGMENTS
+                # Short non-terminal sentences must not drive a RONC merge
+                # that skips over an intervening complete sentence.
+                # ─────────────────────────────────────────────────────────────
+                if is_short_fragment:
+                    next_boundary_risks = next_sent.get("boundary_risks") or []
+                    next_is_short = "short_no_terminal_punct" in next_boundary_risks
+
+                    # Treat sentence as complete if it is not short OR it ends with terminal punctuation
+                    next_complete = (
+                            not next_is_short or
+                            (next_text and next_text[-1] in ".!?")
+                    )
+
+                    # Intervening complete sentence not sharing RONC units blocks lookahead
+                    if next_complete and not (curr_ronc_units & next_ronc_units):
+                        break
+
+                # Existing RONC intersection logic (unchanged)
                 if curr_ronc_units & next_ronc_units:
                     # ─────────────────────────────────────────────────────────
                     # CRITICAL FIX v3.1: Sacred Period Guard
@@ -13564,6 +14699,25 @@ def _heal_truncated_sentences(
                     # RONC METADATA PROPAGATION (union)
                     combined = curr_ronc_units | next_ronc_units
                     merged["_ronc_atomic_units"] = sorted(combined)
+
+                    # source_cids propagation (contribution truth)
+                    prev_source_cids = curr.get("source_cids") or []
+                    next_source_cids = next_sent.get("source_cids") or []
+                    combined_cids = list(prev_source_cids) + list(next_source_cids)
+                    seen_cids = set()
+                    deduped_cids = []
+                    for cid in combined_cids:
+                        if cid is not None and cid not in seen_cids:
+                            seen_cids.add(cid)
+                            deduped_cids.append(cid)
+                    if deduped_cids:
+                        merged["source_cids"] = deduped_cids
+
+                    # _source_spans propagation (runtime authority)
+                    curr_src_spans = curr.get("_source_spans") or []
+                    next_src_spans = next_sent.get("_source_spans") or []
+                    if curr_src_spans or next_src_spans:
+                        merged["_source_spans"] = list(curr_src_spans) + list(next_src_spans)
 
                     healed.append(merged)
                     heal_count += 1
@@ -13648,9 +14802,44 @@ def _heal_truncated_sentences(
         # GUARD: Only attempt healing if last word is a cut indicator
         # =====================================================================
         if last_word not in _HEALING_CUT_INDICATORS:
-            healed.append(curr)
-            i += 1
-            continue
+            # =================================================================
+            # SHORT-FRAGMENT OVERRIDE
+            #
+            # Very short period-ending sentences may be pysbd mis-segments
+            # even when the last word is not a traditional cut indicator.
+            #   Defect 5.1: "You most likely." + "won't see..." → merge
+            #
+            # Conditions (ALL required to fall through to legacy lookahead):
+            #   1. Word count <= _HEAL_SHORT_FRAGMENT_MAX_WORDS
+            #   2. Not a known valid short sentence ("Indeed.", "I know.")
+            #   3. Last word has no internal periods (not "U.S.", "e.g.")
+            #   4. Last word is not an acronym (not "NATO.", "WHO.")
+            #   5. Last word length >= _HEAL_SHORT_FRAGMENT_MIN_LAST_WORD_LEN
+            #      (blocks abbreviation suffixes: "al", "vs", "cf")
+            #
+            # The existing legacy lookahead below enforces lowercase-start
+            # on the next sentence — that check is NOT duplicated here.
+            # =================================================================
+            last_word_raw = words[-1] if words else ""
+            has_internal_period = (
+                '.' in last_word_raw[:-1] if len(last_word_raw) > 1 else False
+            )
+            is_acronym = (
+                    last_word_raw.rstrip(".,;:").isupper()
+                    and len(last_word_raw.rstrip(".,;:")) > 1
+            )
+            is_short_fragment_candidate = (
+                    len(words) <= _HEAL_SHORT_FRAGMENT_MAX_WORDS
+                    and text.lower() not in VALID_SHORT_SENTENCES
+                    and not has_internal_period
+                    and not is_acronym
+                    and len(last_word) >= _HEAL_SHORT_FRAGMENT_MIN_LAST_WORD_LEN
+            )
+            if not is_short_fragment_candidate:
+                healed.append(curr)
+                i += 1
+                continue
+            # Fall through to legacy lookahead (checks lowercase continuation)
 
         # =====================================================================
         # PRIORITY 1 LEGACY LOOKAHEAD: Search for continuation (heuristic)
@@ -13661,6 +14850,10 @@ def _heal_truncated_sentences(
 
         for j in range(i + 1, min(i + 1 + MAX_LOOKAHEAD, len(sentences))):
             next_sent = sentences[j]
+
+            # Stop if we hit a new page (same-page healer only)
+            if next_sent.get("page_number") != curr_page:
+                break
 
             # Stop if we hit a new page
             if next_sent.get("page_number") != curr_page:
@@ -13714,6 +14907,25 @@ def _heal_truncated_sentences(
                 combined = left_units | right_units
                 if combined:
                     merged["_ronc_atomic_units"] = sorted(combined)
+
+                # source_cids propagation (contribution truth)
+                prev_source_cids = curr.get("source_cids") or []
+                next_source_cids = next_sent.get("source_cids") or []
+                combined_cids = list(prev_source_cids) + list(next_source_cids)
+                seen_cids = set()
+                deduped_cids = []
+                for cid in combined_cids:
+                    if cid is not None and cid not in seen_cids:
+                        seen_cids.add(cid)
+                        deduped_cids.append(cid)
+                if deduped_cids:
+                    merged["source_cids"] = deduped_cids
+
+                # _source_spans propagation (runtime authority)
+                curr_src_spans = curr.get("_source_spans") or []
+                next_src_spans = next_sent.get("_source_spans") or []
+                if curr_src_spans or next_src_spans:
+                    merged["_source_spans"] = list(curr_src_spans) + list(next_src_spans)
 
                 healed.append(merged)
                 heal_count += 1
@@ -13906,6 +15118,25 @@ def _heal_cross_page_truncations(
         combined = left_units | right_units
         if combined:
             merged["_ronc_atomic_units"] = sorted(combined)
+
+        # source_cids propagation (contribution truth)
+        prev_source_cids = curr.get("source_cids") or []
+        next_source_cids = next_sent.get("source_cids") or []
+        combined_cids = list(prev_source_cids) + list(next_source_cids)
+        seen_cids = set()
+        deduped_cids = []
+        for cid in combined_cids:
+            if cid is not None and cid not in seen_cids:
+                seen_cids.add(cid)
+                deduped_cids.append(cid)
+        if deduped_cids:
+            merged["source_cids"] = deduped_cids
+
+        # _source_spans propagation (runtime authority)
+        curr_src_spans = curr.get("_source_spans") or []
+        next_src_spans = next_sent.get("_source_spans") or []
+        if curr_src_spans or next_src_spans:
+            merged["_source_spans"] = list(curr_src_spans) + list(next_src_spans)
 
         # =====================================================================
         # PHASE 8 PLACEHOLDER: Cross-page RONC intersection detection
@@ -14235,36 +15466,59 @@ def _segment_sentences(
                 )
 
         # ==========================================================
-        # PHASE 6.1: Source Span Linkage (RONC v2.1)
+        # PHASE 6.1: Source Span Linkage (RONC v2.1 + Pass 1 Semantic Split)
         #
-        # ARCHITECTURAL CONTRACT:
-        # - _source_span_ids: Canonical IDs for persistence (reversible)
-        # - _source_spans: Resolved objects for runtime (stitch authority)
+        # ARCHITECTURAL CONTRACT (Pass 1 Revision):
+        # Two distinct provenance concepts, intentionally separated:
+        #
+        # 1. _source_span_ids: WINDOW-ORDERED COVERAGE
+        #    - Contiguous range [start_span_idx..end_span_idx]
+        #    - May include non-contributing spans (within window bounds)
+        #    - Preserves None sentinels for provenance gaps
+        #    - Used for: page-turn markers, ordered traversal, reconstruction
+        #
+        # 2. source_cids: CONTRIBUTION TRUTH
+        #    - Derived from sorted_spans (char_to_span membership)
+        #    - Only spans whose text actually contributed to sentence
+        #    - Excludes: None, _tts_excluded spans
+        #    - Used for: highlighting, provenance audit, frontend geometry
+        #
+        # 3. _source_spans: RUNTIME AUTHORITY
+        #    - Resolved span objects for stitch decisions
+        #    - MUST be stripped before serialization
         #
         # INVARIANTS:
-        # - _source_spans MUST be stripped before serialization
-        # - _source_span_ids MUST be total (no silent drops)
-        # - Sentences are views, not authorities. Spans are truth.
+        # - source_cids ⊆ set(_source_span_ids) - {None}
+        # - Every CID in source_cids contributed text to this sentence
+        # - _source_spans MUST NOT be mutated by downstream consumers
         # ==========================================================
 
-        # Persistable: canonical IDs (stable, small, reversible)
-        # PROVENANCE SEMANTICS:
-        # - None sentinel means: span existed at segmentation time
-        #   but lacked canonical identity (upstream invariant violation).
-        # - None MUST be preserved (not filtered) to maintain
-        #   exact sentence→span shape for lossless reconstruction.
+        # PART A: Build _source_span_ids (window coverage, contiguous)
         source_span_ids = []
+        source_span_objects = []
         missing_canonical_ids = 0
-        for idx in sorted_spans:
-            if 0 <= idx < len(all_spans):
-                cid = all_spans[idx].get("_canonical_span_id")
-                if cid is not None:
-                    source_span_ids.append(cid)
-                else:
-                    source_span_ids.append(None)  # Sentinel: provenance gap
-                    missing_canonical_ids += 1
+        tts_excluded_in_window = 0
 
-        # Deduplicate while preserving order (handles edge case of duplicate IDs)
+        for idx in range(start_span_idx, end_span_idx + 1):
+            if not (0 <= idx < len(all_spans)):
+                continue
+
+            span = all_spans[idx]
+            cid = span.get("_canonical_span_id")
+
+            if span.get("_tts_excluded", False):
+                tts_excluded_in_window += 1
+
+            # Preserve exact window shape (no filtering)
+            if cid is not None:
+                source_span_ids.append(cid)
+            else:
+                source_span_ids.append(None)  # Sentinel: provenance gap
+                missing_canonical_ids += 1
+
+            source_span_objects.append(span)
+
+        # Deduplicate while preserving order
         seen_ids = set()
         deduped_ids = []
         for cid in source_span_ids:
@@ -14272,25 +15526,75 @@ def _segment_sentences(
                 deduped_ids.append(cid)
                 if cid is not None:
                     seen_ids.add(cid)
+
         sentence_record["_source_span_ids"] = deduped_ids
 
-        # Runtime-only: resolved span objects (enables stitch authority gate)
-        # RUNTIME CONTRACT:
-        # - _source_spans are READ-ONLY views into canonical span objects
-        # - MUST NOT be mutated in-place by downstream consumers
-        # - MUST be stripped at serialization boundary (manifest builder)
+        # PART B: Build source_cids (contribution truth from char_to_span)
         #
-        sentence_record["_source_spans"] = [
-            all_spans[idx] for idx in sorted_spans if 0 <= idx < len(all_spans)
-        ]
-        # Provenance integrity check (log mismatch, don't fail)
+        # CRITICAL: Derive from sorted_spans, NOT from contiguous window.
+        # sorted_spans contains exactly the span indices whose characters
+        # appear in char_to_span for this sentence's [start_char..end_char].
+        # This is the authoritative "which spans contributed text" answer.
+        contributing_cids = []
+        for idx in sorted_spans:
+            if not (0 <= idx < len(all_spans)):
+                continue
+
+            span = all_spans[idx]
+            cid = span.get("_canonical_span_id")
+
+            # Exclude: missing CID, TTS-excluded spans
+            if cid is None:
+                continue
+            if span.get("_tts_excluded", False):
+                continue
+
+            contributing_cids.append(cid)
+
+        # Deduplicate while preserving order (edge case: duplicate CIDs)
+        seen_contrib = set()
+        deduped_contrib = []
+        for cid in contributing_cids:
+            if cid not in seen_contrib:
+                seen_contrib.add(cid)
+                deduped_contrib.append(cid)
+
+        sentence_record["source_cids"] = deduped_contrib
+
+        # PART C: Runtime span objects (for stitch authority)
+        sentence_record["_source_spans"] = source_span_objects
+
+        # PART D: Provenance integrity checks
         if missing_canonical_ids > 0 and trace_id:
             logger.warning(
                 "[%s] Sentence #%d has %d spans without _canonical_span_id "
-                "(provenance gap). span_count=%d, id_count=%d",
+                "(provenance gap). window=[%d..%d], tts_excluded_in_window=%d",
                 trace_id, sent_idx, missing_canonical_ids,
-                len(span_indices), len([x for x in deduped_ids if x is not None])
+                start_span_idx, end_span_idx, tts_excluded_in_window
             )
+
+        # G2 partial validation: source_cids should not be empty for non-empty text
+        if not sentence_record["source_cids"] and sent.strip() and trace_id:
+            logger.error(
+                "[%s] Sentence #%d has EMPTY source_cids despite non-empty text. "
+                "window=[%d..%d], sorted_spans=%s, tts_excluded_in_window=%d. "
+                "Text='%s...'",
+                trace_id, sent_idx, start_span_idx, end_span_idx,
+                sorted_spans[:5], tts_excluded_in_window, sent[:40]
+            )
+
+        # Diagnostic: Log if contribution set differs significantly from window
+        contribution_count = len(deduped_contrib)
+        window_count = len([c for c in deduped_ids if c is not None])
+        if window_count > 0 and contribution_count < window_count and trace_id:
+            excluded_from_contribution = window_count - contribution_count
+            if excluded_from_contribution > 2:  # Only log if significant gap
+                logger.debug(
+                    "[%s] Sentence #%d: %d CIDs in window, %d contributing "
+                    "(gap=%d, likely non-body spans in range)",
+                    trace_id, sent_idx, window_count, contribution_count,
+                    excluded_from_contribution
+                )
 
         # ==========================================================
         # PHASE 6: Boundary Risk Analysis (NON-DESTRUCTIVE)
@@ -14356,8 +15660,13 @@ def _prepare_sentence_for_serialization(sentence: Dict) -> Dict:
     Strip runtime-only fields before manifest emission.
 
     ARCHITECTURAL CONTRACT:
-    This is the SOLE boundary where runtime fields are removed.
-    All runtime-only fields use underscore prefix by convention.
+
+    This is a serialization boundary that strips runtime-only fields that MUST NOT
+    appear in serialized sentence payloads. Downstream (process.py) may further
+    transform/project fields during manifest emission.
+
+    Runtime-only fields typically use underscore prefix; some underscore fields
+    may be intentionally preserved for downstream projection.
     """
     # Create shallow copy to avoid mutating working data
     output = dict(sentence)
@@ -14368,22 +15677,67 @@ def _prepare_sentence_for_serialization(sentence: Dict) -> Dict:
     # 1. Capture Human-Readable Text (Visual)
     #    Preserve original punctuation (;) and restore scientific notation (mm²)
     display_text = output.get("text", "") or ""
-    import re
-    display_text = re.sub(r"mm2", "mm²", display_text)
-    display_text = re.sub(r"mm3", "mm³", display_text)
+
+    # Normalize common scientific units for display only
+    display_text = re.sub(r"\bmm2\b", "mm²", display_text)
+    display_text = re.sub(r"\bmm3\b", "mm³", display_text)
+
     output["display_text"] = display_text
 
     # 2. Prepare Decoder-Safe Text (Spoken)
     #    Use sanitized tts_text if available, otherwise fallback to raw.
     tts_text = output.get("tts_text", output.get("text", ""))
-    
     output["text"] = tts_text
 
-    # 3. Cleanup Internal Fields
+    # ═══════════════════════════════════════════════════════════════════
+    # V1.7: Explicit Prosodic Clause Serialization
+    #
+    # Prosodic metadata is AUDIO-ONLY but MUST be serialized so
+    # Stage 3 TTS generation can act on it.
+    #
+    # This method is the ONLY safe boundary to promote runtime
+    # prosodic signals into manifest-visible fields.
+    # ═══════════════════════════════════════════════════════════════════
+    output["needs_clause_splitting"] = bool(
+        sentence.get("needs_clause_splitting")
+        or sentence.get("_tts_change_tracker", {}).get("needs_clause_splitting")
+    )
+
+    clauses = (
+            sentence.get("prosodic_clauses")
+            or sentence.get("_tts_change_tracker", {}).get("prosodic_clauses")
+    )
+    output["prosodic_clauses"] = clauses if clauses else None
+
+    # 3. Cleanup Internal Runtime Fields
+    # Underscore-prefixed fields are runtime-only by contract.
     output.pop("_source_spans", None)
     output.pop("tts_text", None)
+    output.pop("_tts_change_tracker", None)
+
+    # =========================================================================
+    # DEBUG: Prosodic Serialization Contract
+    #
+    # If a sentence declares clause splitting, serialized output MUST
+    # contain prosodic_clauses. Violations indicate upstream loss.
+    # =========================================================================
+    if __debug__:
+        if output.get("needs_clause_splitting") and not output.get("prosodic_clauses"):
+            logger.error(
+                "SERIALIZATION CONTRACT VIOLATION: "
+                "needs_clause_splitting=True but prosodic_clauses missing"
+            )
+
+        # Provenance integrity (shape-only at serialization boundary)
+        source_ids = output.get("_source_span_ids") or []
+        if isinstance(source_ids, list) and any(sid is None for sid in source_ids):
+            logger.warning(
+                "PROVENANCE GAP: sentence global_index=%s has None in _source_span_ids",
+                output.get("global_index")
+            )
 
     return output
+
 
 # ============================================================================
 # SENTENCE SEMANTIC PROJECTION (v1.0)
@@ -14489,7 +15843,8 @@ def _normalize_punctuation_spacing(text: str) -> str:
     text = re.sub(r'\s+([)\]}])', r'\1', text)
 
     # Remove space before comma/period/colon/semicolon
-    text = re.sub(r'\s+([,.;:])', r'\1', text)
+    text = _PRE_PUNCT_WHITESPACE_PATTERN.sub(r'\1', text)
+    text = re.sub(r'([.,:;])\1+', r'\1', text)
 
     # Ensure single space after comma (not before closing bracket or digit)
     # Lookahead ensures we don't break "1,000" or "(a,b)" logic if needed,
@@ -14765,7 +16120,12 @@ def _compute_global_header_footer_bands(
 
         # Define header/footer zones using configurable threshold
         header_zone_max_y = page_height * _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT
-        footer_zone_min_y = page_height * (1.0 - _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT)
+
+        # Prefer adaptive footer boundary if available
+        footer_zone_min_y = page_data.get("structure", {}).get(
+            "footer_zone_min_y",
+            page_height * (1.0 - _GLOBAL_HEADER_FOOTER_EXCLUSION_PERCENT)
+        )
 
         # Get spans from either structure
         spans = page_data.get("spans", page_data.get("content", []))
@@ -14929,11 +16289,22 @@ def _apply_global_header_footer_roles(
     tagged_header = 0
     tagged_footer = 0
 
+    # Roles eligible for global header/footer reclassification.
+    # CAPTION included: running headers frequently misclassified as
+    # captions (short text adjacent to page numbers on same Y-band).
+    # True mid-page captions are protected by the Y-band + zone guard
+    # below — only spans physically in the header/footer strip match.
+    # HEADING, TABLE, and other structural roles remain protected.
+    _GLOBAL_HF_ELIGIBLE_ROLES = frozenset({
+        TextRole.BODY.value,
+        TextRole.CAPTION.value,
+    })
+
     for span in all_spans:
-        # HARDENED: Only tag BODY spans as global header/footer.
-        # Prevents clobbering validated HEADINGS, CAPTIONS, or TABLES.
+        # Only reclassify eligible roles in header/footer bands.
+        # Prevents clobbering validated HEADINGS, TABLES, or CODE.
         current_role = span.get("role", TextRole.BODY.value)
-        if current_role != TextRole.BODY.value:
+        if current_role not in _GLOBAL_HF_ELIGIBLE_ROLES:
             continue
 
         bbox = span.get("bbox")
@@ -15406,6 +16777,29 @@ def _apply_global_band_signals(
             trace_id, flagged_band_matches, kept_band_matches, len(classified_spans)
         )
 
+# Wrapper for process.py
+def refine_roles_across_document(
+        page_outputs: list[dict],
+        trace_id: str = None
+) -> None:
+    """
+    Document-scope role refinement pass.
+
+    Applies content-flow outlier logic (including bibliography detection)
+    to cache-original spans before Stage 2 windowing.
+    """
+    if not page_outputs:
+        return
+
+    all_spans = []
+    for page in page_outputs:
+        spans = page.get("classified_spans")
+        if spans:
+            all_spans.extend(spans)
+
+    if all_spans:
+        _refine_roles_via_content_flow(all_spans, trace_id=trace_id)
+
 
 def normalize_header_footer_across_document(
         page_outputs: List[Dict],
@@ -15534,6 +16928,168 @@ def normalize_header_footer_across_document(
 # ✦                  ✦                  ✦                  ✦
 # ✦───────────── 6 TTS Preparation  ─────────────✦
 # ✦                  ✦                  ✦                  ✦
+
+def _split_into_prosodic_clauses(
+        text: str,
+        sentence_metadata: Dict = None,
+        trace_id: str = None,
+) -> List[str]:
+    """
+    Split a long, clause-dense sentence into decoder-safe prosodic clauses.
+
+    CONTRACT:
+        - Narration-only transformation (no semantic/span/chunk changes)
+        - Clauses are intended for sequential TTS generation with micro-gaps
+        - Fail-open: returns [text] if splitting is unsafe or unnecessary
+
+    SAFETY GUARDRAILS:
+        - Minimum 4 words per clause (no tiny fragments)
+        - Maximum 4 clauses total (decoder pacing)
+        - Preserves connector words with following clause ("and joints" not "joints")
+
+    Args:
+        text: The sanitized sentence text to analyze.
+        sentence_metadata: Optional RONC metadata (for future authority checks).
+        trace_id: Optional trace ID for logging.
+
+    Returns:
+        List[str] - always a list, even if single element [text].
+        Returns [text] unchanged if:
+            - Text is short/simple enough
+            - No valid split points found
+            - Splitting would create fragments < 5 words
+            - Would produce > 4 clauses
+
+    Example:
+        Input:  "The third or deep pain, arising from viscera, musculature
+                 and joints, is also poorly localized, can be chronic and
+                 is often associated with referred pain."
+
+        Output: ["The third or deep pain",
+                 "arising from viscera, musculature and joints",
+                 "is also poorly localized",
+                 "can be chronic and is often associated with referred pain."]
+    """
+    # -------------------------------------------------------------------------
+    # GUARD: Skip if short/simple
+    # -------------------------------------------------------------------------
+    if not text or not isinstance(text, str):
+        return [text] if text else []
+
+    text = text.strip()
+    # Treat semicolons as comma-equivalent for prosodic boundary detection only
+    text_for_split = text.replace(";", ",")
+    comma_count = text_for_split.count(",")
+
+    # No commas = no clause boundaries to split on
+    if comma_count < _TTS_PROSODIC_SPLIT_COMMA_THRESHOLD:
+        return [text]
+
+    # Short text = no splitting needed
+    if len(text) <= _TTS_PROSODIC_SPLIT_CHAR_THRESHOLD:
+        return [text]
+
+    # -------------------------------------------------------------------------
+    # Try each pattern (strongest to weakest) until one produces valid split
+    # -------------------------------------------------------------------------
+    for pattern in _TTS_PROSODIC_CLAUSE_PATTERNS:
+        splits = pattern.split(text_for_split)
+
+        # Pattern didn't match (need at least 3 parts: before, connector, after)
+        if len(splits) < 3:
+            if trace_id:
+                logger.debug(
+                    "[%s] Clause split rejected: pattern did not match (len(splits)=%d)",
+                    trace_id, len(splits)
+                )
+            continue
+
+        # Reconstruct clauses, keeping connector with following text
+        clauses = []
+        buf = splits[0].rstrip().lstrip()
+
+        i = 1
+        while i < len(splits) - 1:
+            connector = splits[i]
+            remainder = splits[i + 1] if i + 1 < len(splits) else ""
+
+            # Finalize current buffer as a clause
+            if buf:
+                clauses.append(buf.rstrip(',').strip())
+
+            # Start new buffer with connector + remainder
+            buf = f"{connector.strip()} {remainder}".strip()
+            i += 2
+
+        # Don't forget the final buffer
+        if buf:
+            clauses.append(buf.strip())
+
+        # Deduplicate accidental repeats (defensive)
+        clauses = [c for i, c in enumerate(clauses) if i == 0 or c != clauses[i - 1]]
+        # -----------------------------------------------------------------
+        # SAFETY VALIDATION
+        # -----------------------------------------------------------------
+        if len(clauses) <= 1:
+            if trace_id:
+                logger.debug("[%s] Clause split rejected: pattern produced single clause", trace_id)
+            continue  # No real split, try next pattern
+        if len(clauses) > _TTS_PROSODIC_MAX_CLAUSES:
+            if trace_id:
+                logger.debug("[%s] Clause split rejected: %d clauses exceeds max %d",
+                             trace_id, len(clauses), _TTS_PROSODIC_MAX_CLAUSES)
+            continue  # Too many clauses, try next pattern
+
+        # Check minimum word count for each clause
+        all_safe = True
+        for clause in clauses:
+            word_count = len(clause.strip(".,;:!?()[]\"' ").split())
+            if word_count < _TTS_PROSODIC_MIN_CLAUSE_WORDS:
+                all_safe = False
+                break
+
+        if not all_safe:
+            if trace_id:
+                logger.debug("[%s] Clause split rejected: clause below min %d words",
+                             trace_id, _TTS_PROSODIC_MIN_CLAUSE_WORDS)
+            continue  # Fragment too small, try next pattern
+
+        # Guard: never increase total text length materially
+        if sum(len(c) for c in clauses) > len(text) * 1.1:
+            if trace_id:
+                logger.debug(
+                    "[%s] Clause split rejected: length inflation (sum=%d > 1.1*%d)",
+                    trace_id,
+                    sum(len(c) for c in clauses),
+                    len(text)
+                )
+            continue
+
+        # -----------------------------------------------------------------
+        # SUCCESS: Valid split found
+        # -----------------------------------------------------------------
+        # Preserve terminal punctuation on final clause
+        original_terminal = text.rstrip()[-1:] if text.rstrip() else ''
+        if original_terminal in '.!?' and clauses:
+            final = clauses[-1].rstrip('.!?,;:')
+            clauses[-1] = final + original_terminal
+
+        if trace_id:
+            logger.debug(
+                "[%s] Prosodic clause split: pattern=%s, %d clauses, sizes=%s",
+                trace_id,
+                pattern.pattern[:30],
+                len(clauses),
+                [(len(c), c[:40]) for c in clauses]
+            )
+
+        return clauses
+
+    # -------------------------------------------------------------------------
+    # FAIL-OPEN: No pattern produced valid split
+    # -------------------------------------------------------------------------
+    return [text]
+
 
 def _sanitize_for_tts(
         text: str,
@@ -15750,6 +17306,14 @@ def _sanitize_for_tts(
             )
 
     # =========================================================================
+    # STEP 6.3: Number-word decompounding (TEXT_DEHYPHENATE casualty repair)
+    # =========================================================================
+    original = text
+    text = _NUMBER_DECOMPOUND_PATTERN.sub(r"\1-\2", text)
+    if text != original:
+        modifications.append("number_word_decompounded")
+
+    # =========================================================================
     # STEP 7: Role-aware noise removal (post-segmentation safe)
     # =========================================================================
     _NOISE_REMOVAL_ALLOWED_ROLES = frozenset({
@@ -15786,6 +17350,18 @@ def _sanitize_for_tts(
     # STEP 7.5: Final spacing safety cleanup (non-structural)
     # =========================================================================
     text = _WHITESPACE_PATTERN.sub(" ", text)
+
+    # =========================================================================
+    # STEP 7.6: Pre-punctuation whitespace collapse (terminal safety net)
+    #
+    # Steps 5-7 can re-introduce space-before-punctuation artifacts that
+    # Step 0 (_normalize_punctuation_spacing) already cleaned:
+    #   - Step 6: bracket removal "word []." → "word ."
+    #   - Step 7: noise removal "word noise ." → "word ."
+    # This is the final-position application — no subsequent step mutates spacing.
+    # =========================================================================
+    text = _PRE_PUNCT_WHITESPACE_PATTERN.sub(r'\1', text)
+    text = text.lstrip('.,;:!?()[]')
 
     # =========================================================================
     # STEP 7.9: Heading prosody enhancement
@@ -15873,189 +17449,66 @@ def _sanitize_for_tts(
             text[:50]
         )
 
-    # =========================================================================
-    # v1.4.0: RONC-Aware Decoder Runaway Defense
-    # =========================================================================
-    # ARCHITECTURAL CHANGE: Use RONC semantic signals to make intelligent
-    # split decisions instead of blind comma-counting.
-    #
-    # Decision Logic:
-    #   - MULTI-UNIT sentence → Split at unit boundaries (safe)
-    #   - SINGLE WEAK/NONE unit → Split (low semantic cohesion)
-    #   - SINGLE STRONG unit → Preserve (grammatically cohesive prose)
-    #   - NO RONC data → Fall back to conservative heuristic
-    #
-    # Output Format:
-    #   - Use semicolon (;) instead of period for grammatical correctness
-    #   - Preserves lowercase conjunction ("; and" not ". And")
-    # =========================================================================
-    comma_count = text.count(",")
+    # -------------------------------------------------------------------------
+    # v1.5.1: Decoder-Safe Prosodic Clause Segmentation (stable trigger + defaults)
+    # -------------------------------------------------------------------------
+    # IMPORTANT:
+    # - Trigger is computed from ORIGINAL metrics so sanitation cannot suppress it.
+    # - change_tracker always receives explicit defaults to prevent "missing key" ambiguity.
+    # -------------------------------------------------------------------------
 
-    # Decoder-risk trigger:
-    # 1) Very long + comma-dense sentences
-    # 2) Medium-length sentences with clause density (known Tacotron failure mode)
-    if (
-            (comma_count >= 4 and len(text) > 180)
+    original_comma_count = (sentence_metadata.get("_original_comma_count")
+                            if isinstance(sentence_metadata, dict)
+                               and sentence_metadata.get("_original_comma_count") is not None
+                            else None)
+    original_len = (sentence_metadata.get("_original_length")
+                    if isinstance(sentence_metadata, dict)
+                       and sentence_metadata.get("_original_length") is not None
+                    else None)
+
+    # If not pre-populated by caller, compute from the pre-sanitized input `text` argument.
+    # At this point in the function, `text` has been mutated; we preserved original_length earlier.
+    # Use original_length from the start of this function as the authoritative original length.
+    if original_len is None:
+        original_len = original_length
+    if original_comma_count is None:
+        # We do NOT have the pre-sanitized string anymore; best available is count from the
+        # original input at entry-time. Caller may optionally populate _original_comma_count.
+        # Fall back to current count if not provided.
+        original_comma_count = text.count(",")
+
+    # Always set defaults in tracker (prevents silent missing keys downstream)
+    if change_tracker is not None:
+        change_tracker.setdefault("needs_clause_splitting", False)
+        change_tracker.setdefault("prosodic_clauses", None)
+
+    decoder_risk = (
+            (original_comma_count >= 4 and original_len > 180)
             or
-            (comma_count >= 2 and len(text) > 120)
-    ):
+            (original_comma_count >= 2 and original_len > 120)
+    )
 
-        if sentence_metadata:
-            source_units = set(sentence_metadata.get("source_unit_ids") or [])
-            source_spans = sentence_metadata.get("_source_spans") or []
+    if decoder_risk:
+        prosodic_clauses = _split_into_prosodic_clauses(
+            text=text,
+            sentence_metadata=sentence_metadata,
+            trace_id=trace_id,
+        )
 
-            if len(source_units) > 1:
-                should_reinforce_prosody = True
-                prosody_reason = "multi_semantic_unit"
-            elif len(source_units) == 0:
-                should_reinforce_prosody = True
-                prosody_reason = "no_semantic_unit_data"
-            else:
-                has_strong_authority = any(
-                    (s.get("_ronc_contract") or {}).get("authority") == "strong"
-                    for s in source_spans
-                )
-                # Decoder-risk gate already triggered; allow prosody reinforcement
-                # even for strong semantic units (decoder safety > semantic protection)
-                should_reinforce_prosody = True
-                prosody_reason = (
-                    "strong_semantics_decoder_risk" if has_strong_authority else "weak_semantic_authority"
-                )
-        else:
-            should_reinforce_prosody = True
-            prosody_reason = "no_metadata"
-
-        if should_reinforce_prosody:
-            # -----------------------------------------------------------------
-            # Clause-level prosody reinforcement (decoder-safe)
-            #
-            # We do NOT split sentences. We strengthen pauses at linguistically
-            # safe clause boundaries that are known decoder failure points.
-            #
-            # Targets:
-            #   - Relative clauses (which / that / where / who / whom)
-            #   - Contrast clauses (in contrast / however / by contrast)
-            #   - Conjunction chains (and / or)
-            #
-            # Mechanism: Comma → semicolon forces attention reset and pause
-            # insertion without breaking sentence unity.
-            #
-            # Semantics preserved. Only pause strength changes.
-            # -----------------------------------------------------------------
-
-            original_for_log = text
-
-            # 1) Relative clauses (primary decoder failure trigger)
-            text = re.sub(
-                r",\s+(which|that|where|who|whom)\s+",
-                r"; \1 ",
-                text,
-                flags=re.IGNORECASE
-            )
-
-            # 2) Contrastive discourse markers
-            text = re.sub(
-                r",\s+(however|in contrast|by contrast|on the other hand)\s+",
-                r"; \1 ",
-                text,
-                flags=re.IGNORECASE
-            )
-
-            # 2.5) Participial clauses (common decoder drift trigger in academic prose)
-            text = re.sub(
-                r",\s+(arising from|consisting of)\s+",
-                r"; \1 ",
-                text,
-                flags=re.IGNORECASE
-            )
-
-            # 3) Conjunction chains (true discourse boundaries only)
-            text = re.sub(
-                r",\s+(and|or)\s+",
-                lambda m: f"; {m.group(1).lower()} ",
-                text,
-                flags=re.IGNORECASE
-            )
-            # -----------------------------------------------------------------
-            # Phase 2: Attention-window fallback (decoder-aligned)
-            #
-            # If clause patterns did not sufficiently reduce pause distance,
-            # enforce a strong pause when the decoder attention window is exceeded.
-            #
-            # This models decoder behavior directly:
-            # the model fails when too many characters pass without a pause,
-            # regardless of grammatical correctness.
-            # -----------------------------------------------------------------
-
-            MAX_CHARS_WITHOUT_PAUSE = int(os.getenv("TTS_MAX_CHARS_WITHOUT_PAUSE", "120"))
-            chars_since_pause = 0
-            result = []
-
-            for ch in text:
-                result.append(ch)
-
-                if ch in '.;:!?':
-                    chars_since_pause = 0
-                    continue
-
-                if ch == ',' and chars_since_pause >= MAX_CHARS_WITHOUT_PAUSE:
-                    # Avoid duplicate semicolons if already reinforced nearby
-                    if result and result[-1] != ';':
-                        result[-1] = ';'
-                    chars_since_pause = 0
-                    continue
-
-                chars_since_pause += 1
-
-            # -------------------------------
-            # Phase 2: Attention-window fallback
-            # -------------------------------
-            new_text = ''.join(result)
-
-            if new_text != original_for_log:
-                text = new_text
-                modifications.append("decoder_attention_window_pause")
-
-            # -------------------------------
-            # Phase 3: Emergency prosody floor
-            # -------------------------------
-            elif comma_count >= 3:
-                chars_since_pause = 0
-                result = []
-
-                for ch in text:
-                    result.append(ch)
-
-                    if ch in '.;:!?':
-                        chars_since_pause = 0
-                        continue
-
-                    if ch == ',' and chars_since_pause >= 60:
-                        result[-1] = ';'
-                        chars_since_pause = 0
-                        continue
-
-                    chars_since_pause += 1
-
-                emergency_text = ''.join(result)
-
-                if emergency_text != text:
-                    text = emergency_text
-                    modifications.append("decoder_emergency_prosody_floor")
-
-            if text != original_for_log:
-                modifications.append("decoder_prosody_reinforced")
+        if len(prosodic_clauses) > 1:
+            if change_tracker is not None:
+                change_tracker["prosodic_clauses"] = prosodic_clauses
+                change_tracker["needs_clause_splitting"] = True
+            modifications.append("prosodic_clause_segmentation")
 
             if trace_id:
                 logger.debug(
-                    "[%s] Decoder prosody reinforcement: reason=%s, commas=%d, len=%d",
-                    trace_id, prosody_reason, comma_count, len(text)
-                )
-        else:
-            if trace_id:
-                logger.debug(
-                    "[%s] RONC blocked split: reason=%s, preserving integrity",
-                    trace_id, prosody_reason
+                    "[%s] Prosodic clause metadata: %d clauses (orig_len=%d, orig_commas=%d, final_len=%d)",
+                    trace_id,
+                    len(prosodic_clauses),
+                    original_len,
+                    original_comma_count,
+                    len(text),
                 )
 
     return text
@@ -16291,13 +17744,48 @@ def _passes_narration_gate(sp: Dict) -> bool:
         stream = sp.get("layout_stream", "")
 
         if len(text) > 25 and str(stream).startswith("body_col"):
-            is_ronc_protected = True
+            # P11: Only rescue geometric misclassifications (e.g. inside_figure),
+            # not authoritative role assignments such as FOOTNOTE.
+            if sp.get("role") in ("inside_figure", "diagram_label"):
+                is_ronc_protected = True
 
         # Fallback: Explicit RONC must_include protection
         elif protection.get("must_include", False):
             is_ronc_protected = True
 
         if not is_rescued and not is_ronc_protected:
+            return False
+
+    # ─────────────────────────────────────────────────────────────────
+    # (B2) Caption admissibility guard (v10.0)
+    #
+    # Captions are narratable ONLY when associated with a figure or
+    # table (figure_index >= 0). Running headers misclassified as
+    # captions have figure_index == -1 (no figure nearby) and must
+    # be blocked. _associate_captions_to_figures runs in Stage 1,
+    # so figure_index is available on all caption spans by this point.
+    #
+    # This catches "E. Elahi et al." at bbox_y 30.9 — classified as
+    # caption, no figure association, should never narrate.
+    # ─────────────────────────────────────────────────────────────────
+    if sp.get("role") == TextRole.CAPTION.value:
+        figure_idx = sp.get("figure_index")
+        if figure_idx is None or figure_idx < 0:
+            return False
+
+    # ─────────────────────────────────────────────────────────────────
+    # Spans carrying any structural exclusion reason (document_metadata,
+    # publisher_metadata, header_band, footer_band, header_artifact)
+    # must not narrate. flags are set by _soft_classify_spans
+    # and routed through the exclusion candidate mechanism.
+    # catches structural spans even if upstream
+    # flag translation (structural authority gate) did not fully
+    # exclude them. Respects _exclusion_protected (lowercase
+    # continuations, drop caps).
+    # ─────────────────────────────────────────────────────────────────
+    candidate_reasons = set(sp.get("_exclusion_candidate_reasons") or [])
+    if candidate_reasons & _STRUCTURAL_EXCLUSION_REASONS:
+        if not sp.get("_exclusion_protected", False):
             return False
 
     text = (sp.get("cleaned_text") or "").strip()
@@ -16454,6 +17942,16 @@ def _finalize_chunk(
         sentence_cursor = sent["end_time"]
 
     # =========================================================================
+    # V1.7: Reconcile chunk duration with prosodic gap compensation
+    #
+    # Sentence timing may include micro-gaps for clause-aware TTS.
+    # Chunk end_time must match final sentence's end_time for citation
+    # lookup to work correctly across the full audio duration.
+    # =========================================================================
+    actual_chunk_end = sentence_cursor
+    actual_chunk_duration = actual_chunk_end - chunk_start_time
+
+    # =========================================================================
     # BUILD CHUNK RECORD
     # =========================================================================
     pages: set = {
@@ -16469,8 +17967,8 @@ def _finalize_chunk(
         "pages": sorted_pages,
         "text": full_text,
         "start_time": chunk_start_time,
-        "end_time": chunk_start_time + chunk_duration,
-        "duration_seconds": chunk_duration,
+        "end_time": actual_chunk_end,
+        "duration_seconds": actual_chunk_duration,
         "sentences": [
             _prepare_sentence_for_serialization(s)
             for s in viable_sentences
@@ -16542,7 +18040,7 @@ def extract_page(
     # - TEXT_PRESERVE_WHITESPACE: Preserves original spacing for kerning analysis
     # - clip=page.rect: Prevents off-screen artifact contamination
     text_page = page.get_text(
-        "dict",
+        "rawdict",
         flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE,
         clip=page.rect
     )
@@ -16556,7 +18054,12 @@ def extract_page(
     # =========================================================================
     # STEP 3: Detect Page Regions (The "Skeleton")
     # =========================================================================
-    regions = _detect_page_regions(page, raw_spans)
+    regions = _detect_page_regions(
+        page,
+        raw_spans,
+        global_median_font_size=global_median_font_size,
+        trace_id=trace_id,
+    )
 
     # Figures are already tuples from _detect_page_regions
     figure_tuples: List[BboxTuple] = regions.get("figures", [])
@@ -16675,9 +18178,7 @@ def extract_page(
         global_baseline_font_size=global_median_font_size
     )
 
-    # =========================================================================
-    # STEP 10: Associate Captions (The "Links")
-    # =========================================================================
+    # Associate Captions
     _associate_captions_to_figures(
         classified_spans,
         figure_tuples,
@@ -16685,9 +18186,7 @@ def extract_page(
         trace_id=trace_id
     )
 
-    # =========================================================================
-    # STEP 11: Assign span_index (Sacred Index — must be last)
-    # =========================================================================
+    # Assign span_index (must be last)
     for idx, span in enumerate(classified_spans):
         span["span_index"] = idx
 
@@ -16698,7 +18197,6 @@ def extract_page(
     #   - persists into *_raw.json
     #   - survives deep copies and windowing
     #   - allows Option A RONC remapping
-    #
     # Format: P{page_idx}:{local_idx}
     # page_num here is ZERO-BASED and aligned with Stage 2 enumerate(raw_data_list)
 
@@ -16977,6 +18475,72 @@ def _order_spans_by_semantic_chains(spans: List[Dict], trace_id: str = None) -> 
 
     ordered = sorted(spans, key=sort_key)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # FIX (UPDATED): Preserve visual order of ALL INCLUDED spans within
+    # RONC atomic unit visual ranges.
+    #
+    # Atomic units define a contiguous *range* in original visual order, not a
+    # contiguous *block* in output order. Any INCLUDED span whose original
+    # position lies between the first and last member of a unit must not be
+    # leapfrogged, regardless of unit membership.
+    # ─────────────────────────────────────────────────────────────────────────
+    if ordered:
+        orig_pos = original_index
+
+        # Collect visual ranges for units with >=2 members
+        unit_ranges = {}
+        for sp in ordered:
+            uid = sp.get("_ronc_atomic_unit_id")
+            cid = sp.get("_canonical_span_id")
+            if uid is None or cid is None:
+                continue
+            p = orig_pos.get(cid)
+            if p is None:
+                continue
+            lo, hi = unit_ranges.get(uid, (p, p))
+            unit_ranges[uid] = (min(lo, p), max(hi, p))
+
+        visited = set()
+        stabilized = []
+
+        # Helper: INCLUDED spans only (excluded spans never reached this function)
+        def is_included(span):
+            return span.get("_semantic_disposition") != _SEM_DISP_EXCLUDED
+
+        for sp in ordered:
+            cid = sp.get("_canonical_span_id")
+            if cid in visited:
+                continue
+
+            uid = sp.get("_ronc_atomic_unit_id")
+            # If not a multi-member unit, emit as-is
+            if uid is None or uid not in unit_ranges:
+                stabilized.append(sp)
+                visited.add(cid)
+                continue
+
+            lo, hi = unit_ranges[uid]
+
+            # Emit ALL INCLUDED spans whose original positions fall within [lo..hi],
+            # in original visual order, regardless of unit membership.
+            for sp2 in sorted(
+                    (x for x in ordered if x.get("_canonical_span_id") not in visited),
+                    key=lambda x: orig_pos.get(x.get("_canonical_span_id"), float("inf"))
+            ):
+                p2 = orig_pos.get(sp2.get("_canonical_span_id"))
+                if p2 is not None and lo <= p2 <= hi and is_included(sp2):
+                    stabilized.append(sp2)
+                    visited.add(sp2.get("_canonical_span_id"))
+
+        # Append any remaining spans (outside all unit ranges)
+        for sp in ordered:
+            cid = sp.get("_canonical_span_id")
+            if cid not in visited:
+                stabilized.append(sp)
+                visited.add(cid)
+
+        ordered = stabilized
+
     # Log reordering details
     if trace_id:
         reorder_count = 0
@@ -17001,8 +18565,7 @@ def _order_spans_by_semantic_chains(spans: List[Dict], trace_id: str = None) -> 
                 "[%s] Chain Ordering: %d/%d spans reordered",
                 trace_id, reorder_count, len(spans)
             )
-            # Log individual moves at DEBUG level
-            for detail in reorder_details[:10]:  # Cap at 10 to avoid log spam
+            for detail in reorder_details[:10]:
                 logger.debug(
                     "[%s]   %s '%s' moved %d→%d (unit=%s, role=%s)",
                     trace_id,
@@ -17063,13 +18626,19 @@ def compile_tts_ready_content(
             trace_id, len(document_headers), len(document_footers)
         )
 
-    # =========================================================================
-    # STEP 2: Process Each Page — Filter, Segment, Collect
-    # =========================================================================
+    # -------------------------------------------------------------------------
+    # PHASE 3.0 (DOCUMENT-SCOPE): Content-Flow Outlier Refinement
+    #
+    # IMPORTANT:
+    # - This refinement is document-context dependent (font stats, block gaps).
+    # - It MUST run once on the full span set, not per-page.
+    # - It mutates span roles only (no exclusions, no deletions).
+    # -------------------------------------------------------------------------
+
     page_span_cache: Dict[int, List[Dict]] = {}
     page_metadata_cache: Dict[int, Dict] = {}
 
-    # P6 FIX: Collect processed window spans for semantic artifact
+    # Collect processed window spans for semantic artifact
     # These contain P6 same-line promotions that don't exist in page_span_cache originals
     processed_spans_collector: Dict[str, Dict] = {}
 
@@ -17124,7 +18693,6 @@ def compile_tts_ready_content(
         # PHASE 3.0: Content-Flow Outlier Refinement
         # (legacy mutates roles; in Schema v2.0 we can later replace with signals)
         # =====================================================================
-        _refine_roles_via_content_flow(spans_for_processing, trace_id=trace_id)
 
         bbox_invalid_spans = [s for s in spans_for_processing if not s.get("bbox_is_valid", True)]
         page_data["bbox_invalid_spans"] = bbox_invalid_spans
@@ -17135,9 +18703,16 @@ def compile_tts_ready_content(
             continue
         # Assigned ONCE per page, BEFORE any windowing or semantic mutation
         for local_idx, sp in enumerate(spans_for_text):
-            # Canonical ID MUST already exist from Stage 1
+            # Canonical ID MUST already exist from Stage 1 (IMMUTABLE)
             if "_canonical_span_id" not in sp:
-                sp["_canonical_span_id"] = f"P{page_idx}:{local_idx}"
+                if trace_id:
+                    logger.error(
+                        "[%s] Stage 2 contract violation: missing _canonical_span_id (page_idx=%d local_idx=%d)",
+                        trace_id, page_idx, local_idx
+                    )
+                raise RuntimeError(
+                    "Stage 2 contract violation: missing _canonical_span_id (must be assigned in Stage 1)"
+                )
 
         # cache
         page_span_cache[page_idx] = spans_for_text
@@ -17161,273 +18736,6 @@ def compile_tts_ready_content(
             if role in _TTS_NON_VIABLE_ROLES:
                 excluded_by_role.append(span)
 
-            # DO NOT set or reset _tts_excluded here
-            # DO NOT set _tts_exclude_reason here
-
-        # Record role-based exclusion candidates for audit/debug only
-        page_data["excluded_by_role"] = excluded_by_role
-
-        # =====================================================================
-        # PHASE 1.3: Line-Aware Rescue Rail
-        # Rescue excluded spans if they are on a line with viable BODY content.
-        # Prevents inline fragments like "), and pain (" from being lost.
-        # =====================================================================
-        lines = _build_lines_from_spans(spans_for_text, trace_id)
-
-        viable_line_ids = set()
-        for line_id, line in lines.items():
-            if any(
-                    s.get("role") == TextRole.BODY.value and not s.get("_tts_excluded", False)
-                    for s in line["spans"]
-            ):
-                viable_line_ids.add(line_id)
-
-        rescued_count = 0
-        for span in spans_for_text:
-            if span.get("_tts_excluded", False):
-                if span.get("line_id") in viable_line_ids:
-                    span["_tts_excluded"] = False
-                    span["_tts_rescued"] = True
-                    span["_tts_rescue_reason"] = "line_has_body_content"
-                    rescued_count += 1
-
-                    # ===========================================================================
-                    # PHASE 1.3 HARDEN: Document-Adaptive Inline Detection + Full Normalization (E3-v8)
-                    # ===========================================================================
-                    span_role = span.get("role", "")
-                    span_layout = span.get("layout_stream", "")
-
-                    is_margin_classified = (
-                            span_role == TextRole.SIDEBAR.value or
-                            (isinstance(span_layout, str) and span_layout.startswith("margin"))
-                    )
-
-                    # IMPORTANT: define unconditionally
-                    is_traditional_inline = False
-                    is_adaptive_inline = False
-                    is_ratio_fallback_inline = False
-                    detection_method = None
-
-                    if is_margin_classified:
-                        # Signal 1: traditional
-                        is_traditional_inline = span.get("span_index_in_line", 0) > 0
-                        if is_traditional_inline:
-                            detection_method = "traditional"
-
-                        # Signal 2/3: adaptive / ratio fallback (dominant stream, column-safe)
-                        if not is_traditional_inline:
-                            line_id = span.get("line_id")
-                            line = lines.get(line_id) if isinstance(lines, dict) else None
-
-                            if line and line.get("spans"):
-                                body_spans_by_stream = {}
-                                for s in line["spans"]:
-                                    if (
-                                            s is not span and
-                                            s.get("role") == TextRole.BODY.value and
-                                            not s.get("_tts_excluded", False)
-                                    ):
-                                        ls = s.get("layout_stream", "")
-                                        if isinstance(ls, str) and ls.startswith("body_col"):
-                                            body_spans_by_stream.setdefault(ls, []).append(s)
-
-                                if body_spans_by_stream:
-                                    dominant_stream = sorted(
-                                        body_spans_by_stream.keys(),
-                                        key=lambda k: (-len(body_spans_by_stream[k]),
-                                                       _extract_column_number(k))
-                                    )[0]
-
-                                    body_spans = body_spans_by_stream[dominant_stream]
-
-                                    span_bbox = span.get("bbox") or [0, 0, 0, 0]
-                                    span_x0, span_x1 = span_bbox[0], span_bbox[2]
-
-                                    xs = []
-                                    for b in body_spans:
-                                        bb = b.get("bbox") or [0, 0, 0, 0]
-                                        xs.extend([bb[0], bb[2]])
-                                    body_x_min, body_x_max = min(xs), max(xs)
-                                    has_x_overlap = (span_x0 < body_x_max and span_x1 > body_x_min)
-
-                                    nearest_dist = float("inf")
-                                    for b in body_spans:
-                                        b_bbox = b.get("bbox") or [0, 0, 0, 0]
-                                        b_x0, b_x1 = b_bbox[0], b_bbox[2]
-                                        if span_x1 <= b_x0:
-                                            dist = b_x0 - span_x1
-                                        elif span_x0 >= b_x1:
-                                            dist = span_x0 - b_x1
-                                        else:
-                                            dist = 0.0
-                                        nearest_dist = min(nearest_dist, dist)
-
-                                    # Adaptive (2+ body peers): median gap * multiplier, BUT CAPPED by page-width ratio
-                                    if len(body_spans) >= 2:
-                                        body_spans_sorted = sorted(
-                                            body_spans,
-                                            key=lambda s: (s.get("bbox") or [0, 0, 0, 0])[0]
-                                        )
-                                        gaps = []
-                                        for i in range(len(body_spans_sorted) - 1):
-                                            left = body_spans_sorted[i].get("bbox") or [0, 0, 0, 0]
-                                            right = body_spans_sorted[i + 1].get("bbox") or [0, 0,
-                                                                                             0, 0]
-                                            gap = right[0] - left[2]
-                                            if gap > 0:
-                                                gaps.append(gap)
-
-                                        if gaps:
-                                            gaps_sorted = sorted(gaps)
-                                            median_gap = gaps_sorted[len(gaps_sorted) // 2]
-
-                                            page_width = page_data.get("metadata", {}).get("width",
-                                                                                           _LAYOUT_DEFAULT_PAGE_WIDTH)
-                                            adaptive_threshold = min(
-                                                median_gap * _HARDEN_GAP_TOLERANCE_MULTIPLIER,
-                                                page_width * _HARDEN_MAX_INLINE_WIDTH_RATIO,
-                                            )
-
-                                            if has_x_overlap and nearest_dist <= adaptive_threshold:
-                                                is_adaptive_inline = True
-                                                detection_method = "adaptive"
-
-                                    # Single-peer fallback: ratio-based threshold
-                                    if (not is_adaptive_inline) and len(body_spans) == 1:
-                                        page_width = page_data.get("metadata", {}).get("width",
-                                                                                       _LAYOUT_DEFAULT_PAGE_WIDTH)
-                                        ratio_threshold = page_width * _HARDEN_SINGLE_PEER_WIDTH_RATIO
-
-                                        if has_x_overlap and nearest_dist <= ratio_threshold:
-                                            is_ratio_fallback_inline = True
-                                            detection_method = "ratio_fallback"
-
-                    # --- NORMALIZATION (applied if any inline signal fires) ---
-                    if is_margin_classified and (
-                            is_traditional_inline or is_adaptive_inline or is_ratio_fallback_inline):
-                        line_id = span.get("line_id")
-
-                        body_peer_stream = None
-                        body_peer_column = None
-                        dominant_body_stream = None
-
-                        try:
-                            line = lines.get(line_id) if isinstance(lines, dict) else None
-                            if line and line.get("spans"):
-                                # Step 1: dominant body stream on this line
-                                stream_counts = {}
-                                for s in line["spans"]:
-                                    if (
-                                            s.get("role") == TextRole.BODY.value and
-                                            not s.get("_tts_excluded", False)
-                                    ):
-                                        ls = s.get("layout_stream", "")
-                                        if isinstance(ls, str) and ls.startswith("body_col"):
-                                            stream_counts[ls] = stream_counts.get(ls, 0) + 1
-
-                                if stream_counts:
-                                    max_count = max(stream_counts.values())
-                                    candidates = [k for k, v in stream_counts.items() if
-                                                  v == max_count]
-                                    dominant_body_stream = \
-                                        sorted(candidates, key=_extract_column_number)[0]
-
-                                # Step 2: v7 best-peer selection:
-                                # dominant match > bbox distance > span_index_in_line distance
-                                span_bbox = span.get("bbox") or [0, 0, 0, 0]
-                                span_x0, span_x1 = span_bbox[0], span_bbox[2]
-                                span_sil = span.get("span_index_in_line", 0)
-
-                                best_peer = None
-                                best_peer_matches_dominant = False
-                                best_peer_box_distance = float("inf")
-                                best_peer_sil_distance = float("inf")
-
-                                for peer in line["spans"]:
-                                    if (
-                                            peer is not span and
-                                            peer.get("role") == TextRole.BODY.value and
-                                            not peer.get("_tts_excluded", False)
-                                    ):
-                                        ls = peer.get("layout_stream", "")
-                                        if not (isinstance(ls, str) and ls.startswith("body_col")):
-                                            continue
-                                        if dominant_body_stream and ls != dominant_body_stream:
-                                            continue
-
-                                        peer_matches_dominant = (
-                                                ls == dominant_body_stream) if dominant_body_stream else False
-
-                                        peer_bbox = peer.get("bbox") or [0, 0, 0, 0]
-                                        peer_x0, peer_x1 = peer_bbox[0], peer_bbox[2]
-
-                                        if span_x1 <= peer_x0:
-                                            box_dist = peer_x0 - span_x1
-                                        elif span_x0 >= peer_x1:
-                                            box_dist = span_x0 - peer_x1
-                                        else:
-                                            box_dist = 0.0
-
-                                        peer_sil = peer.get("span_index_in_line", 0)
-                                        sil_dist = abs(peer_sil - span_sil)
-
-                                        is_better = False
-                                        if peer_matches_dominant and not best_peer_matches_dominant:
-                                            is_better = True
-                                        elif peer_matches_dominant == best_peer_matches_dominant:
-                                            if box_dist < best_peer_box_distance:
-                                                is_better = True
-                                            elif box_dist == best_peer_box_distance:
-                                                if sil_dist < best_peer_sil_distance:
-                                                    is_better = True
-
-                                        if is_better:
-                                            best_peer = peer
-                                            best_peer_matches_dominant = peer_matches_dominant
-                                            best_peer_box_distance = box_dist
-                                            best_peer_sil_distance = sil_dist
-
-                                if best_peer:
-                                    body_peer_stream = best_peer.get("layout_stream")
-                                    body_peer_column = best_peer.get("column_index")
-
-                        except Exception:
-                            body_peer_stream = None
-                            body_peer_column = None
-
-                        # Apply full normalization (NO hardcoded column fallback)
-                        if body_peer_stream:
-                            span["role"] = TextRole.BODY.value
-                            span["layout_stream"] = body_peer_stream
-                            span["is_margin_content"] = False
-
-                            if body_peer_column is not None:
-                                span["column_index"] = body_peer_column
-                                span.pop("_tts_promotion_incomplete_reason", None)
-                            else:
-                                span[
-                                    "_tts_promotion_incomplete_reason"] = "peer_column_index_unavailable"
-
-                            span["_tts_promotion_reason"] = "inline_sidebar_promoted_to_body"
-                            span["_tts_promoted_to_body_stream"] = True
-                            span["_tts_inline_detection_method"] = detection_method
-
-        if trace_id and rescued_count:
-            logger.info(
-                "[%s] Phase 1.3: Rescued %d inline spans via line coherence",
-                trace_id, rescued_count
-            )
-
-        # =====================================================================
-        # v1.2.1 CRITICAL: DO NOT filter before caching (lossless cache contract)
-        # Pass 2 semantic window must see ALL spans (including excluded).
-        # =====================================================================
-
-        # Keep a local filtered list ONLY for any immediate Pass-1-only operations
-        # (If Pass 1 does not need the filtered list, you can omit this entirely.)
-        filtered_spans_for_tts = [s for s in spans_for_text if not s.get("_tts_excluded", False)]
-        _ = filtered_spans_for_tts  # intentional snapshot (debug/audit)
-
         # DO NOT overwrite page_span_cache[page_idx] here.
         # page_span_cache[page_idx] was already populated earlier with the lossless list.
         # page_span_cache[page_idx] = spans_for_text  # <-- intentionally NOT done
@@ -17437,6 +18745,7 @@ def compile_tts_ready_content(
             "page_num": page_num,
             "continuity": page_data.get("continuity", {}),
         }
+
     all_sentences: List[Dict] = []
     global_sentence_index = 0
     # ─────────────────────────────────────────────────────────────
@@ -17612,7 +18921,7 @@ def compile_tts_ready_content(
                             sp["role"] = cache_role_by_cid[cid]
                             sp["_continuity_override"] = True
 
-        # P6 FIX: Collect current-page spans with P6 modifications for semantic artifact
+        # Collect current-page spans with P6 modifications for semantic artifact
         # window_spans contains deep copies with P6 same-line promotions applied
         # NOTE: Phase 1.5b role reconciliation is now reflected in these copies
         for sp in window_spans:
@@ -17645,6 +18954,34 @@ def compile_tts_ready_content(
         window_text, span_map, char_to_span = _reconstruct_text_for_segmentation(
             window_spans_for_text, trace_id=trace_id
         )
+
+        # ─────────────────────────────────────────────────────────────────
+        # PRE-SEGMENTATION: Orphaned bracket neutralization
+        # Citation exclusion can leave unmatched [ in the text stream.
+        # pysbd suppresses sentence breaks inside bracket pairs, causing
+        # pathologically long sentences. Neutralize unmatched [ with space
+        # (1:1 replacement preserves char_to_span alignment).
+        # ─────────────────────────────────────────────────────────────────
+        _open_brackets = window_text.count("[")
+        _close_brackets = window_text.count("]")
+        if _open_brackets > _close_brackets:
+            _chars = list(window_text)
+            _stack = []
+            for _i, _ch in enumerate(_chars):
+                if _ch == '[':
+                    _stack.append(_i)
+                elif _ch == ']':
+                    if _stack:
+                        _stack.pop()
+            for _pos in _stack:
+                _chars[_pos] = ' '
+            window_text = ''.join(_chars)
+            if trace_id:
+                logger.debug(
+                    "[%s] Bracket neutralization: %d orphaned [ replaced "
+                    "(open=%d, close=%d)",
+                    trace_id, len(_stack), _open_brackets, _close_brackets
+                )
 
         # Segment on full window text
         window_sentences = _segment_sentences(
@@ -17809,12 +19146,28 @@ def compile_tts_ready_content(
     pending_merge_prefix = ""  # v1.3.2: Accumulator for merge_next fragments
 
     for i, sent in enumerate(all_sentences):
-        tts_text = _sanitize_for_tts(
-            sent.get("text", ""),
-            trace_id=trace_id,
-            sentence_metadata=sent
-        )
         sent_role = sent.get("role", TextRole.BODY.value)
+
+        # ==============================================================
+        # V1.7: Prosodic Clause Metadata Hook (Stage 2 → Stage 3)
+        # ==============================================================
+        # Persist original metrics so _sanitize_for_tts can make stable decoder-risk decisions.
+        raw_sentence_text = sent.get("text", "") or ""
+        sent["_original_length"] = len(raw_sentence_text)
+        sent["_original_comma_count"] = raw_sentence_text.count(",")
+
+        tts_change_tracker = {}
+
+        tts_text = _sanitize_for_tts(
+            raw_sentence_text,
+            role=sent_role,
+            trace_id=trace_id,
+            sentence_metadata=sent,
+            change_tracker=tts_change_tracker,
+        )
+
+        # Persist tracker for sentence finalization
+        sent["_tts_change_tracker"] = tts_change_tracker
 
         # =====================================================================
         # PATCH 8B: Strip trailing punctuation from fragment before merging
@@ -17894,6 +19247,7 @@ def compile_tts_ready_content(
         prev_sentence_text = tts_text
         sent["tts_text"] = tts_text
         sent["global_index"] = global_sentence_index
+        sent["sentence_id"] = f"S{global_sentence_index:05d}"
         global_sentence_index += 1
 
         para_idx = sent.get("paragraph_index")
@@ -17945,29 +19299,180 @@ def compile_tts_ready_content(
     # =========================================================================
     if current_chunk_sentences:
         if current_chunk_char_count >= _CHUNK_MIN_CHARS:
+            # Normal finalization for sufficiently large remainder
             _finalize_chunk(all_chunks, current_chunk_sentences, _AVG_CHARS_PER_SEC, trace_id)
         elif all_chunks:
-            # Merge tiny final chunk
+            # Merge tiny final chunk (must preserve serialized sentence contract)
             prev_chunk = all_chunks[-1]
-            prev_chunk["sentences"].extend(current_chunk_sentences)
 
-            merged_text = " ".join(
-                s.get("tts_text", s.get("text", ""))
-                for s in prev_chunk["sentences"]
-            )
-            prev_chunk["text"] = merged_text
+            # Finalize the remainder sentences into a temporary chunk so sentences are serialized
+            tmp_chunks: List[Dict] = []
+            _finalize_chunk(tmp_chunks, current_chunk_sentences, _AVG_CHARS_PER_SEC, trace_id)
 
-            new_pages = {s.get("page_number") for s in current_chunk_sentences if
+            if tmp_chunks:
+                prev_chunk["sentences"].extend(tmp_chunks[0]["sentences"])
+
+                # Recompute merged chunk text from serialized sentences
+                merged_text = " ".join(
+                    s.get("text", "")
+                    for s in prev_chunk["sentences"]
+                )
+                prev_chunk["text"] = merged_text
+
+                # Recompute pages/page from merged serialized sentences
+                pages = {s.get("page_number") for s in prev_chunk["sentences"] if
                          s.get("page_number") is not None}
-            existing_pages = set(prev_chunk.get("pages", []))
-            prev_chunk["pages"] = sorted(existing_pages | new_pages)
+                sorted_pages = sorted(pages)
+                prev_chunk["pages"] = sorted_pages
+                prev_chunk["page"] = sorted_pages[0] if sorted_pages else prev_chunk.get("page")
 
-            prev_chunk["duration_seconds"] = len(merged_text) / _AVG_CHARS_PER_SEC
-            prev_chunk["end_time"] = prev_chunk["start_time"] + prev_chunk["duration_seconds"]
+                # Recompute timing from last sentence (authoritative after serialization)
+                if prev_chunk["sentences"]:
+                    last = prev_chunk["sentences"][-1]
+                    prev_chunk["end_time"] = last.get("end_time", prev_chunk.get("end_time"))
+                    prev_chunk["duration_seconds"] = float(prev_chunk["end_time"]) - float(
+                        prev_chunk["start_time"])
         else:
+            # No existing chunks to merge into — finalize as standalone
             _finalize_chunk(all_chunks, current_chunk_sentences, _AVG_CHARS_PER_SEC, trace_id)
 
     total_duration = all_chunks[-1]["end_time"] if all_chunks else 0.0
+
+    # =========================================================================
+    # PAGE TURN MARKERS (Sentence-Preserving, Word-Accurate)
+    #
+    # Purpose:
+    #   Derive precise page-turn points for sentences that span multiple pages,
+    #   without introducing word-level highlighting or altering sentence timing.
+    #
+    # Invariants:
+    #   - Sentence-level timing (start_time / end_time) remains authoritative.
+    #   - Sentences are NOT split or mutated.
+    #   - Uses only existing provenance (_source_span_ids → processed_spans_collector).
+    #
+    # Output:
+    #   page_turn_markers[] with interpolated turn_time inside sentence window.
+    # =========================================================================
+
+    page_turn_markers = []
+
+    # Iterate finalized chunks and sentences (post-healing, post-chunking)
+    for chunk in all_chunks:
+        chunk_id = chunk.get("chunk_id")
+        sentences = chunk.get("sentences", []) or []
+
+        for sent in sentences:
+            source_ids = (
+                    sent.get("_source_span_ids")
+                    or sent.get("source_cids")
+                    or []
+            )
+            if not source_ids or not isinstance(source_ids, list):
+                continue
+
+            # Collect spans participating in this sentence with page numbers
+            spans = []
+            for cid in source_ids:
+                sp = processed_spans_collector.get(cid)
+                if not isinstance(sp, dict):
+                    continue
+                page_num = sp.get("page_number")
+                if page_num is None:
+                    continue
+                spans.append(sp)
+
+            # Group spans by page
+            page_to_spans = {}
+            for sp in spans:
+                p = sp.get("page_number")
+                page_to_spans.setdefault(p, []).append(sp)
+
+            # Only interested in cross-page sentences
+            if len(page_to_spans) <= 1:
+                continue
+
+            # Sentence timing authority
+            sent_start = sent.get("start_time")
+            sent_end = sent.get("end_time")
+            sent_text = sent.get("text", "") or ""
+
+            if (
+                    not isinstance(sent_start, (int, float))
+                    or not isinstance(sent_end, (int, float))
+                    or sent_end <= sent_start
+                    or not sent_text
+            ):
+                continue
+
+            sentence_duration = float(sent_end) - float(sent_start)
+            sentence_len = len(sent_text)
+
+            if sentence_len <= 0:
+                continue
+
+            # Order pages as they appear in the sentence (by span order)
+            # NOTE: _source_span_ids order already reflects reconstruction order
+            ordered_pages = []
+            for sp in spans:
+                p = sp.get("page_number")
+                if p not in ordered_pages:
+                    ordered_pages.append(p)
+
+            # For each page boundary inside this sentence (exclude last page)
+            for i in range(len(ordered_pages) - 1):
+                page_current = ordered_pages[i]
+                page_next = ordered_pages[i + 1]
+
+                # Identify spans belonging to the current page, in sentence order
+                page_spans = [sp for sp in spans if sp.get("page_number") == page_current]
+                if not page_spans:
+                    continue
+
+                # Compute total span character length for this sentence (SPAN SPACE)
+                total_span_chars = 0
+                for sp_all in spans:
+                    txt_all = sp_all.get("cleaned_text", "") or ""
+                    total_span_chars += len(txt_all)
+
+                if total_span_chars <= 0:
+                    continue  # defensive: cannot compute ratio
+
+                # Compute character boundary within span space (current page)
+                boundary_chars = 0
+                for sp in page_spans:
+                    txt = sp.get("cleaned_text", "") or ""
+                    boundary_chars += len(txt)
+
+                # Clamp boundary to total span chars
+                boundary_chars = min(max(boundary_chars, 0), total_span_chars)
+
+                # Proportional interpolation inside sentence timing (SPAN SPACE)
+                ratio = boundary_chars / float(total_span_chars)
+                ratio = min(max(ratio, 0.0), 1.0)
+
+                turn_time = sent_start + ratio * sentence_duration
+
+                # ---------------------------------------------------------
+                # DUPLICATE PAGE-TURN GUARD
+                #
+                # Rare edge case: a sentence's spans may revisit a page
+                # (e.g., P2 → P3 → P2 → P3). We must not emit multiple
+                # turn markers for the same (page, sentence) pair.
+                # ---------------------------------------------------------
+                existing_keys = {
+                    (m.get("page"), m.get("sentence_global_index"))
+                    for m in page_turn_markers
+                }
+                marker_key = (page_next, sent.get("global_index"))
+                if marker_key in existing_keys:
+                    continue
+
+                page_turn_markers.append({
+                    "page": page_next,
+                    "chunk_id": chunk_id,
+                    "sentence_global_index": sent.get("global_index"),
+                    "turn_time": round(float(turn_time), 3),
+                })
 
     if trace_id:
         logger.info(
@@ -17997,5 +19502,6 @@ def compile_tts_ready_content(
         "document_headers": document_headers,
         "document_footers": document_footers,
         "chunks": all_chunks,
-        "processed_spans": processed_spans_collector,  # P6 FIX: Contains same-line promotions
+        "processed_spans": processed_spans_collector,
+        "page_turn_markers": page_turn_markers,
     }
