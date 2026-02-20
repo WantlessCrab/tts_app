@@ -1956,12 +1956,24 @@ _TTS_PROSODIC_SPLIT_COMMA_THRESHOLD: int = 1  # Match existing decoder risk trig
 _TTS_PROSODIC_MIN_CLAUSE_WORDS: int = 4  # Safety: no tiny fragments
 _TTS_PROSODIC_MAX_CLAUSES: int = 4  # Safety: cap clause count
 
+_TTS_MONOTONE_SPLIT_CONJUNCTIONS: frozenset = frozenset({
+    'and', 'but', 'or', 'nor', 'yet', 'so',
+    'because', 'since', 'although', 'though',
+    'while', 'whereas', 'unless',
+    'however', 'therefore', 'nevertheless',
+})
+_TTS_PROACTIVE_SPLIT_CHARS: int = 130
+
 # Clause boundary patterns (ordered by prosodic break strength)
 # These patterns split AT the boundary, keeping the connector with the following clause
 _TTS_PROSODIC_CLAUSE_PATTERNS: Tuple[re.Pattern, ...] = (
     # Priority 1: Relative/subordinate clauses (strongest break)
     re.compile(r",\s+(which|that|who|whom|where)\s+", re.IGNORECASE),
-    # Priority 2: Discourse markers
+    # Priority 1.5: Subordinating conjunctions (causal/concessive/conditional)
+    re.compile(
+        r",\s+(because|since|although|unless|whereas|while|if)\s+",
+        re.IGNORECASE
+    ),    # Priority 2: Discourse markers
     re.compile(r",\s+(however|therefore|moreover|nevertheless|in contrast|by contrast)\s+",
                re.IGNORECASE),
     # Priority 3: Participial/state verb phrases (common in academic text)
@@ -9793,6 +9805,47 @@ def _assign_roles(
     caption_chain_length: int = 0
 
     # =========================================================================
+    # A2-CHAIN HEADING DETECTION (Strategy 2)
+    #
+    # Walks a2 continuation chains, joins fragment text, tests against
+    # _HEADING_STRUCTURAL_PREFIX_PATTERNS. Marks chain members directly
+    # on span dicts because _canonical_span_id is not yet assigned
+    # (Step 11.1 runs after Step 9 — CID timing constraint).
+    # Transient _a2_chain_is_heading marker cleaned up after main loop.
+    # =========================================================================
+    _a2_chains: List[List[Dict]] = []
+    _current_chain: List[Dict] = []
+    for _s in spans:
+        if _s.get("a2_continues_from_previous") and _current_chain:
+            _current_chain.append(_s)
+            # Bidirectional guard: verify forward/backward a2 agreement
+            if not _current_chain[-2].get("a2_continues_to_next"):
+                _a2_chains.append(_current_chain[:-1])
+                _current_chain = [_s]
+        else:
+            if _current_chain:
+                _a2_chains.append(_current_chain)
+            _current_chain = [_s]
+    if _current_chain:
+        _a2_chains.append(_current_chain)
+
+    for _chain in _a2_chains:
+        if len(_chain) < 2:
+            continue
+        _chain_sorted = sorted(
+            _chain, key=lambda s: s.get("span_index_in_line", 0)
+        )
+        _joined = " ".join(
+            (s.get("cleaned_text") or s.get("raw_text") or "").strip()
+            for s in _chain_sorted
+        ).strip()
+        if _joined and any(
+                p.match(_joined) for p in _HEADING_STRUCTURAL_PREFIX_PATTERNS
+        ):
+            for _s in _chain:
+                _s["_a2_chain_is_heading"] = True
+
+    # =========================================================================
     # MAIN CLASSIFICATION LOOP
     # =========================================================================
     for span in spans:
@@ -9842,6 +9895,17 @@ def _assign_roles(
         # Priorities 2, 3, and 6)
         # ─────────────────────────────────────────────────────────────
 
+        # A2-chain heading signal (Strategy 2, set by pre-loop scan).
+        # Allows a2 continuation fragments to inherit heading candidacy
+        # from their chain when joined text matches structural patterns.
+        _line_is_heading = span.get("_a2_chain_is_heading", False)
+
+        # Bold font weight (computed here for Priority 2/3 escape guards).
+        # Priority 6 recomputes independently as is_bold within its block.
+        has_bold_weight = any(
+            hint in font_name for hint in _HEADING_FONT_WEIGHT_HINTS
+        )
+
         # Path 2: Structural prefix match (section numbers, keywords, symbols).
         has_structural_prefix = any(
             p.match(span_text) for p in _HEADING_STRUCTURAL_PREFIX_PATTERNS
@@ -9887,15 +9951,22 @@ def _assign_roles(
                     is_heading_candidate = (
                             (font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO
                              or has_structural_prefix
-                             or has_vertical_isolation) and
-                            span_text and (span_text[0].isupper() or has_structural_prefix) and
+                             or has_vertical_isolation
+                             or has_bold_weight
+                             or _line_is_heading) and
+                            span_text and (span_text[
+                                               0].isupper() or has_structural_prefix or _line_is_heading) and
                             span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
                             span.get("span_index_in_line", 0) == 0 and
-                            not span.get("a2_continues_from_previous", False)
+                            (not span.get("a2_continues_from_previous", False) or _line_is_heading)
                     )
 
                     if is_heading_candidate:
                         # Skip inside_figure; let PRIORITY 6 (Heading) handle it
+                        span["_exclusion_protected"] = True
+                        span.setdefault("_exclusion_protection_reasons", []).append(
+                            "assign_roles:heading_escape_from_figure"
+                        )
                         break
 
                     role = TextRole.INSIDE_FIGURE.value
@@ -9927,16 +9998,25 @@ def _assign_roles(
                 # ═══════════════════════════════════════════════════════════════
                 is_heading_candidate = (
                         (font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO
-                         or has_structural_prefix) and
-                        span_text and (span_text[0].isupper() or has_structural_prefix) and
-                        span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
+                         or has_structural_prefix
+                         or has_bold_weight
+                         or _line_is_heading) and
+                        span_text and (span_text[
+                                           0].isupper() or has_structural_prefix or _line_is_heading) and                        span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
                         span.get("span_index_in_line", 0) == 0 and
-                        not span.get("a2_continues_from_previous", False)
+                        (not span.get("a2_continues_from_previous", False) or _line_is_heading)
                 )
 
+                if is_heading_candidate:
+                    span["_exclusion_protected"] = True
+                    span.setdefault("_exclusion_protection_reasons", []).append(
+                        "assign_roles:heading_escape_from_figure_label"
+                    )
+
                 if matches_label or matches_stats:
-                    role = TextRole.FIGURE_LABEL.value
-                    role_origin = "content_pattern"
+                    if not is_heading_candidate:
+                        role = TextRole.FIGURE_LABEL.value
+                        role_origin = "content_pattern"
                 elif is_short and word_count <= _ROLE_FIGURE_LABEL_SHORT_WORD_COUNT:
                     if not is_heading_candidate:  # FIX v6.0b guard
                         role = TextRole.FIGURE_LABEL.value
@@ -10130,8 +10210,24 @@ def _assign_roles(
             # ─────────────────────────────────────────────────────────
             is_structurally_independent = (
                     span.get("span_index_in_line", 0) == 0 and
-                    not span.get("a2_continues_from_previous", False)
+                    (not span.get("a2_continues_from_previous", False) or _line_is_heading)
             )
+
+            # ─────────────────────────────────────────────────────────
+            # PATH 0: A2-chain structural heading inheritance
+            #
+            # If the a2-chain pre-scan identified this span's chain
+            # as matching a structural heading pattern (joined text
+            # like "3.3 Font Size"), promote to heading. Rescues bare
+            # numeric anchors that individually fail is_title_case and
+            # has_structural_prefix but are validated by chain context.
+            # ─────────────────────────────────────────────────────────
+            if (_line_is_heading and is_short and no_terminal_punct
+                    and is_structurally_independent
+                    and any("heading_escape_from_figure" in r
+                            for r in span.get("_exclusion_protection_reasons", []))):
+                role = TextRole.HEADING.value
+                role_origin = "content_pattern:a2_chain_structural"
 
             # ─────────────────────────────────────────────────────────
             # PATH 1: Typographic emphasis (Original + Prong B)
@@ -10372,6 +10468,48 @@ def _assign_roles(
                 "[%s] Role: '%s' -> %s (font=%.1f, baseline=%.1f)",
                 trace_id, span_text[:25], role, font_size, baseline_font_size
             )
+    # =========================================================================
+    # POST-LOOP: Promote orphaned section numbers to heading
+    #
+    # Catches digit-only body spans (e.g., "3.5", "3.6", "1") that chain
+    # forward via a2_continues_to_next to a heading-classified successor
+    # but were missed by the pre-loop A2 chain scan due to unidirectional
+    # A2 link (successor lacks a2_continues_from_previous).
+    #
+    # Runs AFTER main loop so successor roles are finalized.
+    # Guards: digit-only text, forward A2 link, successor=heading, same stream,
+    # and must be start-of-line (prevents inline numeric citations).
+    # =========================================================================
+    for i, span in enumerate(spans):
+        if span.get("role") != TextRole.BODY.value:
+            continue
+
+        text = (span.get("cleaned_text") or "").strip()
+        if not text or not text.replace(".", "").isdigit():
+            continue
+
+        if span.get("span_index_in_line", 0) != 0:
+            continue
+
+        if not span.get("a2_continues_to_next", False):
+            continue
+
+        if i + 1 >= len(spans):
+            continue
+
+        next_sp = spans[i + 1]
+        if next_sp.get("role") != TextRole.HEADING.value:
+            continue
+
+        if span.get("layout_stream") != next_sp.get("layout_stream"):
+            continue
+
+        span["role"] = TextRole.HEADING.value
+        span["_role_origin"] = "content_pattern:a2_chain_structural"
+
+        # Cleanup: remove transient a2-chain heading markers (prevent artifact leakage)
+    for span in spans:
+        span.pop("_a2_chain_is_heading", None)
 
 
 def _apply_continuity_role_resolution(
@@ -13480,11 +13618,37 @@ def _resolve_semantic_continuity(
             ):
                 _set(span, _SEM_DISP_EXCLUDED, ["global_band_match"], 0.95)
             elif {
-                "noise_punctuation",
-                "noise_digit_only",
-                "noise_single_char",
-            } & candidate_reasons:
-                _set(span, _SEM_DISP_EXCLUDED, ["stage1_noise"], 0.9)
+                     "noise_punctuation",
+                     "noise_digit_only",
+                     "noise_single_char",
+                 } & candidate_reasons:
+                # ─────────────────────────────────────────────────────────
+                # PHASE C: Structural section number rescue
+                # Digit-only spans that chain (a2) to a heading-role span
+                # are section numbers (e.g., "3" → "Web Readability").
+                # Rescue instead of excluding as noise.
+                # ─────────────────────────────────────────────────────────
+                _text_val = (span.get("cleaned_text") or "").strip()
+                is_heading_number = False
+                if (
+                        "noise_digit_only" in candidate_reasons
+                        and _text_val.isdigit()
+                        and span.get("a2_continues_to_next", False)
+                        and span.get("span_index_in_line", -1) == 0
+                ):
+                    if i + 1 < len(window_spans):
+                        next_sp = window_spans[i + 1]
+                        if (isinstance(next_sp, dict)
+                                and next_sp.get("role") == "heading"
+                                and next_sp.get("a2_continues_from_previous", False)):
+                            is_heading_number = True
+
+                if is_heading_number:
+                    _set(span, _SEM_DISP_INCLUDED,
+                         ["stage1_noise_override:heading_section_number"], 0.9)
+                    span["_has_semantic_authority"] = True
+                else:
+                    _set(span, _SEM_DISP_EXCLUDED, ["stage1_noise"], 0.9)
 
         # Sidebar/margin hint - check for inline continuation potential
         if span.get("_stage1_nonviable_hint"):
@@ -13760,10 +13924,10 @@ def _resolve_semantic_continuity(
                 # must be preserved for document navigation.
                 # ─────────────────────────────────────────────────────────────────
             elif cur_span.get("role") in ("heading",
-                                          "subheading") and "figure_label" not in candidate_reasons:
+                                              "subheading"):
                 _set(cur_span, _SEM_DISP_INCLUDED, ["heading_protection:structural_content"], 0.95)
 
-                # HARD EXCLUSION: keep figure_label absolute, but allow diagram_label only if not rescued
+            # HARD EXCLUSION: keep figure_label absolute, but allow diagram_label only if not rescued
             elif "figure_label" in candidate_reasons:
                 _set(cur_span, _SEM_DISP_EXCLUDED, ["figure_label:hard_exclude"], 0.95)
 
@@ -13929,7 +14093,7 @@ def _reconstruct_text_for_segmentation(
     for orig_idx, span in sorted_spans:
         # X-RAY DEBUGGER
         cid = span.get("_canonical_span_id")
-        if cid in ("P2:54", "P2:55"):
+        if cid in ("P2:54", "P2:55", "P4:14", "P5:31"):
             # Get the previous span's role to check if the Split Logic should fire
             prev_cid = prev_span_ref.get("_canonical_span_id") if prev_span_ref else "None"
             prev_role = prev_span_ref.get("role") if prev_span_ref else "None"
@@ -14096,17 +14260,6 @@ def _reconstruct_text_for_segmentation(
             if same_atomic_unit:
                 ronc_atomic_welds += 1
 
-        # [PATCH] PRIORITY 0.4: Heading Barrier (Integrated)
-        # Force structural break (\n\n) when crossing heading boundaries.
-        # CRITICAL: Runs BEFORE Priority 0.5 to override atomic unit welding.
-        if prefix is None and prev_span_ref:
-            prev_role = prev_span_ref.get("role", "")
-            # Check BOTH exit (prev is header) and entry (curr is header)
-            if prev_role in ("heading", "title", "subheading") or role in ("heading",
-                                                                           "title",
-                                                                           "subheading"):
-                prefix = "\n\n"
-
         # PRIORITY 0.5: Boundary contract (hyphenated weld)
         # Changed 'elif' to 'if' because of the inserted block above.
         if prefix is None and prev_span_ref:
@@ -14156,8 +14309,22 @@ def _reconstruct_text_for_segmentation(
         if prefix is None:
             prefix = " "
 
+        # FINAL OVERRIDE: Heading Barrier
+        # Must run AFTER all structural prefix logic so it cannot be overridden.
+        if prev_span_ref:
+            prev_role = prev_span_ref.get("role", "")
+            curr_is_heading = role in ("heading", "title", "subheading")
+            prev_is_heading = prev_role in ("heading", "title", "subheading")
+
+            if curr_is_heading != prev_is_heading:
+                if full_text and full_text.rstrip()[-1:] not in ".!?:":
+                    prefix = ".\n\n"
+                else:
+                    prefix = "\n\n"
+
         # GUARDRAIL: prefix must be structural whitespace only
-        if prefix not in ("", " ", "\n", "\n\n"):
+        # NOTE: ".\n\n" is allowed for Phase E heading boundary termination
+        if prefix not in ("", " ", "\n", "\n\n", ".\n\n"):
             prefix = " "
 
         # Add prefix characters to source map (map to previous span or -1)
@@ -14638,6 +14805,15 @@ def _heal_truncated_sentences(
                 next_ronc_units = set(next_sent.get("_ronc_atomic_units") or [])
 
                 # ─────────────────────────────────────────────────────────────
+                # HEADING ISOLATION GUARD
+                # Never merge into a heading/subheading/title sentence.
+                # Headings must remain standalone for TTS pacing.
+                # Mirrors the guard in _stitch_helper_should_merge.
+                # ─────────────────────────────────────────────────────────────
+                if next_sent.get("role", "") in ("heading", "subheading", "title"):
+                    break
+
+                # ─────────────────────────────────────────────────────────────
                 # RONC BARRIER FOR SHORT NON-TERMINAL FRAGMENTS
                 # Short non-terminal sentences must not drive a RONC merge
                 # that skips over an intervening complete sentence.
@@ -14784,6 +14960,17 @@ def _heal_truncated_sentences(
             i += 1
             continue
 
+            # ─────────────────────────────────────────────────────────────────
+            # HEADING ISOLATION: Heading/title sentences bypass legacy healing.
+            # Currently safe by coincidence (heading last-words are not in
+            # _HEALING_CUT_INDICATORS and short-fragment checks reject them),
+            # but made explicit to prevent regression if those sets change.
+            # ─────────────────────────────────────────────────────────────────
+        if curr.get("role", "") in ("heading", "subheading", "title"):
+            healed.append(curr)
+            i += 1
+            continue
+
         # =====================================================================
         # PRIORITY 1 (LEGACY): Only process sentences ending with PERIOD
         # =====================================================================
@@ -14866,6 +15053,10 @@ def _heal_truncated_sentences(
             next_text = next_sent.get("text", "").strip()
             if not next_text:
                 continue
+
+            # HEADING ISOLATION GUARD (defense-in-depth, mirrors RONC path)
+            if next_sent.get("role", "") in ("heading", "subheading", "title"):
+                break
 
             # CONTINUATION SIGNAL: Lowercase start = strong match
             first_char = next_text[0]
@@ -15030,6 +15221,14 @@ def _heal_cross_page_truncations(
 
         text = curr.get("text", "").strip()
 
+        # HEADING ISOLATION: Heading/title sentences are never cross-page
+        # heal candidates. Currently safe by coincidence (heading last-words
+        # fail cut-indicator check and heading text starts uppercase/digit),
+        # but made explicit for regression safety.
+        if curr.get("role", "") in ("heading", "subheading", "title"):
+            healed.append(curr)
+            continue
+
         if not text.endswith('.'):
             healed.append(curr)
             continue
@@ -15067,6 +15266,10 @@ def _heal_cross_page_truncations(
 
             first_char = peek_text[0]
             second_char = peek_text[1] if len(peek_text) > 1 else ""
+
+            # HEADING ISOLATION GUARD (defense-in-depth, mirrors same-page healer)
+            if peek_sent.get("role", "") in ("heading", "subheading", "title"):
+                break
 
             # CONTINUATION SIGNALS (Phase 10, tightened)
             # NOTE: Short sentences (≤3 tokens) starting uppercase are
@@ -17486,31 +17689,49 @@ def _sanitize_for_tts(
             (original_comma_count >= 4 and original_len > 180)
             or
             (original_comma_count >= 2 and original_len > 120)
+            or
+            (original_comma_count >= _TTS_PROSODIC_SPLIT_COMMA_THRESHOLD
+             and original_len > _TTS_PROSODIC_SPLIT_CHAR_THRESHOLD)
+            or
+            (original_comma_count == 0
+             and original_len > _TTS_PROACTIVE_SPLIT_CHARS)  # ← new monolith gate
     )
 
     if decoder_risk:
-        prosodic_clauses = _split_into_prosodic_clauses(
-            text=text,
-            sentence_metadata=sentence_metadata,
-            trace_id=trace_id,
-        )
-
-        if len(prosodic_clauses) > 1:
+        # ────────────────────────────────────────────────────────────
+        # MONOLITH PATH (zero-comma long sentences)
+        # Do NOT call prosodic splitter — flag Stage 3 proactive split.
+        # ────────────────────────────────────────────────────────────
+        if original_comma_count == 0:
             if change_tracker is not None:
-                change_tracker["prosodic_clauses"] = prosodic_clauses
                 change_tracker["needs_clause_splitting"] = True
-            modifications.append("prosodic_clause_segmentation")
-
+            modifications.append("monolith_decoder_split")
             if trace_id:
                 logger.debug(
-                    "[%s] Prosodic clause metadata: %d clauses (orig_len=%d, orig_commas=%d, final_len=%d)",
+                    "[%s] Monolith decoder-risk flagged (orig_len=%d)",
                     trace_id,
-                    len(prosodic_clauses),
                     original_len,
-                    original_comma_count,
-                    len(text),
                 )
-
+        else:
+            prosodic_clauses = _split_into_prosodic_clauses(
+                text=text,
+                sentence_metadata=sentence_metadata,
+                trace_id=trace_id,
+            )
+            if len(prosodic_clauses) > 1:
+                if change_tracker is not None:
+                    change_tracker["prosodic_clauses"] = prosodic_clauses
+                    change_tracker["needs_clause_splitting"] = True
+                modifications.append("prosodic_clause_segmentation")
+                if trace_id:
+                    logger.debug(
+                        "[%s] Prosodic clause metadata: %d clauses (orig_len=%d, orig_commas=%d, final_len=%d)",
+                        trace_id,
+                        len(prosodic_clauses),
+                        original_len,
+                        original_comma_count,
+                        len(text),
+                    )
     return text
 
 
