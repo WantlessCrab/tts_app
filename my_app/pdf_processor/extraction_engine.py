@@ -1078,6 +1078,10 @@ _HEADING_FONT_WEIGHT_HINTS: frozenset[str] = frozenset({
 # Measured as a multiple of estimated line height.
 # 1.5–2.0 typical; tuned conservatively to avoid false positives.
 _HEADING_VERTICAL_ISOLATION_MULTIPLIER: float = 1.75
+# Layout-separation headings (PATH 3) require genuine title-case density.
+# Ratio of uppercase-leading substantive words (>2 chars, alpha-containing)
+# required for multi-word spans. Strict ">" comparison is used.
+_LAYOUT_SEPARATION_CAP_RATIO_MIN: float = 0.50
 
 # Font weight hints that qualify as heading-weight ONLY when combined with
 # a section number pattern match. "medium" weight fonts are used for headings
@@ -1449,6 +1453,10 @@ _STITCH_TERMINAL_PUNCT_PATTERN: re.Pattern[str] = re.compile(
     r"[.!?][\"')\]]*$"
 )
 
+_CITATION_BRACKET_TERM_PUNCT_PATTERN: re.Pattern[str] = re.compile(
+    r'^([\]\)\}])\s*([.!?])$'
+)
+
 # --- Text Normalization (for header/footer comparison) ---
 
 _NORMALIZE_DIGIT_PATTERN: re.Pattern[str] = re.compile(r"\d+")
@@ -1466,6 +1474,10 @@ _TTS_ORDINAL_NTH_PATTERN: re.Pattern[str] = re.compile(r"(\d+)ᵗʰ")
 _TTS_SQUARED_PATTERN: re.Pattern[str] = re.compile(r"(\w+)²")
 _TTS_CUBED_PATTERN: re.Pattern[str] = re.compile(r"(\w+)³")
 _TTS_UNIT_SLASH_PATTERN: re.Pattern[str] = re.compile(r'(\d+(?:\.\d+)?)\s*/\s*([a-zA-Z²³µμ]+\d*)')
+
+_TTS_UNIT_RATE_SLASH_PATTERN: re.Pattern[str] = re.compile(
+    r'(\d+(?:\.\d+)?)\s+([a-zA-Z]{1,8})\s*/\s*([a-zA-Z]{1,10})\b'
+)
 
 # --- List/Item Detection ---
 
@@ -5070,7 +5082,44 @@ def _translate_exclusion_flags(
                 (span.get("cleaned_text") or "")[:40]
             )
 
-    for sp in spans:
+    def _append_rescued_terminal_punct(prev_span: Dict, punct: str) -> bool:
+        """
+        Append rescued sentence-terminal punctuation to a surviving span.
+
+        Called only from the post-loop citation punct transfer sweep.
+        Guards:
+          - prev_span must not be excluded
+          - prev_span must have non-empty cleaned_text
+          - prev_span must not already end with terminal punctuation
+          - prev_span must not end with terminal punct before a closing char
+            (e.g. '."'  '.)' — covers quoted or parenthesised sentence ends)
+        Returns True if punct was appended, False if any guard blocked it.
+        """
+        if not isinstance(prev_span, dict):
+            return False
+        if prev_span.get("_tts_excluded", False):
+            return False
+        prev_txt = (prev_span.get("cleaned_text") or "").rstrip()
+        if not prev_txt:
+            return False
+        # Strip trailing open citation bracket before terminal check and append.
+        # Prose spans that end with "[" carry the citation opener as an artifact —
+        # the bracket belongs to the excluded citation cluster, not to the prose.
+        # Orphaned bracket neutralization would later replace it with a space,
+        # stranding the appended period mid-whitespace ("readability  .").
+        # Stripping here places the period directly on the prose content.
+        prev_txt = prev_txt.rstrip("[({").rstrip()
+        if not prev_txt:
+            return False
+        if prev_txt[-1] in ".!?":
+            return False
+        if len(prev_txt) >= 2 and prev_txt[-2] in ".!?" and prev_txt[-1] in "\"')]}":
+            return False
+        prev_span["cleaned_text"] = prev_txt + punct
+        prev_span["_citation_terminal_punct_appended"] = True
+        return True
+
+    for i, sp in enumerate(spans):
         if not isinstance(sp, dict):
             continue
 
@@ -5096,9 +5145,125 @@ def _translate_exclusion_flags(
         outlier_reasons_set = set(sp.get("_outlier_reasons") or [])
         if (candidate_reasons_set & _STRUCTURAL_EXCLUSION_REASONS
                 or outlier_reasons_set & _STRUCTURAL_EXCLUSION_OUTLIER_REASONS):
+            # Hard veto: document_metadata and publisher_metadata bypass
+            # _exclusion_protected — no legitimate prose-continuation case
+            # exists for these signals. Heading/subheading role exempted to
+            # protect document titles sharing geometry with the author zone.
+            _hard_veto_hit = bool(
+                candidate_reasons_set & {_REASON_DOCUMENT_METADATA, _REASON_PUBLISHER_METADATA}
+            )
+            _is_heading_role = sp.get("role") in ("heading", "subheading")
+            if _hard_veto_hit and not _is_heading_role:
+                _exclude(sp, "structural_exclusion")
+                continue
             if not sp.get("_exclusion_protected", False):
                 _exclude(sp, "structural_exclusion")
                 continue
+
+        # ════════════════════════════════════════════════════════════
+        # Priority 1.5: Inline Citation Component Exclusion
+        # ════════════════════════════════════════════════════════════
+        # MUST RUN BEFORE Priority 1.
+        #
+        # Proof from test data:
+        #   P0:39 ("1") and P0:41 ("3") carried _semantic_disposition=
+        #   interruption + RONC must_include=True (anchor:P0:44). The
+        #   Priority 1 RONC rescue path fired its `continue` before the
+        #   original Priority 1.5 could evaluate them, causing "[1 - 3]"
+        #   to survive into Stage 3 text.
+        #
+        # Excludes:
+        #   - numeric spans inside bracket clusters ([N], [N–M], [N, M])
+        #   - separator-only spans adjacent to already-excluded citation
+        #     tokens (e.g. P0:40 "-" caught because P0:39 is already
+        #     _citation_excluded=True — sequential loop order guarantees
+        #     the predecessor has been evaluated before the separator)
+        #   - pure bracket-closer tails ("]", "].", "],") when immediately
+        #     following an excluded citation token
+        #
+        # Guards:
+        #   - _FIG_ABBREVS_CIT: prevents exclusion of digits inside
+        #     [Fig. N] / [Figure N] references. bracket_flanked fires
+        #     via next.startswith("]") for these spans — guard required.
+        #   - _is_heading_section_cit: belt-and-suspenders for rare case
+        #     where a section number digit precedes a heading span.
+        #
+        # After exclusion, assembly produces e.g. "challenges [ ]." which
+        # existing sanitizer logic (_CLEAN_EMPTY_BRACKETS_PATTERN) removes.
+        #
+        # _exclude() used throughout for _tts_excluded + _semantic_disposition
+        # coherence, SYNC_FIELDS propagation, and narration gate compliance.
+        # ════════════════════════════════════════════════════════════
+        _FIG_ABBREVS_CIT = ("Fig.", "Fig", "Figure.", "Figure", "fig.", "fig")
+        _cit_txt = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
+
+        _prev_cit_txt = (
+            (spans[i - 1].get("cleaned_text") or spans[i - 1].get(
+                "raw_text") or "").rstrip()
+            if i > 0 else ""
+        )
+        _next_cit_txt = (
+            (spans[i + 1].get("cleaned_text") or spans[i + 1].get(
+                "raw_text") or "").lstrip()
+            if i + 1 < len(spans) else ""
+        )
+
+        _bracket_flanked = (
+                _prev_cit_txt.endswith("[")
+                or _next_cit_txt.startswith("]")
+        )
+
+        _is_citation_number = (
+                bool(_cit_txt)
+                and len(_cit_txt) <= 16
+                and not any(c.isalpha() for c in _cit_txt)
+                and any(c.isdigit() for c in _cit_txt)
+        )
+        _is_separator_only = (
+                bool(_cit_txt)
+                and not any(c.isalpha() for c in _cit_txt)
+                and not any(c.isdigit() for c in _cit_txt)
+                and any(c in "-,\u2013\u2014" for c in _cit_txt)
+        )
+
+        if _bracket_flanked and _is_citation_number:
+            _is_fig_ref_cit = any(
+                _prev_cit_txt.endswith(abbr) for abbr in _FIG_ABBREVS_CIT
+            )
+            _is_heading_section_cit = (
+                    sp.get("span_index_in_line", -1) == 0
+                    and sp.get("a2_continues_to_next", False)
+                    and i + 1 < len(spans)
+                    and isinstance(spans[i + 1], dict)
+                    and spans[i + 1].get("role") == "heading"
+                    and spans[i + 1].get("a2_continues_from_previous", False)
+            )
+            if not _is_fig_ref_cit and not _is_heading_section_cit:
+                sp["_citation_excluded"] = True
+                _exclude(sp, "inline_citation_component")
+                continue
+
+        elif _is_separator_only:
+            _prev_is_cit = (i > 0 and spans[i - 1].get("_citation_excluded", False))
+            # _next_is_cit intentionally not checked: forward sequential processing
+            if _prev_is_cit or _next_is_cit or _bracket_flanked:
+                sp["_citation_excluded"] = True
+                _exclude(sp, "inline_citation_component")
+                continue
+
+        _is_bracket_closer_cit = (
+                _cit_txt.startswith("]")
+                and len(_cit_txt) <= 3
+                and not any(c.isalnum() for c in _cit_txt)
+        )
+        if (
+                _is_bracket_closer_cit
+                and i > 0
+                and spans[i - 1].get("_citation_excluded", False)
+        ):
+            sp["_citation_excluded"] = True
+            _exclude(sp, "inline_citation_component")
+            continue
 
         # ------------------------------------------------------------
         # Priority 1: Semantic interruption (treat as excluded for TTS)
@@ -5157,8 +5322,6 @@ def _translate_exclusion_flags(
         signals = sp.get("_signals") or {}
         if (signals.get("diagram_label") or {}).get("is_label", False):
             # P5 FIX: Never exclude headings/subheadings as diagram_label
-            # Short headings with technical terms trigger the detector,
-            # but section structure must be preserved for TTS flow.
             if sp.get("role") in ("heading", "subheading"):
                 sp["_tts_excluded"] = False
                 sp["_tts_exclude_reason"] = None
@@ -5167,7 +5330,6 @@ def _translate_exclusion_flags(
                 continue
 
             # P8 FIX: Update role from body to diagram_label for correct data model
-            # This enables reconstruction systems to identify diagram labels
             if sp.get("role") == "body":
                 sp["_original_role"] = "body"
                 sp["role"] = TextRole.DIAGRAM_LABEL.value
@@ -5262,6 +5424,28 @@ def _translate_exclusion_flags(
         is_spatial_fig = (sp.get("_spatial_context") or {}).get("inside_figure", False)
 
         if is_role_nv or is_spatial_fig:
+            # ---------------------------------------------------------
+            # STREAM AUTHORITY BYPASS (A1)
+            # Mirrors _is_tts_viable_span GATE 5:
+            # If span is physically in body_col stream with substantial text,
+            # stream authority trumps geometric role classification.
+            # ---------------------------------------------------------
+            _txt = (sp.get("cleaned_text") or "").strip()
+            _stream = str(sp.get("layout_stream") or "")
+            _sa_ec_reasons = set(sp.get("_exclusion_candidate_reasons") or [])
+            if (len(_txt) > 25 and _stream.startswith("body_col")
+                    and not (_sa_ec_reasons & _STRUCTURAL_EXCLUSION_REASONS)):
+                sp["_tts_excluded"] = False
+                sp["_tts_exclude_reason"] = None
+                sp["_tts_include_reason"] = "stream_authority:nonviable_role_bypassed"
+                sp["_tts_rescued"] = True
+                sp["_semantic_disposition"] = _SEM_DISP_INCLUDED
+                existing_reasons = list(sp.get("_semantic_reasons") or [])
+                existing_reasons.append("flag_translated:stream_authority_rescued")
+                sp["_semantic_reasons"] = existing_reasons
+                audit["included"] += 1
+                continue
+
             # Inside-figure rescue opportunity (role-based or spatial-based)
             can_attempt_rescue = (
                     (role == "inside_figure")
@@ -5295,6 +5479,38 @@ def _translate_exclusion_flags(
             continue
 
         if sp.get("_exclusion_candidate", False):
+            txt_ec = (sp.get("cleaned_text") or sp.get("raw_text") or "").strip()
+
+            # ─────────────────────────────────────────────────────────────────
+            # B2/B3 FIX: Inline figure reference digit rescue
+            # A single digit flanked by a figure abbreviation on the left
+            # and sentence punctuation on the right is a prose figure reference
+            # ("shown in Fig. 4. More detail..."), not a label or noise.
+            # Signal is positional and document-agnostic — no role required.
+            # ─────────────────────────────────────────────────────────────────
+            _FIG_ABBREVS = ("Fig.", "Fig", "Figure.", "Figure", "fig.", "fig")
+            if txt_ec.isdigit() and i > 0 and i + 1 < len(spans):
+                prev_txt_fig = (
+                        spans[i - 1].get("cleaned_text") or spans[i - 1].get("raw_text") or ""
+                ).rstrip()
+                next_txt_fig = (
+                        spans[i + 1].get("cleaned_text") or spans[i + 1].get("raw_text") or ""
+                ).lstrip()
+                if (
+                        any(prev_txt_fig.endswith(abbr) for abbr in _FIG_ABBREVS)
+                        and (next_txt_fig.startswith(".") or next_txt_fig.startswith(","))
+                ):
+                    sp["_tts_excluded"] = False
+                    sp["_tts_exclude_reason"] = None
+                    sp["_tts_include_reason"] = "inline_figure_ref:positional_flanking"
+                    sp["_tts_rescued"] = True
+                    sp["_semantic_disposition"] = _SEM_DISP_INCLUDED
+                    existing_reasons = list(sp.get("_semantic_reasons") or [])
+                    existing_reasons.append("flag_translated:inline_figure_ref_rescued")
+                    sp["_semantic_reasons"] = existing_reasons
+                    audit["included"] += 1
+                    continue
+
             if sp.get("_requires_semantic_review", False):
                 _exclude(sp, "exclusion_candidate_unreviewed")
             else:
@@ -5334,6 +5550,68 @@ def _translate_exclusion_flags(
             trace_id, rescue_count
         )
 
+    # =========================================================================
+    # POST-LOOP: Citation Bracket Terminal Punctuation Transfer
+    # =========================================================================
+    # _clean_spans Step 6.5 splits "]." into "]" + _citation_bracket_rescued_punct
+    # before any semantic processing. All exclusion paths have now finalized.
+    # This sweep is path-agnostic: covers Priority 1.5 bracket-closer (6 spans),
+    # geometric visual_overlap exclusion (3 spans), and any future path variants.
+    #
+    # Per span carrying _citation_bracket_rescued_punct:
+    #   Included span:  restore full 2-char token (prevents bare "]" in output)
+    #   Excluded span:  walk back to nearest preceding included span on same page
+    #                   and call _append_rescued_terminal_punct
+    #
+    # Constraints:
+    #   - Never crosses page boundary
+    #   - Breaks after first eligible predecessor (prevents cascade on
+    #     adjacent citation clusters where multiple excluded spans are adjacent)
+    # =========================================================================
+    for j, sp in enumerate(spans):
+        if not isinstance(sp, dict):
+            continue
+        rescued_punct = sp.get("_citation_bracket_rescued_punct")
+        if not rescued_punct:
+            continue
+        if not sp.get("_tts_excluded", False):
+            # Span survived inclusion — restore original token so reconstruction
+            # does not emit a bare "]" into the text stream.
+            current = (sp.get("cleaned_text") or "").rstrip()
+            if not current.endswith(rescued_punct):
+                sp["cleaned_text"] = current + rescued_punct
+            continue
+        # Span is excluded — transfer punct to nearest preceding included span
+        sp_page = sp.get("page_number")
+        for k in range(j - 1, -1, -1):
+            prev = spans[k]
+            if not isinstance(prev, dict):
+                continue
+            if prev.get("page_number") != sp_page:
+                break
+            if prev.get("_tts_excluded", True):
+                continue
+                # Skip spans whose entire content is a citation opener bracket.
+                # After rstrip the helper would receive an empty string and return
+                # False, but the break would still fire, abandoning the walk before
+                # reaching the actual prose span behind the opener (e.g. P5:28 "["
+                # sits between excluded cluster and P5:27 prose). Continue walking.
+            if not (prev.get("cleaned_text") or "").rstrip().rstrip("[({").rstrip():
+                continue
+            transferred = _append_rescued_terminal_punct(prev, rescued_punct)
+            if trace_id:
+                logger.debug(
+                    "[%s] Citation terminal punct %r %s: CID=%s → CID=%s",
+                    trace_id,
+                    rescued_punct,
+                    "transferred" if transferred else "blocked by guard",
+                    sp.get("_canonical_span_id"),
+                    prev.get("_canonical_span_id"),
+                )
+            break
+    # =========================================================================
+    # END: Citation Bracket Terminal Punctuation Transfer
+    # =========================================================================
     return audit
 
 
@@ -8267,6 +8545,30 @@ def _clean_spans(spans: List[Dict], trace_id: str = None) -> None:
         text = _WHITESPACE_PATTERN.sub(" ", text).strip()
 
         # =====================================================================
+        # STEP 6.5: Citation Bracket Terminal Punctuation Separation
+        # =====================================================================
+        # PDF extraction emits "]." as a single span token. The two chars are
+        # structurally distinct:
+        #   "]"  — citation closer (excluded with the citation cluster)
+        #   "."  — sentence terminal (belongs to preceding sentence body)
+        #
+        # Separating here — before role assignment, RONC, semantic continuity,
+        # and flag translation — means the rescue is path-agnostic. All three
+        # exclusion paths that fire on these spans (Priority 1.5 bracket-closer,
+        # geometric visual_overlap, structural authority gate) see only "]" in
+        # cleaned_text. The terminal punct is stored in a metadata field and
+        # transferred to the nearest preceding included span by the post-loop
+        # sweep in _translate_exclusion_flags after all exclusion decisions
+        # are finalized.
+        #
+        # Pattern is anchored (^ and $): only exact 2-char tokens match.
+        # =====================================================================
+        _bracket_term_match = _CITATION_BRACKET_TERM_PUNCT_PATTERN.match(text)
+        if _bracket_term_match:
+            span["_citation_bracket_rescued_punct"] = _bracket_term_match.group(2)
+            text = _bracket_term_match.group(1)
+
+        # =====================================================================
         # STORE RESULT
         # =====================================================================
         if not text and original_text.strip():
@@ -9956,7 +10258,6 @@ def _assign_roles(
                              or _line_is_heading) and
                             span_text and (span_text[
                                                0].isupper() or has_structural_prefix or _line_is_heading) and
-                            span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
                             span.get("span_index_in_line", 0) == 0 and
                             (not span.get("a2_continues_from_previous", False) or _line_is_heading)
                     )
@@ -10002,7 +10303,7 @@ def _assign_roles(
                          or has_bold_weight
                          or _line_is_heading) and
                         span_text and (span_text[
-                                           0].isupper() or has_structural_prefix or _line_is_heading) and                        span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
+                                           0].isupper() or has_structural_prefix or _line_is_heading) and
                         span.get("span_index_in_line", 0) == 0 and
                         (not span.get("a2_continues_from_previous", False) or _line_is_heading)
                 )
@@ -10059,7 +10360,6 @@ def _assign_roles(
                         has_structural_prefix and
                         word_count <= _ROLE_HEADING_MAX_WORDS and
                         char_count <= _ROLE_HEADING_MAX_CHARS and
-                        span_text[-1] not in _ROLE_TERMINAL_PUNCTUATION and
                         span.get("span_index_in_line", 0) == 0 and
                         not span.get("a2_continues_from_previous", False)
                 )
@@ -10134,7 +10434,34 @@ def _assign_roles(
         # =====================================================================
         if role == TextRole.BODY.value:
             if span.get("is_margin_content", False):
-                if char_count > _ROLE_SIDEBAR_MIN_CHARS:
+                # ─────────────────────────────────────────────────────────
+                # GUARD: Heading-evidence override for margin content
+                #
+                # Centered titles and cross-column headings may have left-
+                # edge positions outside the body histogram's dense region,
+                # triggering is_margin_content=True. When convergent
+                # typographic heading evidence exists (large font AND bold
+                # weight AND uppercase start), skip sidebar assignment and
+                # let Priority 6 evaluate as heading.
+                #
+                # Conjunction of all three signals prevents false rescue of
+                # actual margin content (bold footnotes, emphasized running
+                # headers, navigation labels).
+                # ─────────────────────────────────────────────────────────
+                _has_heading_typographic_evidence = (
+                        font_size >= baseline_font_size * _ROLE_HEADING_FONT_RATIO
+                        and has_bold_weight
+                        and span_text and span_text[0].isupper()
+                        and span.get("span_index_in_line", 0) == 0
+                        and not span.get("a2_continues_from_previous", False)
+                )
+                if _has_heading_typographic_evidence:
+                    span["_margin_heading_override"] = True
+                    span["_margin_heading_override_reason"] = (
+                        f"size={font_size:.1f}>={baseline_font_size * _ROLE_HEADING_FONT_RATIO:.1f}"
+                        f"+bold+upper_start"
+                    )
+                elif char_count > _ROLE_SIDEBAR_MIN_CHARS:
                     role = TextRole.SIDEBAR.value
                     role_origin = "geometry"
 
@@ -10222,7 +10549,7 @@ def _assign_roles(
             # numeric anchors that individually fail is_title_case and
             # has_structural_prefix but are validated by chain context.
             # ─────────────────────────────────────────────────────────
-            if (_line_is_heading and is_short and no_terminal_punct
+            if (_line_is_heading and is_short
                     and is_structurally_independent
                     and any("heading_escape_from_figure" in r
                             for r in span.get("_exclusion_protection_reasons", []))):
@@ -10237,7 +10564,10 @@ def _assign_roles(
             # ─────────────────────────────────────────────────────────
             if (is_short or (
                     has_typographic_emphasis and relaxed_length
-            )) and is_title_case and no_terminal_punct:
+            )) and is_title_case and (
+                    no_terminal_punct or (
+                    has_typographic_emphasis and is_structurally_independent
+            )):
                 if has_typographic_emphasis:
                     role = TextRole.HEADING.value
                     role_origin = "content_pattern"
@@ -10258,7 +10588,6 @@ def _assign_roles(
             # ─────────────────────────────────────────────────────────
             if role == TextRole.BODY.value:
                 if (has_structural_prefix and is_short
-                        and no_terminal_punct
                         and is_structurally_independent):
                     role = TextRole.HEADING.value
                     role_origin = "content_pattern:structural_prefix"
@@ -10288,8 +10617,38 @@ def _assign_roles(
             # numbering, policy documents with spacing-only headers.
             # ─────────────────────────────────────────────────────────
             if role == TextRole.BODY.value:
+                # ─────────────────────────────────────────────────────────
+                # PATH 3 title-case tightening: require genuine title case
+                # for multi-word spans. Single-word or all-caps spans pass
+                # with the standard is_title_case check. Multi-word spans
+                # require that a majority (>50%) of substantive words
+                # (>2 chars, containing alpha) start uppercase.
+                #
+                # Rationale: is_title_case checks only span_text[0], which
+                # every English sentence satisfies. After figure runs,
+                # has_vertical_isolation fires on normal body sentences.
+                # True title-case headings ("References", "Related Work",
+                # "Terms and Conditions") pass majority-upper; normal
+                # sentences ("Spretke et al.", "Researchers and WCAG...")
+                # do not.
+                # ─────────────────────────────────────────────────────────
+                _p3_is_genuine_title_case = is_title_case
+                if word_count > 1 and not span_text.isupper():
+                    _substantive = [
+                        w for w in span_text.split()
+                        if len(w) > 2 and any(c.isalpha() for c in w)
+                    ]
+                    if _substantive:
+                        _upper_count = sum(
+                            1 for w in _substantive
+                            if next((c for c in w if c.isalpha()), 'a').isupper()
+                        )
+                        _p3_is_genuine_title_case = (
+                                _upper_count > len(_substantive) * _LAYOUT_SEPARATION_CAP_RATIO_MIN
+                        )
+
                 if (has_vertical_isolation and is_short
-                        and is_title_case and no_terminal_punct
+                        and _p3_is_genuine_title_case and no_terminal_punct
                         and is_structurally_independent):
                     role = TextRole.HEADING.value
                     role_origin = "content_pattern:layout_separation"
@@ -13841,8 +14200,10 @@ def _resolve_semantic_continuity(
                         if not in_chain_dir:
                             continue
                         ws_survives = (
-                                not ws.get("_exclusion_candidate")
-                                or ws.get("_exclusion_protected")
+                                (not ws.get("_exclusion_candidate")
+                                 or ws.get("_exclusion_protected"))
+                                and not (set(ws.get("_exclusion_candidate_reasons") or [])
+                                         & _STRUCTURAL_EXCLUSION_REASONS)
                         )
                         if ws_survives:
                             has_a2_body_anchor = True
@@ -13863,8 +14224,10 @@ def _resolve_semantic_continuity(
                         prev_ws = window_spans[cur_idx_in_window - 1]
                         if (isinstance(prev_ws, dict)
                                 and prev_ws.get("a2_continues_to_next")):
-                            if (not prev_ws.get("_exclusion_candidate")
-                                    or prev_ws.get("_exclusion_protected")):
+                            if ((not prev_ws.get("_exclusion_candidate")
+                                 or prev_ws.get("_exclusion_protected"))
+                                    and not (set(prev_ws.get("_exclusion_candidate_reasons") or [])
+                                             & _STRUCTURAL_EXCLUSION_REASONS)):
                                 has_a2_body_anchor = True
                     if (not has_a2_body_anchor
                             and cur_span.get("a2_continues_to_next")
@@ -13872,8 +14235,10 @@ def _resolve_semantic_continuity(
                         next_ws = window_spans[cur_idx_in_window + 1]
                         if (isinstance(next_ws, dict)
                                 and next_ws.get("a2_continues_from_previous")):
-                            if (not next_ws.get("_exclusion_candidate")
-                                    or next_ws.get("_exclusion_protected")):
+                            if ((not next_ws.get("_exclusion_candidate")
+                                 or next_ws.get("_exclusion_protected"))
+                                    and not (set(next_ws.get("_exclusion_candidate_reasons") or [])
+                                             & _STRUCTURAL_EXCLUSION_REASONS)):
                                 has_a2_body_anchor = True
             rescue_as_body = (
                 is_body_stream and
@@ -14191,9 +14556,17 @@ def _reconstruct_text_for_segmentation(
         # PHASE 2.7 GUARD 1: Non-viable role quarantine
         # Uses effective_role (post-chameleon) to spare rescued inline spans.
         # These roles must not influence reconstruction boundaries or text stream.
+        # A1 FIX: _is_tts_viable_span GATE 1 admits rescued spans unconditionally.
+        # GUARD 1 must mirror that contract. A span that survived admission cannot
+        # be silently discarded here. Promote to BODY for stream shaping only —
+        # the original `role` field is not mutated and remains authoritative for
+        # downstream role injection.
         # =====================================================================
         if effective_role in _TTS_NON_VIABLE_ROLES:
-            continue
+            if span.get("_tts_rescued", False):
+                effective_role = TextRole.BODY.value
+            else:
+                continue
 
         text = (span.get("cleaned_text") or "")
         if not text:
@@ -14253,6 +14626,21 @@ def _reconstruct_text_for_segmentation(
                     c.isalnum() for c in _punct_text):
                 prefix = ""
 
+        # PRIORITY -0.5: Inline citation bracket weld
+        # Prevents space insertion between open bracket and citation digit/closer.
+        # Requires: Gate 1 in _is_tts_viable_span already ensures rescued spans
+        # enter reconstruction. This weld ensures zero-space attachment so that
+        # citations reconstruct as [21] not [ 21 ].
+        if prefix is None and prev_span_ref:
+            prev_text = (prev_span_ref.get("cleaned_text") or "").rstrip()
+            curr_text = (text or "").strip()
+            if prev_text.endswith("[") and (
+                    curr_text.isdigit()
+                    or curr_text.startswith("]")
+                    or curr_text.startswith("].")
+            ):
+                prefix = ""
+
         # PRIORITY 0: A2 override
         if prev_span_ref and prev_span_ref.get("a2_continues_to_next", False):
             prefix = " "
@@ -14300,10 +14688,10 @@ def _reconstruct_text_for_segmentation(
             if same_atomic_unit:
                 ronc_atomic_welds += 1
 
-        # PRIORITY 3.5: RONC tail break
+        # PRIORITY 3.5: RONC tail break (SEMANTIC-ONLY)
         if prefix is None and prev_break_after and not same_atomic_unit:
-            prefix = "\n"
             ronc_boundary_breaks += 1
+            # Do not set prefix here; allow downstream structural logic to decide.
 
         # PRIORITY 4: Default
         if prefix is None:
@@ -15824,7 +16212,11 @@ def _segment_sentences(
         # ==========================================================
         # AUTHORITY PROPAGATION (Phase 6)
         # ==========================================================
-        if any(all_spans[idx].get("_has_semantic_authority") for idx in span_indices):
+        if any(
+                all_spans[idx].get("_has_semantic_authority")
+                or all_spans[idx].get("_tts_rescued", False)
+                for idx in span_indices
+        ):
             sentence_record["_has_semantic_authority"] = True
 
         # ==========================================================
@@ -15884,6 +16276,16 @@ def _prepare_sentence_for_serialization(sentence: Dict) -> Dict:
     # Normalize common scientific units for display only
     display_text = re.sub(r"\bmm2\b", "mm²", display_text)
     display_text = re.sub(r"\bmm3\b", "mm³", display_text)
+
+    # Remove space-before-terminal-punctuation artifacts in display text.
+    # Reconstruction spacing (excluded citation spans, Fig-ref punctuation
+    # spans) leaves a separator space before the final period/punct token.
+    # Uses the same pattern applied in _sanitize_for_tts Step 7.6.
+    # Does NOT call _normalize_punctuation_spacing (pre-segmentation only).
+    display_text = _PRE_PUNCT_WHITESPACE_PATTERN.sub(r'\1', display_text)
+
+    display_text = _CLEAN_EMPTY_BRACKETS_PATTERN.sub('', display_text)
+    display_text = _PRE_PUNCT_WHITESPACE_PATTERN.sub(r'\1', display_text)
 
     output["display_text"] = display_text
 
@@ -17184,8 +17586,27 @@ def _split_into_prosodic_clauses(
     text_for_split = text.replace(";", ",")
     comma_count = text_for_split.count(",")
 
-    # No commas = no clause boundaries to split on
+    # No commas — attempt word-boundary conjunction split before giving up
     if comma_count < _TTS_PROSODIC_SPLIT_COMMA_THRESHOLD:
+        words = text.split()
+        if len(words) >= _TTS_PROSODIC_MIN_CLAUSE_WORDS * 2:
+            mid = len(words) // 2
+            candidates = [
+                i for i, w in enumerate(words)
+                if w.lower().rstrip(".,;:)]}\"'") in _TTS_MONOTONE_SPLIT_CONJUNCTIONS
+                   and _TTS_PROSODIC_MIN_CLAUSE_WORDS <= i <= len(
+                    words) - _TTS_PROSODIC_MIN_CLAUSE_WORDS
+            ]
+            if candidates:
+                best = min(candidates, key=lambda i: abs(i - mid))
+                clause_a = " ".join(words[:best]).rstrip(".,;:)]}\"'")
+                clause_b = " ".join(words[best:])
+                if (len(clause_a.split()) >= _TTS_PROSODIC_MIN_CLAUSE_WORDS
+                        and len(clause_b.split()) >= _TTS_PROSODIC_MIN_CLAUSE_WORDS):
+                    terminal = text.rstrip()[-1:]
+                    if terminal in ".!?" and clause_b.rstrip()[-1:] not in ".!?":
+                        clause_b = clause_b.rstrip() + terminal
+                    return [clause_a, clause_b]
         return [text]
 
     # Short text = no splitting needed
@@ -17420,8 +17841,21 @@ def _sanitize_for_tts(
     # =========================================================================
     # STEP 4: Unit notation expansion (BEFORE blanket substitutions)
     # Converts: 50/mm² → 50 per mm², 10/s → 10 per s
+    # Also converts: "160 ms/letter" → "160 ms per letter" (FIX v6.6)
+    #
+    # ORDER:
+    #   4a — numeric unit-rate pattern (digit + unit/unit): intercepts before
+    #        the blanket digit/unit pattern and before Step 5 slash substitution.
+    #        Example: "160 ms/letter" → "160 ms per letter"
+    #   4b — original numeric/unit pattern (digit/unit):
+    #        Example: "50/mm²" → "50 per mm²"
     # =========================================================================
     original_step35 = text
+
+    # Step 4a: numeric-prefixed unit-rate notation (FIX v6.6)
+    text = _TTS_UNIT_RATE_SLASH_PATTERN.sub(r'\1 \2 per \3', text)
+
+    # Step 4b: original digit/unit pattern
     text = _TTS_UNIT_SLASH_PATTERN.sub(r'\1 per \2', text)
 
     if text != original_step35:
@@ -17448,11 +17882,49 @@ def _sanitize_for_tts(
     # =========================================================================
     original = text
 
+    def _bracket_removal_with_period_rescue(match: re.Match) -> str:
+        """
+        Replace bracket match with empty string, rescuing terminal period if
+        the bracket sits at a sentence boundary introduced by citation exclusion.
+        """
+        start, end = match.start(), match.end()
+        before = text[:start]
+        after = text[end:]
+        before_stripped = before.rstrip()
+        after_stripped = after.lstrip()
+
+        # Check if bracket contains a period (only _PUNCT_ONLY_BRACKETS_PATTERN case)
+        inner = match.group(0)
+        inner_has_period = '.' in inner
+
+        # Guard 1: preceding text ends on a word character (no existing terminal punct)
+        preceding_char = before_stripped[-1] if before_stripped else ''
+        preceding_is_word_end = preceding_char.isalnum() or preceding_char in ')"\''
+
+        # Guard 2: following text starts a new sentence or is end of string
+        following_char = after_stripped[0] if after_stripped else ''
+        following_is_sentence_start = (
+                not after_stripped  # end of string
+                or following_char.isupper()  # new sentence capital
+        )
+
+        if inner_has_period and preceding_is_word_end and following_is_sentence_start:
+            modifications.append("bracket_period_rescued")
+            if trace_id:
+                logger.debug(
+                    "[%s] Step 6: bracket period rescued at boundary: '%s' → '.'",
+                    trace_id, inner
+                )
+            return ". "
+
+        return ""
+
     # Empty brackets: (), [], {}
     text = _CLEAN_EMPTY_BRACKETS_PATTERN.sub("", text)
 
     # Brackets containing only punctuation: (,), [.], etc.
-    text = _PUNCT_ONLY_BRACKETS_PATTERN.sub("", text)
+    # Uses context-aware replacement to rescue terminal periods at sentence boundaries.
+    text = _PUNCT_ONLY_BRACKETS_PATTERN.sub(_bracket_removal_with_period_rescue, text)
 
     if text != original:
         modifications.append("brackets_cleaned")
@@ -17483,19 +17955,35 @@ def _sanitize_for_tts(
     parts = stripped.split()
     removed = []
 
-    # Remove up to 3 leading glyph-noise tokens (covers "F W", "FW", etc.)
+    # Remove up to 3 leading glyph-noise tokens (covers "F W", etc.)
+    # Detection principle: PDF glyph-split noise produces sequences of single
+    # uppercase characters (e.g. "F" "W" from "FROM WIKIBOOKS"). Removal only
+    # triggers when the current token AND the next meaningful token are both
+    # exactly one uppercase alphabetic character — the structural signature of
+    # a glyph chain. Any multi-character token (word, acronym, digit, proper noun)
+    # indicates a legitimate opener and halts removal without any hardcoded lists.
     while parts and len(removed) < 3:
         tok = parts[0]
         core = tok.strip('.,:;!?"\'()[]{}')
 
-        # Preserve known legitimate initialisms
-        if core in ('US', 'UK', 'EU', 'UN', 'AI'):
-            break
+        if len(core) == 1 and core.isalpha() and core.isupper():
+            # Find next meaningful token by skipping punctuation-only tokens
+            next_meaningful = ""
+            for lookahead in parts[1:]:
+                candidate = lookahead.strip('.,:;!?"\'()[]{}')
+                if candidate:
+                    next_meaningful = candidate
+                    break
 
-        if len(core) <= 2 and core.isalpha() and core.isupper():
-            removed.append(tok)
-            parts = parts[1:]
-            continue
+            # Only remove if next meaningful token is also exactly one uppercase
+            # character — confirms a glyph chain, not a legitimate sentence opener
+            if (len(next_meaningful) == 1
+                    and next_meaningful.isalpha()
+                    and next_meaningful.isupper()):
+                removed.append(tok)
+                parts = parts[1:]
+                continue
+
         break
 
     if removed:
@@ -17698,40 +18186,25 @@ def _sanitize_for_tts(
     )
 
     if decoder_risk:
-        # ────────────────────────────────────────────────────────────
-        # MONOLITH PATH (zero-comma long sentences)
-        # Do NOT call prosodic splitter — flag Stage 3 proactive split.
-        # ────────────────────────────────────────────────────────────
-        if original_comma_count == 0:
+        prosodic_clauses = _split_into_prosodic_clauses(
+            text=text,
+            sentence_metadata=sentence_metadata,
+            trace_id=trace_id,
+        )
+        if len(prosodic_clauses) > 1:
             if change_tracker is not None:
+                change_tracker["prosodic_clauses"] = prosodic_clauses
                 change_tracker["needs_clause_splitting"] = True
-            modifications.append("monolith_decoder_split")
+            modifications.append("prosodic_clause_segmentation")
             if trace_id:
                 logger.debug(
-                    "[%s] Monolith decoder-risk flagged (orig_len=%d)",
+                    "[%s] Prosodic clause metadata: %d clauses (orig_len=%d, orig_commas=%d, final_len=%d)",
                     trace_id,
+                    len(prosodic_clauses),
                     original_len,
+                    original_comma_count,
+                    len(text),
                 )
-        else:
-            prosodic_clauses = _split_into_prosodic_clauses(
-                text=text,
-                sentence_metadata=sentence_metadata,
-                trace_id=trace_id,
-            )
-            if len(prosodic_clauses) > 1:
-                if change_tracker is not None:
-                    change_tracker["prosodic_clauses"] = prosodic_clauses
-                    change_tracker["needs_clause_splitting"] = True
-                modifications.append("prosodic_clause_segmentation")
-                if trace_id:
-                    logger.debug(
-                        "[%s] Prosodic clause metadata: %d clauses (orig_len=%d, orig_commas=%d, final_len=%d)",
-                        trace_id,
-                        len(prosodic_clauses),
-                        original_len,
-                        original_comma_count,
-                        len(text),
-                    )
     return text
 
 
@@ -17782,16 +18255,32 @@ def _is_tts_viable_span(span: Dict, trace_id: str = None) -> bool:
     # This preserves structural flows and prevents reconstruction contamination.
     # ─────────────────────────────────────────────────────────────────
     if span.get("_stage1_nonviable_hint", False):
-        return False
+        # Mirror of _passes_narration_gate Gate (E):
+        # Exempt margin headings with explicit Stage 1 override
+        if (span.get("_margin_heading_override", False)
+                and span.get("role") in ("heading", "subheading")):
+            pass  # fall through to margin block
+        # Fallback: semantically-included heading without explicit override
+        elif (span.get("role") in ("heading", "subheading")
+              and span.get("_semantic_disposition") == _SEM_DISP_INCLUDED):
+            pass  # fall through to margin block
+        else:
+            return False
 
     stream = span.get("layout_stream", "")
     if isinstance(stream, str) and stream.startswith("margin"):
-        # FIX v6.5b: Exempt structural punctuation from margin rejection
-        # Punctuation like commas between italicized terms gets margin_right
-        # layout_stream but is essential for sentence structure.
         text = (span.get("cleaned_text") or "").strip()
+        # Existing: structural punctuation exemption
         if len(text) <= 3 and text and not any(c.isalnum() for c in text):
-            pass  # Allow punctuation to continue to later gates
+            pass
+        # Mirror of _passes_narration_gate Gate (E) primary branch
+        elif (span.get("_margin_heading_override", False)
+              and span.get("role") in ("heading", "subheading")):
+            pass
+        # Mirror of _passes_narration_gate Gate (E) fallback branch
+        elif (span.get("role") in ("heading", "subheading")
+              and span.get("_semantic_disposition") == _SEM_DISP_INCLUDED):
+            pass
         else:
             return False
 
@@ -17828,9 +18317,31 @@ def _is_tts_viable_span(span: Dict, trace_id: str = None) -> bool:
         unit_id = span.get("_ronc_atomic_unit_id")
 
         # Check for Semantic Backing (Is it connected to the story?)
+        # Extended: two additional backing signals, both narrowly bounded.
+        # _semantic_explicit: semantic stage made an active positive inclusion
+        #   decision — covers P6:24 (semantic_explicit_include, conf=0.85).
+        # _structural_single_term: single capitalized alphabetic word, not a
+        #   known abbreviation, min 3 chars — covers P0:33 ("Images"). Mirrors
+        #   Rule 5 guard logic exactly. NOTE: _ronc_break_after is NOT used here
+        #   because it defaults True for ALL unlinked spans and would reopen the
+        #   orphan gate.
+        _include_reason = span.get("_tts_include_reason", "")
+        _semantic_explicit = (_include_reason == "semantic_explicit_include")
+        _text_g49 = (span.get("cleaned_text") or "").strip()
+        _stripped_g49 = _text_g49.rstrip(".")
+        _GATE49_ABBREV_DENY = {"Fig", "Sect", "Sec", "Eq", "Ch", "No", "Vol", "Ref"}
+        _structural_single_term = (
+                " " not in _text_g49
+                and len(_stripped_g49) >= 3
+                and _stripped_g49.isalpha()
+                and _stripped_g49[:1].isupper()
+                and _stripped_g49 not in _GATE49_ABBREV_DENY
+        )
         has_backing = (
                 authority in ("strong", "weak") or
-                unit_id is not None
+                unit_id is not None or
+                _semantic_explicit or
+                _structural_single_term
         )
 
         if not has_backing:
@@ -17863,10 +18374,14 @@ def _is_tts_viable_span(span: Dict, trace_id: str = None) -> bool:
         # If span is physically in body_col stream with substantial text,
         # stream authority trumps geometric role classification.
         # Prevents valid body text from being rejected due to figure overlap.
+        # Guard: structural exclusion reasons block this bypass (mirrors
+        # _translate_exclusion_flags A1 and _passes_narration_gate P11).
         text = (span.get("cleaned_text") or "").strip()
         stream = str(span.get("layout_stream") or "")
+        _sv_ec_reasons = set(span.get("_exclusion_candidate_reasons") or [])
 
-        if len(text) > 25 and stream.startswith("body_col"):
+        if (len(text) > 25 and stream.startswith("body_col")
+                and not (_sv_ec_reasons & _STRUCTURAL_EXCLUSION_REASONS)):
             return True  # Stream authority trumps role classification
 
         return False
@@ -17964,7 +18479,9 @@ def _passes_narration_gate(sp: Dict) -> bool:
         text = (sp.get("cleaned_text") or "").strip()
         stream = sp.get("layout_stream", "")
 
-        if len(text) > 25 and str(stream).startswith("body_col"):
+        _ng_ec_reasons = set(sp.get("_exclusion_candidate_reasons") or [])
+        if (len(text) > 25 and str(stream).startswith("body_col")
+                and not (_ng_ec_reasons & _STRUCTURAL_EXCLUSION_REASONS)):
             # P11: Only rescue geometric misclassifications (e.g. inside_figure),
             # not authoritative role assignments such as FOOTNOTE.
             if sp.get("role") in ("inside_figure", "diagram_label"):
@@ -18006,6 +18523,14 @@ def _passes_narration_gate(sp: Dict) -> bool:
     # ─────────────────────────────────────────────────────────────────
     candidate_reasons = set(sp.get("_exclusion_candidate_reasons") or [])
     if candidate_reasons & _STRUCTURAL_EXCLUSION_REASONS:
+        # Hard veto: document/publisher metadata not bypassable by protection
+        # (mirrors structural gate in _translate_exclusion_flags, Intervention 3).
+        # Heading/subheading role exempted to protect document titles.
+        _ng_hard_veto = bool(
+            candidate_reasons & {_REASON_DOCUMENT_METADATA, _REASON_PUBLISHER_METADATA}
+        )
+        if _ng_hard_veto and sp.get("role") not in ("heading", "subheading"):
+            return False
         if not sp.get("_exclusion_protected", False):
             return False
 
@@ -18014,9 +18539,17 @@ def _passes_narration_gate(sp: Dict) -> bool:
         return False
 
     # (C) Short single-word diagram labels
+    # B2/B3 FIX: Rescued spans carry explicit semantic backing from
+    # _translate_exclusion_flags and must not be re-blocked here.
+    # Gate (C) targets unlabeled short tokens with no semantic history.
+    # Revision 4 handles punctuation-only rescued spans with an early
+    # return True; this bypass handles alphanumeric cases (digits)
+    # that reach Gate (C) because Revision 4's non-alphanumeric condition
+    # does not match them. Both are needed: disjoint character classes.
     if " " not in text and len(text) < _TTS_HARD_GATE_SHORT_WORD_MAX_CHARS:
         if sp.get("role") not in _TTS_HARD_GATE_SHORT_WORD_ALLOWED_ROLES:
-            return False
+            if not sp.get("_tts_rescued", False):
+                return False
 
     # (D) Promo / meta content
     text_lower = text.lower()
@@ -18027,17 +18560,44 @@ def _passes_narration_gate(sp: Dict) -> bool:
     # (E) Margin stream belt-and-suspenders
     stream = sp.get("layout_stream", "")
     if isinstance(stream, str) and stream.startswith(_TTS_HARD_GATE_MARGIN_STREAM_PREFIX):
-        return False
+        # ─────────────────────────────────────────────────────────────
+        # Primary: Priority 5 heading-evidence override.
+        # Centered titles fall outside the body-column histogram,
+        # producing geometrically correct margin_right classification.
+        # When the Priority 5 convergent typographic test has already
+        # overridden the sidebar role, respect that rescue — but ONLY
+        # if the span actually received heading/subheading role from
+        # Priority 6/7. This prevents body-role leakage when the
+        # Priority 5 guard fires but Priority 6 doesn't classify
+        # (e.g., terminal punctuation or excessive length).
+        # ─────────────────────────────────────────────────────────────
+        if (sp.get("_margin_heading_override", False)
+                and sp.get("role") in ("heading", "subheading")):
+            pass
+        # ─────────────────────────────────────────────────────────────
+        # Fallback: semantically-included headings without explicit
+        # override flag. Guards against field propagation variance
+        # across pipeline stages and future code paths that may assign
+        # heading to margin spans without traversing Priority 5.
+        # Requires dual independent confirmation: heading role from
+        # _assign_roles + semantic inclusion from _resolve_semantic_
+        # continuity. Running headers fail both (sidebar role +
+        # excluded disposition).
+        # ─────────────────────────────────────────────────────────────
+        elif (sp.get("role") in ("heading", "subheading")
+              and sp.get("_semantic_disposition") == "included"):
+            pass
+        else:
+            return False
 
     return True
-
-
 
 def _finalize_chunk(
         all_chunks: List[Dict],
         sentences: List[Dict],
         avg_chars_sec: float,
-        trace_id: str = None
+        trace_id: str = None,
+        start_time_override: float = None
 ) -> None:
     """
     Finalize a chunk with per-sentence timing calculation.
@@ -18141,7 +18701,11 @@ def _finalize_chunk(
     # TIMING CALCULATION
     # =========================================================================
     chunk_id = len(all_chunks)
-    chunk_start_time = all_chunks[-1]["end_time"] if all_chunks else 0.0
+    chunk_start_time = (
+        start_time_override
+        if start_time_override is not None
+        else (all_chunks[-1]["end_time"] if all_chunks else 0.0)
+    )
     total_chars = len(full_text)
     chunk_duration = total_chars / avg_chars_sec if total_chars > 0 else 0.0
 
@@ -18266,6 +18830,32 @@ def extract_page(
         clip=page.rect
     )
     raw_spans = _flatten_to_raw_spans(text_page, page_num)
+
+    # =========================================================================
+    # OCR FALLBACK — Image-only page: no text layer present
+    # Trigger is span absence, not metric state — correct for mixed PDFs.
+    # =========================================================================
+    if not raw_spans:
+        if trace_id:
+            logger.info(
+                "[%s] No spans on page %d — attempting OCR fallback",
+                trace_id, page_num + 1
+            )
+        try:
+            ocr_tp = page.get_textpage_ocr(dpi=150, full=True)
+            ocr_dict = page.get_text("rawdict", textpage=ocr_tp)
+            raw_spans = _flatten_to_raw_spans(ocr_dict, page_num)
+            if trace_id:
+                logger.info(
+                    "[%s] OCR produced %d spans on page %d",
+                    trace_id, len(raw_spans), page_num + 1
+                )
+        except Exception as ocr_err:
+            if trace_id:
+                logger.warning(
+                    "[%s] OCR failed page %d: %s",
+                    trace_id, page_num + 1, ocr_err
+                )
 
     # =========================================================================
     # STEP 2: Detect Subscripts (baseline-based)
@@ -18559,9 +19149,21 @@ def _semantic_completeness_action(
 
     # -------------------------------------------------------------------------
     # Rule 5: Very short label-like phrases → merge (not skip)
+    # Guard: single capitalized alphabetic word is a legitimate keyword or
+    # list terminal (e.g., "Images." "Abstract." "Results.") — keep as own
+    # sentence. Numeric labels ("3.1."), abbreviations ("et al."), and
+    # multi-word fragments still merge.
+    # Denylist: common academic abbreviations that are single capitalized
+    # words but are label-like, not keyword terminals.
     # -------------------------------------------------------------------------
     if wc <= 3 and text.endswith("."):
-        return "merge_next", "short_label_candidate"
+        stripped = text.rstrip(".")
+        _RULE5_ABBREV_DENY = {"Fig", "Sect", "Sec", "Eq", "Ch", "No", "Vol", "Ref"}
+        if wc == 1 and stripped.isalpha() and stripped[
+            0].isupper() and stripped not in _RULE5_ABBREV_DENY:
+            pass  # legitimate keyword terminal — fall through to "keep"
+        else:
+            return "merge_next", "short_label_candidate"
 
     return "keep", None
 
@@ -19310,6 +19912,7 @@ def compile_tts_ready_content(
                 sp = window_spans_for_text[sp_idx]
                 if (
                         sp.get("_inside_figure_rescued")
+                        or sp.get("_tts_rescued", False)
                         or (
                         sp.get("_semantic_disposition") == _SEM_DISP_INCLUDED
                         and sp.get("_semantic_confidence", 0.0) >= 0.6
@@ -19365,6 +19968,14 @@ def compile_tts_ready_content(
     prev_sentence_text = ""
 
     pending_merge_prefix = ""  # v1.3.2: Accumulator for merge_next fragments
+    pending_merge_source_cids: List[str] = []  # v1.3.2: Provenance carry-forward for merge_next
+
+    def _cid_sort_key(cid):
+        try:
+            p, i = cid.split(":", 1)
+            return (int(p[1:]), int(i))
+        except Exception:
+            return (999, 999)
 
     for i, sent in enumerate(all_sentences):
         sent_role = sent.get("role", TextRole.BODY.value)
@@ -19398,6 +20009,17 @@ def compile_tts_ready_content(
             clean_prefix = pending_merge_prefix.rstrip().rstrip(".!?")
             tts_text = clean_prefix + " " + tts_text.lstrip()
             pending_merge_prefix = ""  # Clear after use
+            if pending_merge_source_cids:
+                merged_cids = (sent.get("source_cids") or []) + pending_merge_source_cids
+                uniq: List[str] = []
+                seen: set = set()
+                for c in merged_cids:
+                    if c not in seen:
+                        uniq.append(c)
+                        seen.add(c)
+                uniq.sort(key=_cid_sort_key)
+                sent["source_cids"] = uniq
+                pending_merge_source_cids = []
 
         # Viability Check logic...
         is_dialogue = False
@@ -19446,6 +20068,7 @@ def compile_tts_ready_content(
                 pending_merge_prefix.rstrip() + " " + tts_text.lstrip()
                 if pending_merge_prefix else tts_text
             )
+            pending_merge_source_cids.extend(sent.get("source_cids") or [])
             skipped_count += 1
             continue
         if action == "skip" and not force_keep and not has_authority:
@@ -19456,6 +20079,7 @@ def compile_tts_ready_content(
                 )
             skipped_count += 1
             pending_merge_prefix = ""  # Don't carry garbage forward
+            pending_merge_source_cids = []  # Don't carry provenance from garbage
             prev_sentence_text = tts_text
             continue
         # Existing viability gate remains authoritative
@@ -19528,7 +20152,13 @@ def compile_tts_ready_content(
 
             # Finalize the remainder sentences into a temporary chunk so sentences are serialized
             tmp_chunks: List[Dict] = []
-            _finalize_chunk(tmp_chunks, current_chunk_sentences, _AVG_CHARS_PER_SEC, trace_id)
+            _finalize_chunk(
+                tmp_chunks,
+                current_chunk_sentences,
+                _AVG_CHARS_PER_SEC,
+                trace_id,
+                start_time_override=(prev_chunk["end_time"] if all_chunks else 0.0)
+            )
 
             if tmp_chunks:
                 prev_chunk["sentences"].extend(tmp_chunks[0]["sentences"])

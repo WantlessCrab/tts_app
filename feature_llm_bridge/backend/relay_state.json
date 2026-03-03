@@ -1,10 +1,8 @@
 {
   "agent_configs": {
     "ChatGPT": {
-      "target_agents": [
-        "Claude"
-      ],
-      "send_next_only": true,
+      "target_agents": [],
+      "send_next_only": false,
       "auto_stream": false,
       "recursive_loop": false,
       "use_wrapper": false,
@@ -12,9 +10,7 @@
       "wrapper_style": "Standard"
     },
     "Claude": {
-      "target_agents": [
-        "ChatGPT"
-      ],
+      "target_agents": [],
       "send_next_only": false,
       "auto_stream": false,
       "recursive_loop": false,
@@ -44,8 +40,8 @@
     "Claude": {
       "agent_id": "Claude",
       "state": "idle",
-      "active_url": "https://claude.ai/chat/14a81306-3409-4e57-8d01-e6a3e1e3b8fd",
-      "tab_id": 0
+      "active_url": "https://claude.ai",
+      "tab_id": 1
     },
     "Gemini": {
       "agent_id": "Gemini",
@@ -56,5 +52,6 @@
   },
   "max_iterations": 10,
   "is_active": true,
+  "operation_mode": "test",
   "assembly_queues": {}
 }

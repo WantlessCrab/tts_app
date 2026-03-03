@@ -2,13 +2,29 @@
   "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
   "target_files": [
     {
-      "file": "/home/wantless/TTS/my_app/pdf_processor/extraction_engine.py",
-      "mode": "methods",
-      "methods": [
-        "_assign_roles",
-        "_resolve_semantic_continuity"
-      ],
-      "comment": "phase 1 cat b methods"
+      "file": "/home/wantless/TTS/feature_llm_bridge/__init__.py",
+      "mode": "file",
+      "comment": "Package root - module structure confirmation"
+    },
+    {
+      "file": "/home/wantless/TTS/feature_llm_bridge/backend/__init__.py",
+      "mode": "file",
+      "comment": "Backend package initialization"
+    },
+    {
+      "file": "/home/wantless/TTS/feature_llm_bridge/backend/models.py",
+      "mode": "file",
+      "comment": "Current Pydantic contracts - domain boundary analysis"
+    },
+    {
+      "file": "/home/wantless/TTS/feature_llm_bridge/backend/router.py",
+      "mode": "file",
+      "comment": "FastAPI route registration and HTTP wiring"
+    },
+    {
+      "file": "/home/wantless/TTS/feature_llm_bridge/backend/service.py",
+      "mode": "file",
+      "comment": "Relay business logic and state ownership"
     }
   ],
   "max_file_size_mb": 10

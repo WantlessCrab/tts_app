@@ -2190,8 +2190,10 @@ def _prepare_synthesis_units(
             monotone_length_risk = (
                     not has_strong_clause_structure and
                     ':' not in unit and
-                    unit_len > _TTS_PROACTIVE_SPLIT_CHARS and
-                    unit_word_count > _TTS_PROACTIVE_SPLIT_WORDS
+                    (
+                            unit_len > _TTS_PROACTIVE_SPLIT_CHARS or
+                            unit_word_count > _TTS_PROACTIVE_SPLIT_WORDS
+                    )
             )
 
             needs_split_attempt = (

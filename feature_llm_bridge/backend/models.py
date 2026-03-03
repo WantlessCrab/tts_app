@@ -44,6 +44,7 @@ class RelaySessionState(BaseModel):
     connected_agents: Dict[str, ClientStatus] = {}
     max_iterations: int = 10
     is_active: bool = True
+    operation_mode: str | None = None
 
     # The "Waiting Room" for Assembly
     # Key: Recipient (Who is waiting?), Value: Dict of parts

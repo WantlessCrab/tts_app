@@ -62,7 +62,6 @@ docker-compose.override.yml
 # =========================================================
 # Large model / data artifacts (CRITICAL for your project)
 # =========================================================
-models/
 checkpoints/
 weights/
 *.ckpt

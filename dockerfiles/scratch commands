@@ -32,13 +32,28 @@ docker restart project-rebuild-gateway
 # TTS TESTING SHORTCUTS
 
 docker compose -f docker-compose.tts.py310.yml down
-docker compose -f docker-compose.pdf.yml down
-
 docker compose -f docker-compose.tts.py310.yml up
+
+docker compose -f docker-compose.pdf.yml down
 docker compose -f docker-compose.pdf.yml up
 
 docker restart project-rebuild-tts-service
 docker restart project-rebuild-pdf-processor
 
+# view live logs from current running container, with adjustable range
+docker logs -f --since=1m project-rebuild-pdf-processor
+
 test-somatosensory
-curl -X POST "http://localhost:8000/api/retry/web_read?force_rebuild=true"
+curl -X POST "http://localhost:8000/api/v1/process/web_article_short.pdf"
+curl -X POST "http://localhost:8000/api/retry/web_article_short?force_rebuild=true"
+cd scripts/
+python3 method_exporter.py
+
+# Full delete old containers, volumes, and runtime caches
+docker compose -f docker-compose.pdf.yml down -v --remove-orphans
+docker compose -f docker-compose.pdf.yml build --no-cache
+docker compose -f docker-compose.pdf.yml up
+
+docker compose -f docker-compose.tts.py310.yml down -v --remove-orphans
+docker compose -f docker-compose.tts.py310.yml build --no-cache
+docker compose -f docker-compose.tts.py310.yml up
