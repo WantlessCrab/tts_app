@@ -14,6 +14,7 @@ Stages:
 from fastapi.responses import FileResponse
 import fitz  # PyMuPDF
 import sys
+import base64
 import json
 from pathlib import Path
 import logging
@@ -96,6 +97,7 @@ app = FastAPI(title="PDF Processing Service")
 client = httpx.AsyncClient(timeout=300.0)
 
 TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8000/api/tts")
+DOCTR_SERVICE_URL = os.getenv("DOCTR_SERVICE_URL", "http://host.docker.internal:8004")
 TTS_MAX_CONCURRENT_REQUESTS = int(os.getenv('TTS_MAX_CONCURRENT_REQUESTS', '10'))
 TTS_SEMAPHORE = asyncio.Semaphore(TTS_MAX_CONCURRENT_REQUESTS)
 MANIFEST_LOCK = asyncio.Lock()
@@ -853,6 +855,83 @@ async def run_selective_pipeline(
 
 
 # ========================================
+# STAGE 1 OCR HELPERS
+# ========================================
+
+def _page_has_text_layer(page_data: dict) -> bool:
+    """
+    Return True if Stage 1 extraction produced any non-empty cleaned text
+    for the page's classified spans.
+    """
+    spans = page_data.get("classified_spans", []) or []
+    return any((sp.get("cleaned_text") or "").strip() for sp in spans)
+
+
+def _extract_doctr_spans_from_response(ocr_payload: dict) -> list:
+    """
+    Normalize docTR /ocr response into a span list.
+    Actual contract: { "spans": [...] }
+    Returns [] if no usable span list found.
+    """
+    if not isinstance(ocr_payload, dict):
+        return []
+    spans = ocr_payload.get("spans")
+    if isinstance(spans, list):
+        return spans
+    return []
+
+
+def _route_page_to_doctr(
+        doc: "fitz.Document",
+        page_num: int,
+        trace_id: str = None
+) -> list:
+    """
+    Render doc[page_num] to a PNG image and send to docTR POST /ocr.
+    Contract: JSON { image_b64, page_width, page_height, page_num }
+    Returns a span list for page_data['classified_spans'], or [] on failure.
+    Fails open — pipeline remains stable if docTR is unavailable.
+    """
+    try:
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        image_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+
+        payload = {
+            "image_b64": base64.b64encode(pix.tobytes("png")).decode("utf-8"),
+            "page_width": float(page.rect.width),
+            "page_height": float(page.rect.height),
+            "page_num": page_num,
+        }
+
+        with httpx.Client(timeout=120.0) as sync_client:
+            resp = sync_client.post(
+                f"{DOCTR_SERVICE_URL}/ocr",
+                json=payload,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+        ocr_spans = _extract_doctr_spans_from_response(result)
+        if ocr_spans:
+            logger.info(
+                f"[{trace_id}] Stage 1 OCR: page {page_num + 1} — "
+                f"{len(ocr_spans)} spans returned"
+            )
+            return ocr_spans
+
+        logger.warning(
+            f"[{trace_id}] Stage 1 OCR: page {page_num + 1} — no usable spans in response"
+        )
+        return []
+
+    except Exception as e:
+        logger.warning(
+            f"[{trace_id}] Stage 1 OCR: page {page_num + 1} failed — {e}"
+        )
+        return []
+
+# ========================================
 # STAGE 1: Extraction (extraction_engine)
 # ========================================
 
@@ -977,6 +1056,14 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
                     global_median_line_height=GLOBAL_MEDIAN_LINE_HEIGHT,
                     global_median_font_size=GLOBAL_MEDIAN_FONT_SIZE
                 )
+                if not _page_has_text_layer(page_data):
+                    logger.info(
+                        f"[{trace_id}] Stage 1: no text layer on page {page_num + 1} "
+                        f"— attempting processor-side OCR"
+                    )
+                    ocr_spans = _route_page_to_doctr(doc, page_num, trace_id)
+                    if ocr_spans:
+                        page_data["classified_spans"] = ocr_spans
                 page_outputs.append(page_data)
 
             # Stage 1.5: Normalize headers/footers across document

@@ -22,12 +22,16 @@ docker compose -f docker-compose.tts.py310.yml up
 docker compose -f docker-compose.fileserver.yml up
 docker compose -f docker-compose.pdf.yml up
 docker compose -f docker-compose.gateway.yml up
+docker compose -f docker-compose.acquire.yml up
+docker compose -f docker-compose.convert.yml up
+docker compose -f docker-compose.doctr.yml up
 
 ### Restart All Containers:
 docker restart project-rebuild-tts-service
 docker restart project-rebuild-fileserver
 docker restart project-rebuild-pdf-processor
 docker restart project-rebuild-gateway
+docker compose -f docker-compose.doctr.yml restart
 
 # TTS TESTING SHORTCUTS
 
@@ -43,17 +47,36 @@ docker restart project-rebuild-pdf-processor
 # view live logs from current running container, with adjustable range
 docker logs -f --since=1m project-rebuild-pdf-processor
 
-test-somatosensory
 curl -X POST "http://localhost:8000/api/v1/process/web_article_short.pdf"
 curl -X POST "http://localhost:8000/api/retry/web_article_short?force_rebuild=true"
 cd scripts/
-python3 method_exporter.py
+python method_exporter.py
 
 # Full delete old containers, volumes, and runtime caches
+docker compose -f docker-compose.tts.py310.yml down -v --remove-orphans
+docker compose -f docker-compose.tts.py310.yml build --no-cache
+docker compose -f docker-compose.tts.py310.yml up
+
 docker compose -f docker-compose.pdf.yml down -v --remove-orphans
 docker compose -f docker-compose.pdf.yml build --no-cache
 docker compose -f docker-compose.pdf.yml up
 
-docker compose -f docker-compose.tts.py310.yml down -v --remove-orphans
-docker compose -f docker-compose.tts.py310.yml build --no-cache
-docker compose -f docker-compose.tts.py310.yml up
+docker compose -f docker-compose.fileserver.yml down -v --remove-orphans
+docker compose -f docker-compose.fileserver.yml build --no-cache
+docker compose -f docker-compose.fileserver.yml up
+
+docker compose -f docker-compose.gateway.yml down -v --remove-orphans
+docker compose -f docker-compose.gateway.yml build --no-cache
+docker compose -f docker-compose.gateway.yml up
+
+docker compose -f docker-compose.doctr.yml down -v --remove-orphans
+docker compose -f docker-compose.doctr.yml build --no-cache
+docker compose -f docker-compose.doctr.yml up
+
+docker compose -f docker-compose.convert.yml down -v --remove-orphans
+docker compose -f docker-compose.convert.yml build --no-cache
+docker compose -f docker-compose.convert.yml up
+
+docker compose -f docker-compose.acquire.yml down -v --remove-orphans
+docker compose -f docker-compose.acquire.yml build --no-cache
+docker compose -f docker-compose.acquire.yml up

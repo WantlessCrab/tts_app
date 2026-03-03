@@ -11,7 +11,7 @@ services:
       - "8000:8000"
     volumes:
       # Mount shared volumes as read-only for this service
-      - ./pdf_input:/workspace/pdf_input:ro
+      - ./pdf_input:/workspace/pdf_input
       - ./outputs:/workspace/outputs:ro
       - ./obsidian_audio:/workspace/obsidian_audio:ro
       - ./pdf_cache:/workspace/pdf_cache:ro
@@ -19,3 +19,5 @@ services:
     # This service needs to know the URL of the PDF processor
     environment:
       - PDF_SERVICE_URL=http://host.docker.internal:8001
+      - ACQUIRE_SERVICE_URL=http://host.docker.internal:8005
+      - CONVERT_SERVICE_URL=http://host.docker.internal:8006

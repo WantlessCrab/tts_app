@@ -3,7 +3,7 @@
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 0 — IMPORTS, CONFIGURATION, CONSTANTS
 # ════════════════════════════════════════════════════════════════════════════════
-from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks
+from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,8 +36,10 @@ OBSIDIAN_DIR = WORKSPACE_DIR / "obsidian_audio"
 AUDIOBOOKS_DIR = OUTPUT_DIR / "audiobooks"
 PDF_CACHE_DIR = WORKSPACE_DIR / "pdf_cache"  # Read-only access to cache directory
 
-# --- PDF Service URL (Update port) ---
+# --- Container Service URLs (Update port) ---
 PDF_SERVICE_URL = os.getenv("PDF_SERVICE_URL", "http://pdf-processor-service:8000")
+ACQUIRE_SERVICE_URL = os.getenv("ACQUIRE_SERVICE_URL", "http://host.docker.internal:8005")
+CONVERT_SERVICE_URL = os.getenv("CONVERT_SERVICE_URL", "http://host.docker.internal:8006")
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -54,7 +56,13 @@ STALE_JOB_THRESHOLD_MINUTES = int(os.getenv('STALE_JOB_THRESHOLD_MINUTES', '30')
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost",
+        "http://localhost:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -564,3 +572,30 @@ async def rebuild_selective(
     except Exception as e:
         logger.error(f"Selective rebuild error: {e}")
         raise HTTPException(status_code=500, detail="Failed to initiate selective rebuild")
+
+# ════════════════════════════════════════════════════════════════════════════════
+
+# SECTION I — Ingest (Gateway Orchestration Entry Point)
+
+# ════════════════════════════════════════════════════════════════════════════════
+@app.post("/api/v1/ingest")
+async def ingest(
+        url: Optional[str] = None,
+        file: Optional[UploadFile] = None,
+        trace_id: Optional[str] = None,
+):
+    """
+    Unified ingestion entry point.
+    Accepts a URL or an uploaded file (PDF, Office, Ebook).
+    Delegates all routing and orchestration to gateway_router.route_ingest().
+    """
+    from gateway_router import route_ingest
+    try:
+        result = await route_ingest(url=url, file=file, supplied_trace_id=trace_id)
+        return result.model_dump()
+    except ValueError as e:
+        logger.error(f"Ingest routing error: {e}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Ingest unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Ingest failed")

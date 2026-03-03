@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir -r requirements.gateway.txt
 # === Stage 4: Copy Application Code ===
 # Copy the server, static JS, and HTML templates
 COPY my_app/audio_server.py .
+COPY my_app/gateway_contracts.py .
+COPY my_app/gateway_clients.py .
+COPY my_app/gateway_router.py .
 COPY my_app/static/ ./static/
 COPY my_app/templates/ ./templates/
 

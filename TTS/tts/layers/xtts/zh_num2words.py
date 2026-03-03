@@ -517,7 +517,7 @@ class MathSymbol(object):
 #     其他符号
 #     """
 #
-#     def __init__(self, sil):
+#     def __init__.py(self, sil):
 #         self.sil = sil
 #
 #     def __iter__(self):

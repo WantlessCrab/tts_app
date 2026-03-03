@@ -170,7 +170,7 @@ class BaseTTSConfig(BaseTrainingConfig):
 
         phoneme_language (str):
             Language code for the phonemizer. You can check the list of supported languages by running
-            `python TTS/tts/utils/text/phonemizers/__init__.py`. Defaults to None.
+            `python TTS/tts/utils/text/phonemizers/__init__.py.py`. Defaults to None.
 
         compute_input_seq_cache (bool):
             enable / disable precomputation of the phoneme sequences. At the expense of some delay at the beginning of
