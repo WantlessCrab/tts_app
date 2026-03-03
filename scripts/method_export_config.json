@@ -1,30 +1,35 @@
 {
   "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
-  "target_files": [
+  "target_files":[
     {
-      "file": "/home/wantless/TTS/feature_llm_bridge/__init__.py",
+      "file": "/home/wantless/TTS/dockerfile.acquire",
       "mode": "file",
-      "comment": "Package root - module structure confirmation"
+      "comment": "Acquire service container build — Playwright, camoufox, browser acquisition"
     },
     {
-      "file": "/home/wantless/TTS/feature_llm_bridge/backend/__init__.py",
+      "file": "/home/wantless/TTS/docker-compose.acquire.yml",
       "mode": "file",
-      "comment": "Backend package initialization"
+      "comment": "Acquire service compose config — port 8005, main-app-network"
     },
     {
-      "file": "/home/wantless/TTS/feature_llm_bridge/backend/models.py",
+      "file": "/home/wantless/TTS/requirements.acquire.txt",
       "mode": "file",
-      "comment": "Current Pydantic contracts - domain boundary analysis"
+      "comment": "Acquire service Python dependencies"
     },
     {
-      "file": "/home/wantless/TTS/feature_llm_bridge/backend/router.py",
+      "file": "/home/wantless/TTS/dockerfile.convert",
       "mode": "file",
-      "comment": "FastAPI route registration and HTTP wiring"
+      "comment": "Convert service container build — LibreOffice, Calibre, WeasyPrint"
     },
     {
-      "file": "/home/wantless/TTS/feature_llm_bridge/backend/service.py",
+      "file": "/home/wantless/TTS/docker-compose.convert.yml",
       "mode": "file",
-      "comment": "Relay business logic and state ownership"
+      "comment": "Convert service compose config — port 8006, main-app-network"
+    },
+    {
+      "file": "/home/wantless/TTS/requirements.convert.txt",
+      "mode": "file",
+      "comment": "Convert service Python dependencies"
     }
   ],
   "max_file_size_mb": 10

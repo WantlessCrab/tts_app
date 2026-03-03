@@ -19,6 +19,11 @@ Principles:
 from __future__ import annotations
 import re
 import os
+from pathlib import Path
+os.environ.setdefault(
+    "TESSDATA_PREFIX",
+    str(Path(__file__).parent)
+)
 import unicodedata
 import logging
 import fitz  # PyMuPDF

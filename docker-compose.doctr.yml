@@ -29,7 +29,7 @@ services:
     container_name: project-rebuild-doctr
     <<: *gpu-service-config
     ports:
-      - "8003:8000"
+      - "8004:8000"  # Access docTR service directly on port 8003
     volumes:
       # Surgical Mounts
       - /usr/lib/wsl/lib/libdxcore.so:/usr/lib/wsl/lib/libdxcore.so:ro
@@ -49,5 +49,6 @@ services:
         TORCH_LIB_PATH=$$(python3 -c 'import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))');
         rm -f \"$$TORCH_LIB_PATH/libhsa-runtime64.so\"*;
         echo \"--- [DOCTR] Patch complete. Bundled libhsa removed.\";
+        python3 -c 'import torch; import doctr; print(f\"ROCm: {torch.__version__}\"); print(\"docTR ready.\")';
         exec uvicorn doctr_service:app --host 0.0.0.0 --port 8000
       "
