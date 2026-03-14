@@ -58,8 +58,8 @@ RUN python3 -m camoufox fetch
 COPY my_app/static/Readability.js ./static/Readability.js
 
 # === Stage 8: Application Code ===
-COPY my_app/acquire_service.py .
+COPY my_app/acquire/ ./acquire/
 
 # === Stage 9: Runtime ===
 EXPOSE 8000
-CMD ["uvicorn", "acquire_service:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "acquire.api:app", "--host", "0.0.0.0", "--port", "8000"]

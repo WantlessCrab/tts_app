@@ -1,0 +1,28 @@
+# docker-compose.convert.yml
+
+services:
+  convert-service:
+    build:
+      context: .
+      dockerfile: dockerfile.convert
+    container_name: project-rebuild-convert
+    restart: unless-stopped
+    ports:
+      - "8006:8000"
+    volumes:
+      - ./my_app:/app
+      - ./pdf_input:/workspace/pdf_input:ro
+      - ./outputs:/workspace/outputs
+      - ./pdf_cache:/workspace/pdf_cache
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SOFFICE_PATH=/usr/bin/soffice
+      - PDF_SERVICE_URL=http://host.docker.internal:8001
+      - DOCTR_SERVICE_URL=http://host.docker.internal:8004
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3

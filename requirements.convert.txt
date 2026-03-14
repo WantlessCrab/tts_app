@@ -1,0 +1,22 @@
+# requirements.convert.txt
+
+# 1. Service framework
+fastapi
+uvicorn[standard]
+
+# 2. HTTP client
+httpx
+
+# 3. DOCX → semantic HTML fallback
+mammoth
+
+# 4. HTML → PDF renderer (Mammoth and EPUB paths)
+weasyprint
+
+# 5. EPUB HTML extraction
+ebooklib
+
+# 6. File type detection
+python-magic
+python-multipart
+PyMuPDF>=1.23.0,<2.0.0

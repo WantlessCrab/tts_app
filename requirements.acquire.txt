@@ -1,0 +1,29 @@
+# requirements.acquire.txt
+
+# 1. Service framework
+fastapi
+uvicorn[standard]
+
+# 2. HTTP client
+httpx
+
+# 3. Browser acquisition
+playwright
+
+# 4. Automation fingerprint mitigation
+playwright-stealth
+
+# 5. Cloudflare Turnstile bypass — Firefox-based
+camoufox[geoip]
+
+# 6. HTML cleanup
+trafilatura
+
+# 7. File type detection
+python-magic
+
+# 8. PDF validation
+PyMuPDF>=1.23.0,<2.0.0
+
+# 9. TLS trust store fallback
+certifi

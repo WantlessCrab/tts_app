@@ -133,3 +133,6 @@ pdf_cache/
 pdf_input/
 tts_models/
 tests/
+
+# testing agentic dev
+browser_dev/

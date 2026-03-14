@@ -1,176 +1,120 @@
 {
   "export_base": "/mnt/c/Users/admin/Documents/ResearchProjectVault/PycharmProProjectVault/Rebuild Roadmap/code_exports",
-  "target_files": [
-    {
-      "file": "/home/wantless/TTS/my_app/audio_server.py",
-      "mode": "file",
-      "comment": "frontend end points"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/acquire_service.py",
-      "mode": "file",
-      "comment": "acquire pre-container-launch logic and api draft - needs separated into server and logic, then logic needs culled"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/convert_service.py",
-      "mode": "file",
-      "comment": "convert pre-container-launch logic and api draft - needs separated into server and logic, then logic needs culled"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/pdf_processor/process.py",
-      "mode": "file",
-      "comment": "actual backend processor logic and processor endpoints - needs separated"
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.acquire.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.acquire",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.acquire.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.convert.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.convert",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.convert.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.doctr.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.doctr",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.doctr.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.gateway.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.gateway",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.gateway.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.pdf.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.pdf_processor",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.pdf_processor.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.tts.py310.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.tts.py310",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.tts.py310.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.fileserver.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.fileserver",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.fileserver.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/docker-compose.relay.yml",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/dockerfile.relay",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/requirements.relay.txt",
-      "mode": "file",
-      "comment": ""
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/pdf_processor/extraction_engine.py",
-      "mode": "file",
-      "comment": "core extraction engine — span extraction, layout classification, sentence segmentation"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/static/Readability.js",
-      "mode": "file",
-      "comment": "Readability DOM extraction library used by Acquire"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/templates/player.html",
-      "mode": "file",
-      "comment": "frontend player UI used by gateway"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/gateway_contracts.py",
-      "mode": "file",
-      "comment": "Pydantic schema definitions for gateway API boundaries (Phase 0 contract-driven design)"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/gateway_clients.py",
-      "mode": "file",
-      "comment": "Outbound HTTP client layer for gateway → acquire/convert/processor service calls with trace_id propagation"
-    },
-    {
-      "file": "/home/wantless/TTS/my_app/gateway_router.py",
-      "mode": "file",
-      "comment": "Gateway orchestration module implementing ingest routing, canonical PDF write, and processor trigger"
-    }
+  "max_file_size_mb": 10,
+  "ignore_dir_names": [
+    "__pycache__",
+    ".git",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    "dist",
+    "build",
+    ".venv",
+    "venv"
   ],
-  "max_file_size_mb": 10
+  "ignore_dirs": [
+    "/home/wantless/TTS/.local",
+    "/home/wantless/TTS/models",
+    "/home/wantless/TTS/pdf_cache",
+    "/home/wantless/TTS/pdf_input",
+    "/home/wantless/TTS/obsidian_audio",
+    "/home/wantless/TTS/tts_models",
+    "/home/wantless/TTS/TTS.egg-info",
+    "/home/wantless/TTS/my_app/static/pdfjs",
+    "/home/wantless/TTS/my_app/static/wavesurfer"
+  ],
+  "ignore_files": [
+    "/home/wantless/TTS/eng.traineddata",
+    "/home/wantless/TTS/Dockerfile.dev",
+    "/home/wantless/TTS/.pylintrc",
+    "/home/wantless/TTS/.cardboardlint.yml",
+    "/home/wantless/TTS/MANIFEST.in"
+  ],
+  "components": {
+    "acquire": [
+      "dir_/home/wantless/TTS/my_app/acquire",
+      "file_/home/wantless/TTS/dockerfile.acquire",
+      "file_/home/wantless/TTS/docker-compose.acquire.yml",
+      "file_/home/wantless/TTS/requirements.acquire.txt"
+    ],
+    "convert": [
+      "dir_/home/wantless/TTS/my_app/convert",
+      "file_/home/wantless/TTS/dockerfile.convert",
+      "file_/home/wantless/TTS/docker-compose.convert.yml",
+      "file_/home/wantless/TTS/requirements.convert.txt"
+    ],
+    "pdf": [
+      "dir_/home/wantless/TTS/my_app/pdf_processor",
+      "file_/home/wantless/TTS/dockerfile.pdf_processor",
+      "file_/home/wantless/TTS/docker-compose.pdf.yml",
+      "file_/home/wantless/TTS/requirements.pdf_processor.txt"
+    ],
+    "gateway": [
+      "file_/home/wantless/TTS/my_app/gateway_router.py",
+      "file_/home/wantless/TTS/my_app/gateway_contracts.py",
+      "file_/home/wantless/TTS/my_app/gateway_clients.py",
+      "file_/home/wantless/TTS/dockerfile.gateway",
+      "file_/home/wantless/TTS/docker-compose.gateway.yml",
+      "file_/home/wantless/TTS/requirements.gateway.txt"
+    ],
+    "tts": [
+      "file_/home/wantless/TTS/my_app/audio_server.py",
+      "file_/home/wantless/TTS/dockerfile.tts.py310",
+      "file_/home/wantless/TTS/docker-compose.tts.py310.yml",
+      "file_/home/wantless/TTS/requirements.tts.txt"
+    ],
+    "frontend": [
+      "file_/home/wantless/TTS/my_app/templates/player.html",
+      "file_/home/wantless/TTS/my_app/static/Readability.js"
+    ],
+    "docker": [
+      "file_/home/wantless/TTS/dockerfile.acquire",
+      "file_/home/wantless/TTS/docker-compose.acquire.yml",
+      "file_/home/wantless/TTS/requirements.acquire.txt",
+      "file_/home/wantless/TTS/dockerfile.convert",
+      "file_/home/wantless/TTS/docker-compose.convert.yml",
+      "file_/home/wantless/TTS/requirements.convert.txt",
+      "file_/home/wantless/TTS/dockerfile.pdf_processor",
+      "file_/home/wantless/TTS/docker-compose.pdf.yml",
+      "file_/home/wantless/TTS/requirements.pdf_processor.txt",
+      "file_/home/wantless/TTS/dockerfile.gateway",
+      "file_/home/wantless/TTS/docker-compose.gateway.yml",
+      "file_/home/wantless/TTS/requirements.gateway.txt",
+      "file_/home/wantless/TTS/dockerfile.tts.py310",
+      "file_/home/wantless/TTS/docker-compose.tts.py310.yml",
+      "file_/home/wantless/TTS/requirements.tts.txt",
+      "file_/home/wantless/TTS/dockerfile.fileserver",
+      "file_/home/wantless/TTS/docker-compose.fileserver.yml",
+      "file_/home/wantless/TTS/dockerfile.relay",
+      "file_/home/wantless/TTS/docker-compose.relay.yml",
+      "file_/home/wantless/TTS/dockerfile.doctr",
+      "file_/home/wantless/TTS/docker-compose.doctr.yml",
+      "file_/home/wantless/TTS/requirements.doctr.txt"
+    ],
+    "my_app": [
+      "dir_/home/wantless/TTS/my_app/acquire",
+      "file_/home/wantless/TTS/dockerfile.acquire",
+      "file_/home/wantless/TTS/docker-compose.acquire.yml",
+      "file_/home/wantless/TTS/requirements.acquire.txt",
+      "dir_/home/wantless/TTS/my_app/convert",
+      "file_/home/wantless/TTS/dockerfile.convert",
+      "file_/home/wantless/TTS/docker-compose.convert.yml",
+      "file_/home/wantless/TTS/requirements.convert.txt",
+      "dir_/home/wantless/TTS/my_app/pdf_processor",
+      "file_/home/wantless/TTS/dockerfile.pdf_processor",
+      "file_/home/wantless/TTS/docker-compose.pdf.yml",
+      "file_/home/wantless/TTS/requirements.pdf_processor.txt",
+      "file_/home/wantless/TTS/my_app/gateway_router.py",
+      "file_/home/wantless/TTS/my_app/gateway_contracts.py",
+      "file_/home/wantless/TTS/my_app/gateway_clients.py",
+      "file_/home/wantless/TTS/dockerfile.gateway",
+      "file_/home/wantless/TTS/docker-compose.gateway.yml",
+      "file_/home/wantless/TTS/requirements.gateway.txt",
+      "file_/home/wantless/TTS/my_app/audio_server.py",
+      "file_/home/wantless/TTS/dockerfile.tts.py310",
+      "file_/home/wantless/TTS/docker-compose.tts.py310.yml",
+      "file_/home/wantless/TTS/requirements.tts.txt"
+    ]
+  },
+  "target_files": []
 }
