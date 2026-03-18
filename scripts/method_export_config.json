@@ -114,6 +114,9 @@
       "file_/home/wantless/TTS/dockerfile.tts.py310",
       "file_/home/wantless/TTS/docker-compose.tts.py310.yml",
       "file_/home/wantless/TTS/requirements.tts.txt"
+    ],
+    "browser": [
+      "dir_/home/wantless/TTS/browser_dev"
     ]
   },
   "target_files": []

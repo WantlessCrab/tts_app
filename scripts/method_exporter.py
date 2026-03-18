@@ -347,6 +347,45 @@ class MethodExtractor:
     # EXTRACTION DRIVER
     # ─────────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _build_file_tree(paths: list) -> str:
+        """Build a directory tree of only the exported file paths."""
+        if not paths:
+            return ""
+
+        split = [Path(p).parts for p in paths]
+
+        # Find common root depth
+        common_len = 0
+        for level in zip(*split):
+            if len(set(level)) == 1:
+                common_len += 1
+            else:
+                break
+
+        root_label = str(Path(*split[0][:common_len])) if common_len else "/"
+
+        # Build nested dict tree
+        tree: dict = {}
+        for parts in split:
+            node = tree
+            for part in parts[common_len:]:
+                node = node.setdefault(part, {})
+
+        # Render with tree characters
+        lines = [root_label]
+
+        def _render(node: dict, prefix: str = "") -> None:
+            items = sorted(node.keys())
+            for i, key in enumerate(items):
+                is_last = i == len(items) - 1
+                lines.append(f"{prefix}{'└── ' if is_last else '├── '}{key}")
+                if node[key]:
+                    _render(node[key], prefix + ("    " if is_last else "│   "))
+
+        _render(tree)
+        return "\n".join(lines)
+
     def extract_all_methods(self):
         self.extracted_methods = []
         for file_config in self.target_files:
@@ -428,6 +467,15 @@ class MethodExtractor:
                 f.write(f"**Extracted**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"**Total Items**: {len(self.extracted_methods)}\n")
                 f.write(f"**Source Files**: {len(self.target_files)}\n\n")
+
+                # ── INSERT STARTS ──
+                exported_paths = list(dict.fromkeys(
+                    item["source_file"] for item in self.extracted_methods
+                ))
+                if exported_paths:
+                    f.write(f"```\n{self._build_file_tree(exported_paths)}\n```\n\n")
+                # ── INSERT ENDS ──
+
                 f.write("---\n\n")
 
                 current_file = None
