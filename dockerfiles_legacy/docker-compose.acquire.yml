@@ -1,14 +1,14 @@
-# docker-compose.convert.yml
+# docker-compose.acquire.yml
 
 services:
-  convert-service:
+  acquire-service:
     build:
-      context: .
-      dockerfile: dockerfile.convert
-    container_name: project-rebuild-convert
+      context: ..
+      dockerfile: ../dockerfile.acquire
+    container_name: project-rebuild-acquire
     restart: unless-stopped
     ports:
-      - "8006:8000"
+      - "8005:8000"
     volumes:
       - ./my_app:/app
       - ./pdf_input:/workspace/pdf_input:ro
@@ -16,9 +16,9 @@ services:
       - ./pdf_cache:/workspace/pdf_cache
     environment:
       - PYTHONUNBUFFERED=1
-      - SOFFICE_PATH=/usr/bin/soffice
       - PDF_SERVICE_URL=http://host.docker.internal:8001
       - DOCTR_SERVICE_URL=http://host.docker.internal:8004
+      - CONVERT_SERVICE_URL=http://host.docker.internal:8006
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

@@ -2,8 +2,8 @@
 services:
   rebuild-gpu-service-py310: # --- CHANGE 1: New service/container name
     build:
-      context: .
-      dockerfile: dockerfile.base.py310 # --- CHANGE 2: Point to new Dockerfile
+      context: ..
+      dockerfile: ../dockerfile.base.py310 # --- CHANGE 2: Point to new Dockerfile
     image: project-rebuild-gold-standard-py310:latest # --- CHANGE 3: New image tag
     container_name: project-rebuild-gpu-service-py310
 

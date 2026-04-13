@@ -4,8 +4,8 @@ services:
   # === Service 1: API Gateway (CPU-Only) ===
   api-gateway:
     build:
-      context: .
-      dockerfile: dockerfile.gateway
+      context: ..
+      dockerfile: ../dockerfile.gateway
     container_name: project-rebuild-gateway
     ports:
       - "8000:8000"

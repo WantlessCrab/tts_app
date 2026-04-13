@@ -25,8 +25,8 @@ x-gpu-service-config: &gpu-service-config
 services:
   tts-processor-service:
     build:
-      context: .
-      dockerfile: dockerfile.tts.py310
+      context: ..
+      dockerfile: ../dockerfile.tts.py310
     container_name: project-rebuild-tts-service
     <<: *gpu-service-config
 

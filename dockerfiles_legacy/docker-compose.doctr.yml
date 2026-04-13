@@ -1,5 +1,4 @@
-# docker-compose.pdf.yml
-
+# docker-compose.doctr.yml
 # ================================================================
 # 1. DEFINE the "Immutable" GPU Fixes (YAML Anchor)
 # ================================================================
@@ -19,22 +18,18 @@ x-gpu-service-config: &gpu-service-config
     - HIP_VISIBLE_DEVICES=0
     - PYTHONUNBUFFERED=1
     - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/rocm/lib
-
 # ===================================================================
-# 2. SINGLE SERVICE - PDF Processor Only
+# 2. SINGLE SERVICE - docTR OCR Only
 # ===================================================================
 services:
-  pdf-processor-service:
+  doctr-service:
     build:
-      context: .
-      dockerfile: dockerfile.pdf_processor
-    container_name: project-rebuild-pdf-processor
+      context: ..
+      dockerfile: ../dockerfile.doctr
+    container_name: project-rebuild-doctr
     <<: *gpu-service-config
-
-    # ADD PORT MAPPING for direct testing
     ports:
-      - "8001:8000"  # Access PDF processor directly on port 8001
-
+      - "8004:8000"  # Access docTR service directly on port 8003
     volumes:
       # Surgical Mounts
       - /usr/lib/wsl/lib/libdxcore.so:/usr/lib/wsl/lib/libdxcore.so:ro
@@ -44,20 +39,16 @@ services:
       - ./outputs:/workspace/outputs
       - ./pdf_cache:/workspace/pdf_cache
       - ./my_app:/app
-
     environment:
       - ROCR_VISIBLE_DEVICES=0
       - HIP_VISIBLE_DEVICES=0
       - PYTHONUNBUFFERED=1
       - LD_LIBRARY_PATH=/usr/lib/wsl/lib:/opt/rocm/lib
-      # point to the TTS service on our host at port 8002
-      - TTS_SERVICE_URL=http://host.docker.internal:8002/api/tts
-      - DOCTR_SERVICE_URL=http://host.docker.internal:8004
-
     command: >
       bash -c "
         TORCH_LIB_PATH=$$(python3 -c 'import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), \"lib\"))');
         rm -f \"$$TORCH_LIB_PATH/libhsa-runtime64.so\"*;
-        echo \"--- [PDF-PROC] Patch complete. Bundled libhsa removed.\";
-        exec uvicorn pdf_processor.process:app --host 0.0.0.0 --port 8000
+        echo \"--- [DOCTR] Patch complete. Bundled libhsa removed.\";
+        python3 -c 'import torch; import doctr; print(f\"ROCm: {torch.__version__}\"); print(\"docTR ready.\")';
+        exec uvicorn doctr_service:app --host 0.0.0.0 --port 8000
       "

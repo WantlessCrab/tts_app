@@ -1,0 +1,38 @@
+# docker-compose.py312base.yml
+services:
+  py312base:
+    build:
+      context: .
+      dockerfile: Dockerfile.py312base
+    image: localproject/py312base
+    container_name: localproject-py312base
+
+    devices:
+      - /dev/kfd
+      - /dev/dri/renderD129
+
+    group_add:
+      - video
+      - render
+
+#    volumes:
+
+    cap_add:
+      - SYS_PTRACE
+
+    security_opt:
+      - seccomp=unconfined
+
+    ipc: host
+    shm_size: 8g
+
+    environment:
+      - ROCR_VISIBLE_DEVICES=0
+      - HIP_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+
+    # Keep the container alive for smoke testing / interactive validation
+    command: tail -f /dev/null
+
+    stdin_open: true
+    tty: true

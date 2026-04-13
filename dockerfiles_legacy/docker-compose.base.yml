@@ -2,8 +2,8 @@
 services:
   rebuild-gpu-service:
     build:
-      context: .
-      dockerfile: dockerfile.base
+      context: ..
+      dockerfile: ../dockerfile.base
     image: project-rebuild-gold-standard:latest
     container_name: project-rebuild-gpu-service
 

@@ -4,8 +4,8 @@ services:
   # === Service 4: File Server (CPU-Only) ===
   file-server:
     build:
-      context: .
-      dockerfile: dockerfile.fileserver
+      context: ..
+      dockerfile: ../dockerfile.fileserver
     container_name: project-rebuild-fileserver
 
     # --- Port Mapping ---

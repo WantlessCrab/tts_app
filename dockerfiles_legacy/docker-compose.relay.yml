@@ -3,8 +3,8 @@
 services:
   llm-relay-service:
     build:
-      context: .
-      dockerfile: dockerfile.relay
+      context: ..
+      dockerfile: ../dockerfile.relay
     container_name: project-rebuild-llm-relay
     ports:
       - "8005:8005"

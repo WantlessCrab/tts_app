@@ -1,0 +1,37 @@
+# Dockerfile.py310base
+
+# ----------------------------------------------------------------------
+# 1. BASE IMAGE
+# ----------------------------------------------------------------------
+
+FROM rocm/pytorch:rocm7.1_ubuntu22.04_py3.10_pytorch_release_2.6.0@sha256:846520af9b22ce5aee1ddc9be7df3bec5257bf783ab8d084d33a0dcd48a430bf
+
+# ----------------------------------------------------------------------
+# 2. CORE STACK
+# ----------------------------------------------------------------------
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base build tools
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- PyTorch & Dependencies ---
+
+# 1. NumPy - preserved from the original py3.10 base
+RUN pip3 install --no-cache-dir numpy==1.24.3
+
+# used to have:
+# RUN pip3 install --no-cache-dir \
+#     torchvision torchaudio \
+#     --index-url https://download.pytorch.org/whl/rocm6.4 \
+#     --break-system-packages
+
+# ----------------------------------------------------------------------
+# 3. BASE LAYER CONFIG
+# ----------------------------------------------------------------------
+
+# Use the standard project workdir
+WORKDIR /app

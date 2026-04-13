@@ -1,0 +1,39 @@
+# docker-compose.py310base.yml
+services:
+  py310base:
+    build:
+      context: .
+      dockerfile: Dockerfile.py310base
+    image: localproject/py310base
+    container_name: localproject-py310base
+
+    devices:
+      - /dev/kfd
+      - /dev/dri/renderD129
+
+    group_add:
+      - video
+      - render
+
+#    volumes:
+
+    cap_add:
+      - SYS_PTRACE
+
+    security_opt:
+      - seccomp=unconfined
+
+    ipc: host
+    shm_size: 8g
+
+    environment:
+      - ROCR_VISIBLE_DEVICES=0
+      - HIP_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+      # used to have LD LIBRARY PATH=/usr/lib/wsl/lib...
+
+    # keep the container up
+    command: tail -f /dev/null
+
+    stdin_open: true
+    tty: true

@@ -135,4 +135,4 @@ tts_models/
 tests/
 
 # testing agentic dev
-browser_dev/
+../browser_dev/
