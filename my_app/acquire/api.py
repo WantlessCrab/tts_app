@@ -1,13 +1,15 @@
-# my_app/acquire/api.py
+ # my_app/acquire/api.py
 """
 Acquire Service — FastAPI application, lifecycle, health, and /acquire endpoint.
 """
 
 import logging
+import uuid
 from typing import Optional, Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from .utils import (
     client,

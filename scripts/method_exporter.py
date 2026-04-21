@@ -1,12 +1,10 @@
 # method_exporter.py
 import re
 import json
-import random
-import string
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Reference set for common source extensions.
 # Not automatically applied — only used when explicitly requested via:
@@ -20,18 +18,19 @@ DEFAULT_EXTENSIONS = {
 
 class MethodExtractor:
     def __init__(self, config_path="method_export_config.json"):
-        self.config_path = config_path
+        self.config_path = Path(config_path)
+        if not self.config_path.is_absolute():
+            self.config_path = (Path(__file__).resolve().parent / self.config_path).resolve()
         self.obsidian_base: Optional[Path] = None
         self.components: Dict = {}
         self.target_files: List[Dict] = []
         self.max_file_size: int = 0
         self.ignore_dirs: List[Path] = []  # resolved absolute paths
         self.ignore_files: List[Path] = []  # resolved absolute paths
+        self.ignore_dir_names: set[str] = set()
         self.load_config()
 
-        self.timestamp = datetime.now().strftime("%I-%M-%S_%d-%m-%y") + "_" + "".join(
-            random.choices(string.ascii_lowercase + string.digits, k=8)
-        )
+        self.timestamp = datetime.now().strftime("%H-%M-%S_%m-%d-%y")
         self.extracted_methods: List[Dict] = []
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -49,10 +48,29 @@ class MethodExtractor:
             print(f"Config file {self.config_path} is not valid JSON. Stopping.")
             sys.exit(1)
 
-        self.obsidian_base = Path(config.get("export_base", ""))
-        self.components = config.get("components", {})
-        self.target_files = config.get("target_files", [])
-        self.max_file_size = config.get("max_file_size_mb", 10) * 1024 * 1024
+        export_base_value = config.get("export_base", "")
+        if not isinstance(export_base_value, str) or not export_base_value.strip():
+            print("Config missing required key: 'export_base'. Stopping.")
+            sys.exit(1)
+        self.obsidian_base = Path(export_base_value)
+
+        components_value = config.get("components", {})
+        if not isinstance(components_value, dict):
+            print("Config key 'components' must be an object. Stopping.")
+            sys.exit(1)
+        self.components = components_value
+
+        target_files_value = config.get("target_files", [])
+        if not isinstance(target_files_value, list):
+            print("Config key 'target_files' must be a list. Stopping.")
+            sys.exit(1)
+        self.target_files = target_files_value
+
+        max_file_size_value = config.get("max_file_size_mb", 10)
+        if not isinstance(max_file_size_value, (int, float)):
+            print("Config key 'max_file_size_mb' must be numeric. Stopping.")
+            sys.exit(1)
+        self.max_file_size = int(max_file_size_value * 1024 * 1024)
 
         # Resolve ignore lists to absolute Paths for reliable comparison.
         # ignore_dir_names matches any path segment by name (e.g. "__pycache__").
@@ -61,12 +79,6 @@ class MethodExtractor:
         self.ignore_dirs = [Path(d).resolve() for d in config.get("ignore_dirs", [])]
         self.ignore_dir_names = set(config.get("ignore_dir_names", []))
         self.ignore_files = [Path(f).resolve() for f in config.get("ignore_files", [])]
-
-        if not str(self.obsidian_base):
-            print("Config missing required key: 'export_base'. Stopping.")
-            sys.exit(1)
-
-    # ─────────────────────────────────────────────────────────────────────────
     # TOKEN PARSER
     # ─────────────────────────────────────────────────────────────────────────
     #
@@ -81,9 +93,9 @@ class MethodExtractor:
     #   dir_<path>:r                  recursive, all files
     #   dir_<path>:r:<ext>,<ext>      recursive, filtered
     #
-    #   method_<n>_<path>          named method from <path>
-    #                                 splits on LAST underscore —
-    #                                 snake_case names fully safe
+    #   method_<method_name>_<path>   named method from <path>
+    #                                 path boundary is detected from the
+    #                                 first real path start marker
     #
     #   component_<n>              expand named group from config["components"]
     #
@@ -129,6 +141,41 @@ class MethodExtractor:
             return True
         return False
 
+    def _make_target_entry(
+            self,
+            file_path: Path,
+            mode: str,
+            *,
+            comment: str = "",
+            methods: Optional[List[str]] = None,
+            origin_token: str = "",
+            source_kind: str = "",
+            source_path: str = "",
+            recursive: bool = False,
+            extensions: Optional[List[str]] = None,
+    ) -> Dict:
+        """
+        Build a target_files entry while preserving origin metadata for export naming.
+
+        The leading-underscore metadata fields are internal-only and do not affect
+        extraction behavior. They exist so export_all() can infer better filenames
+        from the actual target selection and token flags.
+        """
+        entry = {
+            "file": str(file_path),
+            "mode": mode,
+            "comment": comment,
+            "_origin_token": origin_token,
+            "_origin_component": None,
+            "_source_kind": source_kind,
+            "_source_path": source_path,
+            "_recursive": recursive,
+            "_extensions": list(extensions or []),
+        }
+        if methods is not None:
+            entry["methods"] = list(methods)
+        return entry
+
     def _token_file(self, token: str) -> list:
         path_str = token[len("file_"):]
         p = Path(path_str)
@@ -138,7 +185,16 @@ class MethodExtractor:
         if self._is_ignored(p):
             print(f"[IGNORE] Skipping: {p}")
             return []
-        return [{"file": str(p), "mode": "file", "comment": ""}]
+        return [self._make_target_entry(
+            p,
+            "file",
+            comment="",
+            origin_token=token,
+            source_kind="file",
+            source_path=str(p),
+            recursive=False,
+            extensions=[p.suffix.lower()] if p.suffix else []
+        )]
 
     def _token_dir(self, token: str) -> list:
         """
@@ -180,23 +236,96 @@ class MethodExtractor:
             print(f"[WARN] No matching files in directory: {base}")
             return []
 
-        return [{"file": str(f), "mode": "file", "comment": ""} for f in files]
+        normalized_exts = []
+        if extensions:
+            normalized_exts = sorted(
+                {e if e.startswith(".") else f".{e}" for e in extensions}
+            )
+
+        return [
+            self._make_target_entry(
+                f,
+                "file",
+                comment="",
+                origin_token=token,
+                source_kind="dir",
+                source_path=str(base),
+                recursive=recursive,
+                extensions=normalized_exts
+            )
+            for f in files
+        ]
+
+    def _split_method_token_body(self, body: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Parse:
+            method_<method_name>_<path>
+
+        Priority:
+          1. Explicit path-start markers
+          2. First underscore whose remainder resolves to an existing path
+          3. Final legacy fallback
+        """
+        candidates = []
+
+        for marker in ("_/", "_./", "_../", "_~/"):
+            idx = body.find(marker)
+            if idx != -1:
+                candidates.append(idx)
+
+        win_match = re.search(r'_(?=[A-Za-z]:[\\/])', body)
+        if win_match:
+            candidates.append(win_match.start())
+
+        if candidates:
+            sep = min(candidates)
+            method_name = body[:sep]
+            path_str = body[sep + 1:]
+            if method_name and path_str:
+                return method_name, path_str
+
+        # Plain relative-path fallback:
+        # choose the first underscore whose remainder is an actual existing path.
+        for m in re.finditer(r"_", body):
+            sep = m.start()
+            method_name = body[:sep]
+            path_str = body[sep + 1:]
+            if not method_name or not path_str:
+                continue
+            if Path(path_str).exists():
+                return method_name, path_str
+
+        # Legacy final fallback
+        sep = body.rfind("_")
+        if sep == -1:
+            return None, None
+
+        method_name = body[:sep]
+        path_str = body[sep + 1:]
+
+        if not method_name or not path_str:
+            return None, None
+
+        return method_name, path_str
 
     def _token_method(self, token: str) -> list:
         """
-        method_<n>_<path>
-        Splits on LAST underscore. Snake_case method names are fully safe.
+        method_<method_name>_<path>
+
+        Uses explicit path-start detection so underscores inside Linux/Windows
+        paths do not corrupt parsing.
         """
         body = token[len("method_"):]
-        last_sep = body.rfind("_")
-        if last_sep == -1:
+        method_name, path_str = self._split_method_token_body(body)
+
+        if method_name is None or path_str is None:
             print(f"[WARN] method_ token missing path separator, skipping: '{token}'")
             return []
-        method_name = body[:last_sep]
-        path_str = body[last_sep + 1:]
+
         if not method_name:
             print(f"[WARN] method_ token has empty method name, skipping: '{token}'")
             return []
+
         p = Path(path_str)
         if not p.exists():
             print(f"[WARN] File not found for method entry, skipping: {p}")
@@ -206,7 +335,17 @@ class MethodExtractor:
             print(f"[IGNORE] Skipping: {p}")
             return []
 
-        return [{"file": str(p), "mode": "methods", "methods": [method_name], "comment": ""}]
+        return [self._make_target_entry(
+            p,
+            "methods",
+            methods=[method_name],
+            comment="",
+            origin_token=token,
+            source_kind="method",
+            source_path=str(p),
+            recursive=False,
+            extensions=[p.suffix.lower()] if p.suffix else []
+        )]
 
     def _token_component(self, name: str) -> list:
         """
@@ -223,7 +362,10 @@ class MethodExtractor:
             return []
         results = []
         for entry in entries:
-            results.extend(self.parse_token(entry))
+            expanded = self.parse_token(entry)
+            for item in expanded:
+                item["_origin_component"] = name
+            results.extend(expanded)
         return results
 
     @staticmethod
@@ -389,7 +531,16 @@ class MethodExtractor:
     def extract_all_methods(self):
         self.extracted_methods = []
         for file_config in self.target_files:
-            source_path = Path(file_config["file"])
+            if not isinstance(file_config, dict):
+                print(f"Error: Invalid target entry (expected dict): {file_config}")
+                continue
+
+            source_file_value = file_config.get("file")
+            if not isinstance(source_file_value, str) or not source_file_value.strip():
+                print(f"Error: Invalid target entry missing file path: {file_config}")
+                continue
+
+            source_path = Path(source_file_value)
             mode = file_config.get("mode", "methods")
 
             if not source_path.exists():
@@ -447,12 +598,130 @@ class MethodExtractor:
     # EXPORT
     # ─────────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _slugify_filename_part(value: str) -> str:
+        """
+        Keep filenames readable and filesystem-safe while preserving underscores.
+        """
+        value = (value or "").strip()
+        if not value:
+            return "METHOD_SANDBOX"
+        value = re.sub(r"[^\w\-. ]+", "", value)
+        value = re.sub(r"\s+", "_", value)
+        value = re.sub(r"_+", "_", value)
+        value = value.strip("._")
+        return value or "METHOD_SANDBOX"
+
+    def _infer_export_name(self) -> str:
+        """
+        Best-guess export stem based on the actual selected targets and token flags.
+
+        Priority:
+          1. Single directory-origin export:
+             <dirname>_full_export[_recursive][_<ext>...]
+          2. Single file target:
+             <file_stem>_full_file_export
+          3. Single method target:
+             <file_stem>_<method>_method_export
+          4. Single component fallback:
+             <component>_export
+          5. Common root fallback:
+             <rootname>_export
+          6. METHOD_SANDBOX
+        """
+        if not self.target_files:
+            return "METHOD_SANDBOX"
+
+        # Directory-origin inference (works for direct dir_... tokens and components
+        # that expand from a single dir_... entry)
+        dir_items = [
+            item for item in self.target_files
+            if item.get("_source_kind") == "dir" and item.get("_source_path")
+        ]
+        unique_dir_sources = list(dict.fromkeys(
+            item["_source_path"] for item in dir_items
+        ))
+
+        if len(unique_dir_sources) == 1:
+            source_dir = Path(unique_dir_sources[0])
+            parts = [source_dir.name or "export", "full_export"]
+
+            if any(bool(item.get("_recursive")) for item in dir_items):
+                parts.append("recursive")
+
+            ext_parts = []
+            for item in dir_items:
+                for ext in item.get("_extensions", []):
+                    cleaned = str(ext).lstrip(".").lower()
+                    if cleaned and cleaned not in ext_parts:
+                        ext_parts.append(cleaned)
+
+            if ext_parts:
+                parts.extend(ext_parts)
+
+            return self._slugify_filename_part("_".join(parts))
+
+        # Single target fallback
+        if len(self.target_files) == 1:
+            item = self.target_files[0]
+            source_file = Path(item["file"])
+
+            if item.get("mode") == "file":
+                return self._slugify_filename_part(
+                    f"{source_file.stem}_full_file_export"
+                )
+
+            if item.get("mode") == "methods":
+                methods = item.get("methods", [])
+                if len(methods) == 1:
+                    return self._slugify_filename_part(
+                        f"{source_file.stem}_{methods[0]}_method_export"
+                    )
+                return self._slugify_filename_part(
+                    f"{source_file.stem}_method_export"
+                )
+
+        # Single component fallback
+        components = [
+            item.get("_origin_component")
+            for item in self.target_files
+            if item.get("_origin_component")
+        ]
+        unique_components = list(dict.fromkeys(components))
+        if len(unique_components) == 1:
+            return self._slugify_filename_part(f"{unique_components[0]}_export")
+
+        # Common-root fallback from concrete exported files
+        try:
+            exported_paths = [Path(item["file"]) for item in self.target_files if item.get("file")]
+            if exported_paths:
+                split = [p.parts for p in exported_paths]
+                common_len = 0
+                for level in zip(*split):
+                    if len(set(level)) == 1:
+                        common_len += 1
+                    else:
+                        break
+                if common_len:
+                    common_root = Path(*split[0][:common_len])
+                    if common_root.name:
+                        return self._slugify_filename_part(f"{common_root.name}_export")
+        except Exception:
+            pass
+
+        return "METHOD_SANDBOX"
+
     def export_all(self):
         if not self.extracted_methods:
             print("No items to export.")
             return
 
-        output_filename = f"METHOD_SANDBOX_{self.timestamp}.md"
+        if self.obsidian_base is None:
+            print("Error: export base not configured.")
+            return
+
+        output_stem = self._infer_export_name()
+        output_filename = f"{output_stem}_{self.timestamp}.md"
         output_path = self.obsidian_base / output_filename
 
         try:
@@ -518,7 +787,7 @@ class MethodExtractor:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    config_path = "method_export_config.json"
+    config_path = Path(__file__).resolve().with_name("method_export_config.json")
 
     if not Path(config_path).exists():
         sample = {
@@ -531,7 +800,7 @@ if __name__ == "__main__":
             "target_files": [],
             "max_file_size_mb": 10
         }
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             json.dump(sample, f, indent=4)
         print(f"No config found. Created sample at: {config_path}")
         print("Edit export_base and run again.")

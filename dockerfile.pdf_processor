@@ -1,0 +1,29 @@
+# dockerfile.pdf_processor
+
+# 1. BASE IMAGE (PY3.12)
+FROM localproject/py312base:latest
+
+# 2. PDF PROCESSOR SERVICE
+
+# Python Dependencies
+COPY requirements.pdf.txt .
+RUN pip3 install --no-cache-dir -r requirements.pdf.txt
+
+# Copy PDF processor code
+COPY my_app/pdf_processor /app/pdf_processor
+
+RUN mkdir -p /workspace/pdf_cache /workspace/pdf_input /workspace/outputs/audiobooks
+
+# Verify the ROCm Stack
+RUN python3 -c "import torch; print(f'Torch: {torch.__version__}'); assert 'rocm' in torch.__version__, 'ROCm-enabled PyTorch was overwritten! Build failed.'" && \
+    (pip3 list | grep -i nvidia && echo "ERROR: NVIDIA packages found!" && exit 1 || echo "✓ No NVIDIA contamination")
+
+# Verify PDF service imports
+RUN python3 -c "import pdf_processor.process; print('✓ PDF processor import OK')"
+
+# Finalize Container ---
+WORKDIR /app
+
+# Runtime Defaults
+EXPOSE 8000
+CMD ["uvicorn", "pdf_processor.process:app", "--host", "0.0.0.0", "--port", "8000"]

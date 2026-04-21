@@ -3,7 +3,7 @@ services:
   py310base:
     build:
       context: .
-      dockerfile: Dockerfile.py310base
+      dockerfile: dockerfile.py310base
     image: localproject/py310base
     container_name: localproject-py310base
 

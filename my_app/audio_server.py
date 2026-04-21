@@ -1,9 +1,7 @@
 # ~/TTS/my_app/audio_server.py
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION 0 — IMPORTS, CONFIGURATION, CONSTANTS
-# ════════════════════════════════════════════════════════════════════════════════
-from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks, UploadFile
+# ═══════════════# SECTION 0 — IMPORTS, CONFIGURATION, CONSTANTS
+# ═══════════════from fastapi import FastAPI, HTTPException, WebSocket, BackgroundTasks, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -71,10 +69,8 @@ app.add_middleware(
 # Create the HTTP client for calling other services
 client = httpx.AsyncClient(timeout=30.0)
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION A — Server Lifecycle
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION A — Server Lifecycle
+# ═══════════════
 @app.on_event("startup")
 async def startup_event():
     try:
@@ -94,10 +90,8 @@ async def shutdown_event():
     logger.info("HTTP client closed.")
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION B — Frontend Shell / Static UI
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION B — Frontend Shell / Static UI
+# ═══════════════
 @app.get("/", response_class=HTMLResponse)
 async def get_player_interface():
     player_html_path = TEMPLATES_DIR / "player.html"
@@ -107,10 +101,8 @@ async def get_player_interface():
     return FileResponse(player_html_path)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION C — Source & Asset Enumeration
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION C — Source & Asset Enumeration
+# ═══════════════
 @app.get("/api/audio_sources")
 async def list_audio_sources():
     """Returns a list of available audio source names."""
@@ -165,10 +157,8 @@ async def list_available_pdfs():
     return {"available_pdfs": pdfs}
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION D — Audiobook Status APIs & Metadata
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION D — Audiobook Status APIs & Metadata
+# ═══════════════
 @app.get("/api/audiobooks")
 async def list_audiobooks():
     """Lists all available audiobooks with their processing status"""
@@ -292,10 +282,8 @@ async def get_audiobook_status(book_id: str):
         raise HTTPException(status_code=500, detail="Failed to read audiobook data")
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION E — UI Sentence & Citation APIs
-# ════════════════════════════════════════════════════════════════════════════════
-@app.get("/api/audiobook/{book_id}/ui_sentences")
+# ═══════════════# SECTION E — UI Sentence & Citation APIs
+# ═══════════════@app.get("/api/audiobook/{book_id}/ui_sentences")
 async def get_audiobook_ui_sentences(book_id: str):
     """
     Serves pre-resolved UI sentence data from ui_sentences.json.
@@ -380,10 +368,8 @@ async def get_audiobook_semantic(book_id: str):
         }
     )
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION F — Audio Chunk Serving
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION F — Audio Chunk Serving
+# ═══════════════
 @app.get("/api/audiobook/{book_id}/play/{chunk_filename}")
 async def serve_audiobook_chunk(book_id: str, chunk_filename: str):
     """Serve a specific audio chunk from an audiobook (Functionality retained from baseline)"""
@@ -409,10 +395,8 @@ async def serve_audiobook_chunk(book_id: str, chunk_filename: str):
     )
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION G — PDF Proxy APIs
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION G — PDF Proxy APIs
+# ═══════════════
 @app.get("/api/pdf/{pdf_filename}")
 async def proxy_serve_pdf(pdf_filename: str):
     """
@@ -497,10 +481,8 @@ async def start_pdf_processing(pdf_filename: str):
         raise HTTPException(status_code=500, detail="Failed to initiate processing")
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# SECTION H — Processing Control APIs
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════# SECTION H — Processing Control APIs
+# ═══════════════
 @app.post("/api/retry/{book_id}")
 async def retry_processing(book_id: str, force_rebuild: bool = False):
     """
@@ -573,12 +555,10 @@ async def rebuild_selective(
         logger.error(f"Selective rebuild error: {e}")
         raise HTTPException(status_code=500, detail="Failed to initiate selective rebuild")
 
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════
 # SECTION I — Ingest (Gateway Orchestration Entry Point)
 
-# ════════════════════════════════════════════════════════════════════════════════
-@app.post("/api/v1/ingest")
+# ═══════════════@app.post("/api/v1/ingest")
 async def ingest(
         url: Optional[str] = None,
         file: Optional[UploadFile] = None,

@@ -1,0 +1,48 @@
+# docker-compose.pdf.yml
+# ===================================================================
+# 1. DEFINE GPU Fixes (YAML Anchor)
+# ===================================================================
+x-gpu-service-config: &gpu-service-config
+  devices:
+    - /dev/kfd
+    - /dev/dri/renderD129
+  group_add:
+    - video
+    - render
+  cap_add:
+    - SYS_PTRACE
+  security_opt:
+    - seccomp:unconfined
+  ipc: host
+  shm_size: 8g
+  environment:
+    - ROCR_VISIBLE_DEVICES=0
+    - HIP_VISIBLE_DEVICES=0
+    - PYTHONUNBUFFERED=1
+
+# ===================================================================
+# 2. SINGLE SERVICE - PDF Processor Only
+# ===================================================================
+services:
+  pdf-processor-service:
+    build:
+      context: .
+      dockerfile: dockerfile.pdf_processor
+    container_name: pdf-processor
+    <<: *gpu-service-config
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./pdf_input:/workspace/pdf_input
+      - ./outputs:/workspace/outputs
+      - ./pdf_cache:/workspace/pdf_cache
+    environment:
+      - ROCR_VISIBLE_DEVICES=0
+      - HIP_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+      - TTS_SERVICE_URL=http://host.docker.internal:8002/api/tts
+      - DOCTR_SERVICE_URL=http://host.docker.internal:8004
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stdin_open: true
+    tty: true

@@ -1,0 +1,24 @@
+# Dockerfile.relay
+
+# 1. BASE IMAGE (CPU-Only)
+FROM python:3.12-slim
+
+# 2. "APPLICATION LAYER"
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 3. Application Dependencies
+RUN pip install --no-cache-dir \
+    fastapi \
+    uvicorn \
+    pydantic \
+    requests
+
+WORKDIR /app
+
+# 4. Verify relay import
+COPY feature_llm_bridge/backend/ /app/
+RUN python3 -c "import router; print('✓ relay import OK')"
+
+EXPOSE 8005
+CMD ["uvicorn", "router:app", "--host", "0.0.0.0", "--port", "8005", "--reload"]

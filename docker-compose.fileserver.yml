@@ -1,0 +1,20 @@
+# docker-compose.fileserver.yml
+
+services:
+  file-server:
+    build:
+      context: .
+      dockerfile: dockerfile.fileserver
+    container_name: file-server
+
+    ports:
+      - "8003:8000"
+
+    volumes:
+      - ./outputs:/workspace/outputs:ro
+      - ./pdf_input:/workspace/pdf_input:ro
+      - ./pdf_cache:/workspace/pdf_cache:ro
+      - ./tts_models:/workspace/tts_models:ro
+
+    stdin_open: true
+    tty: true

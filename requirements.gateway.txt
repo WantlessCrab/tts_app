@@ -1,0 +1,13 @@
+# requirements.gateway.txt
+
+fastapi
+
+uvicorn[standard]
+
+httpx
+
+pydantic
+
+aiofiles
+
+python-multipart

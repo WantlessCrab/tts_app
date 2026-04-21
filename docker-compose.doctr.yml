@@ -1,0 +1,38 @@
+# docker-compose.doctr.yml
+
+x-gpu-service-config: &gpu-service-config
+  devices:
+    - /dev/kfd
+    - /dev/dri/renderD129
+  group_add:
+    - video
+    - render
+  cap_add:
+    - SYS_PTRACE
+  security_opt:
+    - seccomp:unconfined
+  ipc: host
+  shm_size: 8g
+  environment:
+    - ROCR_VISIBLE_DEVICES=0
+    - HIP_VISIBLE_DEVICES=0
+    - PYTHONUNBUFFERED=1
+
+services:
+  doctr-service:
+    build:
+      context: .
+      dockerfile: dockerfile.doctr
+    container_name: doctr
+    <<: *gpu-service-config
+
+    ports:
+      - "8004:8000"
+
+    volumes:
+      - ./pdf_input:/workspace/pdf_input
+      - ./outputs:/workspace/outputs
+      - ./pdf_cache:/workspace/pdf_cache
+
+    stdin_open: true
+    tty: true

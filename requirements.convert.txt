@@ -1,0 +1,11 @@
+# requirements.convert.txt
+
+fastapi
+uvicorn[standard]
+httpx
+mammoth
+weasyprint
+ebooklib
+python-magic
+python-multipart
+PyMuPDF>=1.23.0,<2.0.0

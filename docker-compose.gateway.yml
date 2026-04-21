@@ -1,0 +1,25 @@
+# docker-compose.gateway.yml
+
+services:
+  api-gateway:
+    build:
+      context: .
+      dockerfile: dockerfile.gateway
+    container_name: gateway
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./pdf_input:/workspace/pdf_input
+      - ./outputs:/workspace/outputs:ro
+      - ./obsidian_audio:/workspace/obsidian_audio:ro
+      - ./pdf_cache:/workspace/pdf_cache:ro
+    environment:
+      - PDF_SERVICE_URL=http://host.docker.internal:8001
+      - ACQUIRE_SERVICE_URL=http://host.docker.internal:8005
+      - CONVERT_SERVICE_URL=http://host.docker.internal:8006
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    stdin_open: true
+    tty: true

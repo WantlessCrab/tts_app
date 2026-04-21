@@ -3,7 +3,7 @@ services:
   py312base:
     build:
       context: .
-      dockerfile: Dockerfile.py312base
+      dockerfile: dockerfile.py312base
     image: localproject/py312base
     container_name: localproject-py312base
 

@@ -1,0 +1,39 @@
+# docker-compose.tts.py310.yml
+# ===================================================================
+# 1. DEFINE GPU Fixes (YAML Anchor)
+# ===================================================================
+x-gpu-service-config: &gpu-service-config
+  devices:
+    - /dev/kfd
+    - /dev/dri/renderD129
+  group_add:
+    - video
+    - render
+  cap_add:
+    - SYS_PTRACE
+  security_opt:
+    - seccomp:unconfined
+  ipc: host
+  shm_size: 8g
+  environment:
+    - ROCR_VISIBLE_DEVICES=0
+    - HIP_VISIBLE_DEVICES=0
+    - PYTHONUNBUFFERED=1
+
+# ===================================================================
+# 2. SINGLE SERVICE - TTS Processor Only (PY3.10)
+# ===================================================================
+services:
+  tts-processor-service:
+    build:
+      context: .
+      dockerfile: dockerfile.tts.py310
+    container_name: tts-service
+    <<: *gpu-service-config
+    ports:
+      - "8002:8000"
+    volumes:
+      # TTS Model Cache
+      - ./tts_models:/root/.local/share/tts
+    stdin_open: true
+    tty: true

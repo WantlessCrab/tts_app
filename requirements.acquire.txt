@@ -1,0 +1,12 @@
+# requirements.acquire.txt
+
+fastapi
+uvicorn[standard]
+httpx
+playwright
+playwright-stealth
+camoufox[geoip]
+trafilatura
+python-magic
+PyMuPDF>=1.23.0,<2.0.0
+certifi

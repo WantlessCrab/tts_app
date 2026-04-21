@@ -1,0 +1,26 @@
+# dockerfile.gateway
+
+# 1. BASE IMAGE (CPU-Only)
+FROM python:3.12-slim
+
+# 2. GATEWAY SERVICE
+WORKDIR /app
+
+# 3. Install Dependencies
+COPY requirements.gateway.txt .
+RUN pip3 install --no-cache-dir -r requirements.gateway.txt
+
+# 4. Copy Application Code
+COPY my_app/audio_server.py .
+COPY my_app/gateway_contracts.py .
+COPY my_app/gateway_clients.py .
+COPY my_app/gateway_router.py .
+COPY my_app/static/ ./static/
+COPY my_app/templates/ ./templates/
+
+# 5. Verify gateway imports
+RUN python3 -c "import audio_server; import gateway_contracts; import gateway_clients; import gateway_router; print('✓ gateway imports OK')"
+
+# 6. Runtime Defaults
+EXPOSE 8000
+CMD ["uvicorn", "audio_server:app", "--host", "0.0.0.0", "--port", "8000"]

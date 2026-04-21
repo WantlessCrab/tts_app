@@ -1,0 +1,32 @@
+# dockerfile.doctr
+
+FROM localproject/py312base:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.doctr.txt .
+RUN pip3 install --no-cache-dir -r requirements.doctr.txt
+
+RUN pip3 install --no-cache-dir torchvision --no-deps \
+    --index-url https://download.pytorch.org/whl/rocm7.1
+
+RUN pip3 install --no-cache-dir python-doctr --no-deps
+
+COPY my_app/doctr_service.py /app/doctr_service.py
+
+RUN mkdir -p /workspace/pdf_input /workspace/pdf_cache /workspace/outputs
+
+WORKDIR /app
+
+RUN python3 -c "import torch; print(f'Torch: {torch.__version__}'); assert 'rocm' in torch.__version__, 'ROCm-enabled PyTorch was overwritten! Build failed.'" && \
+    (pip3 list | grep -i nvidia && echo 'ERROR: NVIDIA packages found!' && exit 1 || echo '✓ No NVIDIA contamination')
+
+RUN python3 -c "import doctr; import doctr_service; print('✓ docTR import OK')"
+
+EXPOSE 8000
+CMD ["uvicorn", "doctr_service:app", "--host", "0.0.0.0", "--port", "8000"]

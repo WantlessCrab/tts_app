@@ -44,7 +44,7 @@ async def init_browser() -> None:
     from playwright.async_api import async_playwright
     _pw = await async_playwright().start()
     _browser = await _pw.chromium.launch(
-        headless="new",
+        headless=True,
         args=["--no-sandbox", "--disable-dev-shm-usage"]
     )
 

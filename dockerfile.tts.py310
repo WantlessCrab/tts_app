@@ -1,0 +1,59 @@
+# dockerfile.tts.py310
+
+# 1. BASE IMAGE (PY3.10)
+
+FROM localproject/py310base:latest
+
+# 2. TTS SERVICE
+
+# System Dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    espeak-ng \
+    libsndfile1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python Dependencies
+COPY requirements-rocm-clean.txt .
+RUN pip3 install --no-cache-dir -r requirements-rocm-clean.txt
+
+RUN pip3 install --no-cache-dir 'transformers>=4.33.0' --no-deps
+
+RUN pip3 install --no-cache-dir \
+    tokenizers \
+    huggingface-hub \
+    safetensors \
+    regex \
+    requests \
+    filelock \
+    typing-extensions
+
+# Trainer
+RUN pip3 install --no-cache-dir 'trainer>=0.0.36' --no-deps
+
+# Install Coqui TTS from pinned upstream repo at build time
+ARG TTS_REPO=https://github.com/coqui-ai/TTS.git
+ARG TTS_REF=v0.22.0
+
+WORKDIR /opt/src
+RUN git clone "${TTS_REPO}" TTS && \
+    cd /opt/src/TTS && \
+    git checkout "${TTS_REF}"
+
+WORKDIR /opt/src/TTS
+RUN pip3 install --no-cache-dir --no-deps .
+
+# Verify the ROCm Stack
+RUN python3 -c "import torch; print(f'Torch: {torch.__version__}'); assert 'rocm' in torch.__version__, 'ROCm-enabled PyTorch was overwritten! Build failed.'" && \
+    (pip3 list | grep -i nvidia && echo "ERROR: NVIDIA packages found!" && exit 1 || echo "✓ No NVIDIA contamination")
+
+# Verify TTS import
+RUN python3 -c "import TTS; import TTS.server.server; print('✓ TTS import OK')"
+
+# Finalize Container ---
+WORKDIR /app
+RUN mkdir -p /root/.local/share/tts
+
+# Runtime Defaults
+EXPOSE 8000
+CMD ["python3", "-m", "TTS.server.server", "--model_name", "tts_models/en/ljspeech/tacotron2-DDC", "--port", "8000"]
