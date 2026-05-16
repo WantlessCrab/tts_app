@@ -22,8 +22,8 @@ docker compose -f docker-compose.doctr.yml down
 
 ### Run all containers:
 docker compose -f docker-compose.tts.py310.yml up
-docker compose -f docker-compose.fileserver.yml up
 docker compose -f docker-compose.pdf.yml up
+docker compose -f docker-compose.fileserver.yml up
 docker compose -f docker-compose.gateway.yml up
 docker compose -f docker-compose.acquire.yml up
 docker compose -f docker-compose.convert.yml up
@@ -50,6 +50,8 @@ docker restart project-rebuild-pdf-processor
 # view live logs from current running container, with adjustable range
 docker logs -f --since=1m project-rebuild-pdf-processor
 
+curl -s "http://localhost:8000/api/available_pdfs"
+curl -X POST "http://localhost:8000/api/v1/process/auto_emancipation.pdf"
 curl -X POST "http://localhost:8000/api/v1/process/web_article_short.pdf"
 curl -X POST "http://localhost:8000/api/retry/web_article_short?force_rebuild=true"
 cd scripts/
@@ -83,3 +85,5 @@ docker compose -f docker-compose.convert.yml up
 docker compose -f docker-compose.acquire.yml down -v --remove-orphans
 docker compose -f docker-compose.acquire.yml build --no-cache
 docker compose -f docker-compose.acquire.yml up
+
+https://localhost:9443

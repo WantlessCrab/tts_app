@@ -1,5 +1,5 @@
 {
-  "export_base": "/home/wantless/Documents/ResearchProjectVault/Rebuild Roadmap/code_exports",
+  "export_base": "/home/wantless/Documents/ResearchProjectVault/Dev Workspace/code_exports",
   "max_file_size_mb": 10,
   "ignore_dir_names": [
     "__pycache__",
@@ -10,7 +10,9 @@
     "dist",
     "build",
     ".venv",
-    "venv"
+    "venv",
+    "hf_cache",
+    "vllm_cache"
   ],
   "ignore_dirs": [
     "/home/wantless/PycharmProjects/tts_app/.local",
@@ -21,7 +23,9 @@
     "/home/wantless/PycharmProjects/tts_app/tts_models",
     "/home/wantless/PycharmProjects/tts_app/TTS.egg-info",
     "/home/wantless/PycharmProjects/tts_app/my_app/static/pdfjs",
-    "/home/wantless/PycharmProjects/tts_app/my_app/static/wavesurfer"
+    "/home/wantless/PycharmProjects/tts_app/my_app/static/wavesurfer",
+    "/home/wantless/PycharmProjects/automation/model_runtimes/vllm_rocm/hf_cache",
+    "/home/wantless/PycharmProjects/automation/model_runtimes/vllm_rocm/vllm_cache"
   ],
   "ignore_files": [
     "/home/wantless/PycharmProjects/tts_app/eng.traineddata",
@@ -47,7 +51,7 @@
       "dir_/home/wantless/PycharmProjects/tts_app/my_app/pdf_processor",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.pdf_processor",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.pdf.yml",
-      "file_/home/wantless/PycharmProjects/tts_app/requirements.pdf_processor.txt"
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.pdf.txt"
     ],
     "gateway": [
       "file_/home/wantless/PycharmProjects/tts_app/my_app/gateway_router.py",
@@ -63,6 +67,22 @@
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.tts.py310.yml",
       "file_/home/wantless/PycharmProjects/tts_app/requirements.tts.txt"
     ],
+    "fileserver": [
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.fileserver",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.fileserver.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.fileserver.txt"
+    ],
+    "relay": [
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.relay",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.relay.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.relay.txt"
+    ],
+    "doctr": [
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.doctr",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.doctr.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.doctr.txt"
+    ],
+
     "frontend": [
       "file_/home/wantless/PycharmProjects/tts_app/my_app/templates/player.html",
       "file_/home/wantless/PycharmProjects/tts_app/my_app/static/Readability.js"
@@ -76,13 +96,17 @@
       "file_/home/wantless/PycharmProjects/tts_app/requirements.convert.txt",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.pdf_processor",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.pdf.yml",
-      "file_/home/wantless/PycharmProjects/tts_app/requirements.pdf_processor.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.pdf.txt",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.gateway",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.gateway.yml",
       "file_/home/wantless/PycharmProjects/tts_app/requirements.gateway.txt",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.tts.py310",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.tts.py310.yml",
       "file_/home/wantless/PycharmProjects/tts_app/requirements.tts.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.py310base",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.py310base.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.py312base",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.py312base.yml",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.fileserver",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.fileserver.yml",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.relay",
@@ -92,7 +116,7 @@
       "file_/home/wantless/PycharmProjects/tts_app/requirements.doctr.txt"
     ],
     "my_app": [
-      "dir_/home/wantless/PycharmProjects/tts_app/my_app/acquire",
+      "dir_/home/wantless/PycharmProjects/tts_app/my_app",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.acquire",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.acquire.yml",
       "file_/home/wantless/PycharmProjects/tts_app/requirements.acquire.txt",
@@ -103,7 +127,7 @@
       "dir_/home/wantless/PycharmProjects/tts_app/my_app/pdf_processor",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.pdf_processor",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.pdf.yml",
-      "file_/home/wantless/PycharmProjects/tts_app/requirements.pdf_processor.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.pdf.txt",
       "file_/home/wantless/PycharmProjects/tts_app/my_app/gateway_router.py",
       "file_/home/wantless/PycharmProjects/tts_app/my_app/gateway_contracts.py",
       "file_/home/wantless/PycharmProjects/tts_app/my_app/gateway_clients.py",
@@ -113,10 +137,37 @@
       "file_/home/wantless/PycharmProjects/tts_app/my_app/audio_server.py",
       "file_/home/wantless/PycharmProjects/tts_app/dockerfile.tts.py310",
       "file_/home/wantless/PycharmProjects/tts_app/docker-compose.tts.py310.yml",
-      "file_/home/wantless/PycharmProjects/tts_app/requirements.tts.txt"
-    ],
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.tts.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.fileserver",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.fileserver.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.fileserver.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.relay",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.relay.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.doctr",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.doctr.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.doctr.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.py310base",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.py310base.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.py310base.txt",
+      "file_/home/wantless/PycharmProjects/tts_app/dockerfile.py312base",
+      "file_/home/wantless/PycharmProjects/tts_app/docker-compose.py312base.yml",
+      "file_/home/wantless/PycharmProjects/tts_app/requirements.py312base.txt"
+      ],
     "browser": [
-      "dir_/home/wantless/PycharmProjects/tts_app/browser_dev"
+      "dir_/home/wantless/PycharmProjects/browser",
+      "dir_/home/wantless/PycharmProjects/browser/configs",
+      "dir_home/wantless/PycharmProjects/browser/docker",
+      "dir_home/wantless/PycharmProjects/browser/src/",
+      "dir_/home/wantless/PycharmProjects/browser/src/browser_control",
+      "dir_/home/wantless/PycharmProjects/browser/src/contracts",
+      "dir_/home/wantless/PycharmProjects/browser/src/controlled_target",
+      "dir_/home/wantless/PycharmProjects/browser/src/local_browser"
+    ],
+    "discovery": [
+      "dir_/home/wantless/PycharmProjects/browser/discovery",
+      "dir_/home/wantless/PycharmProjects/browser/discovery/scripts",
+      "dir_/home/wantless/PycharmProjects/browser/discovery/src/discovery_app",
+      "dir_/home/wantless/PycharmProjects/browser/discovery/src/workspace"
     ]
   },
   "target_files": []

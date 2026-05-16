@@ -1,10 +1,6 @@
 # requirements-rocm-clean.txt
-# ========================================
-# KEEP: CORE & LOW-RISK DEPENDENCIES
-# ========================================
-# Purpose: Essential for base TTS function, audio processing, config, and basic language support.
-# Risk: Low risk of conflicting with ROCm PyTorch.
 
+# CORE & LOW-RISK DEPENDENCIES
 numpy>=1.22.0,<2.0
 cython>=0.29.30
 scipy>=1.11.2
@@ -42,44 +38,4 @@ bnnumerizer
 bnunicodenormalizer
 gruut==2.2.3
 
-# ========================================
-# KEEP (Problematic - Handle Separately in Dockerfile)
-# ========================================
-# Purpose: Required for specific models (Transformers/XTTS, Bark) or training, but strictly depend on PyTorch.
-# Risk: High risk of causing pip to install incompatible CUDA PyTorch if not handled carefully.
-# Action: Install these individually in Dockerfile, often using --no-deps initially.
-
 transformers>=4.33.0
-
-# encodec>=0.1.1 # Needed for Bark model (Keep commented for initial build)
-# trainer>=0.0.36 # Needed ONLY for training (Keep commented for initial build)
-
-# ========================================
-# REMOVE (Optional / Non-Essential / High-Risk / Language Specific)
-# ========================================
-# Purpose: Used for web server examples, notebooks, visualization, training plotting, heavy language tools,
-#          or specific languages/extras not immediately needed.
-# Risk: Ranges from low (optional) to high (spacy/thinc). Removing maximizes initial build success.
-
-
-# --- Notebooks / Visualization / Training Plotting ---
-# umap-learn>=0.5.1
-# pandas>=1.4,<2.0
-# matplotlib>=3.7.0
-# pynndescent # Pulled in by umap-learn
-
-# --- Heavy / High-Risk Language / Phonemizer Components ---
-# nltk # Moved from KEEP
-# gruut==2.2.3 # Moved from KEEP (Base phonemizer)
-# spacy>=3 # Moved from KEEP (Known risk)
-# thinc==8.1.12 # Moved from KEEP (Spacy dep, known risk)
-
-# --- Other Specific Languages (Can be added back if needed) ---
-# g2pkk>=0.1.1 # Korean G2P (Moved from KEEP)
-# bangla
-# bnnumerizer
-# bnunicodenormalizer
-
-# --- Language Extras ---
-# gruut[de,es,fr] # Removed extras
-# spacy[ja]>=3 # Removed extras

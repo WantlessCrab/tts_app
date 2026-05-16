@@ -1,4 +1,4 @@
-# Dockerfile.relay
+# dockerfile.relay
 
 # 1. BASE IMAGE (CPU-Only)
 FROM python:3.12-slim
