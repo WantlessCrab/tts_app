@@ -142,3 +142,13 @@ source_probe/
 # Local backup artifacts
 .gitignore.backup.*
 *.backup.*
+
+# Environment variants
+*.env
+!.env.example
+
+# Local cache / database artifacts
+.cache/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
