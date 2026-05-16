@@ -138,3 +138,7 @@ tests/
 ../browser_dev/
 # Local third-party source probes
 source_probe/
+
+# Local backup artifacts
+.gitignore.backup.*
+*.backup.*
