@@ -4,6 +4,8 @@
   "ignore_dir_names": [
     "__pycache__",
     ".git",
+    ".github",
+    ".idea",
     "node_modules",
     ".mypy_cache",
     ".pytest_cache",
@@ -12,7 +14,20 @@
     ".venv",
     "venv",
     "hf_cache",
-    "vllm_cache"
+    "vllm_cache",
+    "dockerfiles_legacy",
+    "images",
+    "obsidian_audio",
+    "outputs",
+    "pdf_cache",
+    "pdf_input",
+    "source_probe",
+    "tts_models",
+    "feature_llm_bridge",
+    "pdfjs",
+    "wavesurfer",
+    "C:",
+    ".svelte"
   ],
   "ignore_dirs": [
     "/home/wantless/PycharmProjects/tts_app/.local",
@@ -20,12 +35,25 @@
     "/home/wantless/PycharmProjects/tts_app/pdf_cache",
     "/home/wantless/PycharmProjects/tts_app/pdf_input",
     "/home/wantless/PycharmProjects/tts_app/obsidian_audio",
+    "/home/wantless/PycharmProjects/tts_app/outputs",
+    "/home/wantless/PycharmProjects/tts_app/source_probe",
+    "/home/wantless/PycharmProjects/tts_app/tts_models",
     "/home/wantless/PycharmProjects/tts_app/tts_models",
     "/home/wantless/PycharmProjects/tts_app/TTS.egg-info",
     "/home/wantless/PycharmProjects/tts_app/my_app/static/pdfjs",
     "/home/wantless/PycharmProjects/tts_app/my_app/static/wavesurfer",
     "/home/wantless/PycharmProjects/automation/model_runtimes/vllm_rocm/hf_cache",
-    "/home/wantless/PycharmProjects/automation/model_runtimes/vllm_rocm/vllm_cache"
+    "/home/wantless/PycharmProjects/automation/model_runtimes/vllm_rocm/vllm_cache",
+    "/home/wantless/PycharmProjects/tts_app/.venv",
+    "/home/wantless/PycharmProjects/tts_app/dockerfiles_legacy",
+    "/home/wantless/PycharmProjects/tts_app/feature_llm_bridge",
+    "/home/wantless/PycharmProjects/tts_app/images",
+    "/home/wantless/PycharmProjects/tts_app/my_app/static/pdfjs",
+    "/home/wantless/PycharmProjects/tts_app/my_app/static/wavesurfer",
+    "/home/wantless/PycharmProjects/tts_app/.github",
+    "/home/wantless/PycharmProjects/tts_app/scripts/C:",
+    "/home/wantless/PycharmProjects/tts_app/.venv",
+    "/home/wantless/PycharmProjects/tts_app/.venv/bin"
   ],
   "ignore_files": [
     "/home/wantless/PycharmProjects/tts_app/eng.traineddata",
@@ -168,6 +196,19 @@
       "dir_/home/wantless/PycharmProjects/browser/discovery/scripts",
       "dir_/home/wantless/PycharmProjects/browser/discovery/src/discovery_app",
       "dir_/home/wantless/PycharmProjects/browser/discovery/src/workspace"
+    ],
+    "llm_router": [
+      "dir_/home/wantless/.config/local-llm-router",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/docs",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/extension",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/extension/content",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/scripts",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/src",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/src/local_llm_router",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/src/local_llm_router/providers",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/systemd",
+      "dir_/home/wantless/PycharmProjects/automation/local_llm_router/web"
     ]
   },
   "target_files": []
