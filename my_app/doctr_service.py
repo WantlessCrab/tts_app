@@ -1,15 +1,18 @@
+from __future__ import annotations
+
 import base64
-import io
+import importlib.util
 import logging
-from typing import List, Dict, Any
-from doctr.io import DocumentFile
-from doctr.models import ocr_predictor
+from typing import Any, Dict, List
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from .service_health import build_health_response
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(title="docTR OCR Service")
 
 _MODEL = None
 
@@ -17,6 +20,7 @@ _MODEL = None
 def _get_model():
     global _MODEL
     if _MODEL is None:
+        from doctr.models import ocr_predictor
         _MODEL = ocr_predictor(pretrained=True)
     return _MODEL
 
@@ -34,12 +38,24 @@ class OCRResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    checks = {
+        "doctr_dependency": "ok" if importlib.util.find_spec(
+            "doctr") else "error: doctr is not installed",
+        "model_loaded": "ok" if _MODEL is not None else "not_loaded",
+    }
+    return build_health_response(
+        service="tts_doctr_service",
+        role="ocr_api",
+        checks=checks,
+        status="ok" if checks["doctr_dependency"] == "ok" else "degraded",
+    )
 
 
 @app.post("/ocr", response_model=OCRResponse)
 def run_ocr(req: OCRRequest):
     try:
+        from doctr.io import DocumentFile
+
         image_bytes = base64.b64decode(req.image_b64)
         doc = DocumentFile.from_images([image_bytes])
         result = _get_model()(doc)
@@ -47,7 +63,7 @@ def run_ocr(req: OCRRequest):
         return OCRResponse(spans=spans)
     except Exception as e:
         logger.error("OCR failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 def _row_key(y0: float, font_size: float) -> float:

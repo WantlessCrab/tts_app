@@ -15,27 +15,19 @@ def _is_pdf_bytes(data: bytes) -> bool:
     return bool(data) and data[:5] == b"%PDF-"
 
 
-def _pdf_response(pdf_bytes: bytes, url: str, method: str) -> Response:
+def _pdf_response(pdf_bytes: bytes, url: str, method: str, trace_id: str | None = None) -> Response:
     """Wrap PDF bytes in a standard Response with acquisition metadata headers."""
+    headers = {
+        "X-Acquire-Source": url[:500],
+        "X-Acquire-Method": method,
+    }
+    if trace_id:
+        headers["X-Trace-ID"] = trace_id
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={
-            "X-Acquire-Source": url[:500],
-            "X-Acquire-Method": method,
-        }
+        headers=headers,
     )
-
-
-class _SpanJsonResponse(Exception):
-    """
-    Dead code marker — OCR routing removed Phase 1b.
-    Retained temporarily until the cleanup pass removes the unused
-    exception and any unreachable branches referencing it.
-    """
-
-    def __init__(self, payload: dict):
-        self.payload = payload
 
 
 async def _post_acquisition_validate(

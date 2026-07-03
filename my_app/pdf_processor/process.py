@@ -13,35 +13,56 @@ Stages:
 
 from fastapi.responses import FileResponse
 import fitz  # PyMuPDF
-import sys
 import base64
 import json
 from pathlib import Path
 import logging
-import logging as _logging
 import asyncio
 import httpx
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 import os
-import uuid
-from typing import List, Optional, Set
-from pydantic import BaseModel, Field, ValidationError
+from typing import Any, List, Optional, Set
+from pydantic import BaseModel, Field
 import tempfile
 import shutil
-import datetime
 import re
 import unicodedata
 import wave
 import io
 from collections import Counter
 
-# V1.6: Use extraction_engine instead of text_cleanup
-try:
-    import pdf_processor.extraction_engine as extraction_engine
-except ImportError:
-    import extraction_engine
+from . import extraction_engine
+
+from ..service_health import build_health_response
+from ..artifact_store import (
+    build_artifact_ref_from_path,
+    document_id_for_file,
+    merge_artifact_ref_dicts,
+    register_artifact,
+    write_document_asset,
+    write_bytes_atomic,
+)
+from ..job_store import (
+    append_job_event,
+    list_job_events,
+    list_jobs,
+    load_job,
+    manifest_job_fields,
+    sync_job_from_manifest,
+    update_job_state,
+)
+from ..toolset_contracts import (
+    DocumentAsset,
+    audiobook_id_from_document_id,
+    model_to_dict,
+    new_job_id,
+    new_trace_id,
+    sha256_file,
+    utc_now_iso,
+)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 # ========================================
 # Pydantic Schema Definition
@@ -57,6 +78,7 @@ class ReadyChunkSchema(BaseModel):
     duration_seconds: float
     end_time: float
     sentences: List[dict]
+    artifact_ref: Optional[dict] = None
 
 
 class ManifestSchema(BaseModel):
@@ -64,14 +86,32 @@ class ManifestSchema(BaseModel):
     metadata: dict = Field(..., description="Original PDF metadata")
     book_id: str
     trace_id: str
+    schema_version: str = "tts.audiobook_manifest.v1"
+    document_id: Optional[str] = None
+    job_id: Optional[str] = None
+    audiobook_id: Optional[str] = None
 
     # State and Progress
     processing_status: Optional[str] = Field(None)
+    job_status: Optional[str] = Field(None)
+    job_stage: Optional[str] = Field(None)
+    progress_current: int = Field(0)
+    progress_total: int = Field(0)
+    progress_percentage: float = Field(0.0)
     total_chunks: int = Field(0)
     ready_chunks: List[ReadyChunkSchema] = Field(default_factory=list)
+    artifact_refs: List[dict] = Field(default_factory=list)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     # Error/Recovery
     error_message: Optional[str] = Field(None)
+    sentence_index: Optional[dict] = None
+    orphaned_audio_artifacts: List[dict] = Field(default_factory=list)
+    failed_chunks: List[dict] = Field(default_factory=list)
+    stage3_failed_chunks: List[dict] = Field(default_factory=list)
+    chunk_state_dir: Optional[str] = None
+    stage3_worker_count: Optional[int] = None
 
 
 # ========================================
@@ -89,18 +129,42 @@ CACHE_DIR = BASE_DIR / "pdf_cache"
 INPUT_DIR = BASE_DIR / "pdf_input"
 OUTPUT_DIR = BASE_DIR / "outputs" / "audiobooks"
 
-CACHE_DIR.mkdir(exist_ok=True)
-INPUT_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
+
+def _ensure_workspace_dirs() -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
 
 app = FastAPI(title="PDF Processing Service")
 client = httpx.AsyncClient(timeout=300.0)
 
 TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://tts-service:8000/api/tts")
 DOCTR_SERVICE_URL = os.getenv("DOCTR_SERVICE_URL", "http://host.docker.internal:8004")
-TTS_MAX_CONCURRENT_REQUESTS = int(os.getenv('TTS_MAX_CONCURRENT_REQUESTS', '10'))
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+TTS_MAX_CONCURRENT_REQUESTS = _env_int('TTS_MAX_CONCURRENT_REQUESTS', 10)
+TTS_STAGE3_WORKER_COUNT = _env_int(
+    'TTS_STAGE3_WORKER_COUNT',
+    min(6, TTS_MAX_CONCURRENT_REQUESTS),
+    maximum=TTS_MAX_CONCURRENT_REQUESTS,
+)
+TTS_STAGE3_PROGRESS_EVENT_EVERY = _env_int('TTS_STAGE3_PROGRESS_EVENT_EVERY', 10)
 TTS_SEMAPHORE = asyncio.Semaphore(TTS_MAX_CONCURRENT_REQUESTS)
 MANIFEST_LOCK = asyncio.Lock()
+ARTIFACT_SHARD_DIRNAME = "artifact_shards"
+AUDIO_TIMING_FILENAME = "audio_timing.json"
 
 TTS_MAX_CHUNK_CHARS = 650
 _TTS_UNIT_MIN_VIABLE_WORDS: int = 3
@@ -117,6 +181,1069 @@ _TTS_MIN_EXPECTED_SECONDS: float = 1.5  # Floor for unit expected duration
 EXTRACTOR_VERSION = "2.2"
 
 MAX_CONSECUTIVE_FAILURES = 5
+
+
+def _manifest_dump(model: BaseModel) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(mode="json")
+    return model.dict()
+
+
+def _header_value(request: Request, name: str) -> Optional[str]:
+    value = request.headers.get(name)
+    value = value.strip() if isinstance(value, str) else None
+    return value or None
+
+
+def _processing_identity_from_request(pdf_path: Path, request: Request) -> dict:
+    trace_id = _header_value(request, "X-Trace-ID") or new_trace_id()
+    document_id = _header_value(request, "X-Document-ID") or document_id_for_file(pdf_path)
+    job_id = _header_value(request, "X-Job-ID") or new_job_id()
+    audiobook_id = _header_value(request, "X-Audiobook-ID") or audiobook_id_from_document_id(
+        document_id)
+    book_id = derive_book_id(audiobook_id)
+    return {
+        "trace_id": trace_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
+        "book_id": book_id,
+    }
+
+
+def _load_manifest(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _identity_from_manifest(book_id: str, trace_id: Optional[str] = None) -> dict:
+    manifest = _load_manifest(OUTPUT_DIR / book_id / "manifest.json")
+    source_filename = manifest.get("metadata", {}).get("source_filename")
+    pdf_path = INPUT_DIR / source_filename if source_filename else None
+    document_id = manifest.get("document_id")
+    if not document_id and pdf_path and pdf_path.exists():
+        document_id = document_id_for_file(pdf_path)
+    audiobook_id = manifest.get("audiobook_id") or book_id
+    return {
+        "trace_id": trace_id or manifest.get("trace_id") or new_trace_id(),
+        "document_id": document_id,
+        "job_id": manifest.get("job_id"),
+        "audiobook_id": audiobook_id,
+        "book_id": book_id,
+    }
+
+
+def _register_file_artifact(
+        *,
+        path: Path,
+        role: str,
+        trace_id: str,
+        book_id: Optional[str] = None,
+        document_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+        audiobook_id: Optional[str] = None,
+        mime_type: str,
+        schema_version: str,
+        metadata: Optional[dict] = None,
+) -> dict:
+    if book_id and (not document_id or not job_id or not audiobook_id):
+        ids = _identity_from_manifest(book_id, trace_id)
+        document_id = document_id or ids.get("document_id")
+        job_id = job_id or ids.get("job_id")
+        audiobook_id = audiobook_id or ids.get("audiobook_id")
+    ref = build_artifact_ref_from_path(
+        path=path,
+        role=role,
+        trace_id=trace_id,
+        job_id=job_id,
+        document_id=document_id,
+        audiobook_id=audiobook_id,
+        mime_type=mime_type,
+        schema_version=schema_version,
+        metadata=metadata or {},
+    )
+    register_artifact(
+        ref,
+        cache_dir=CACHE_DIR,
+        audiobook_dir=(OUTPUT_DIR / book_id) if book_id else None,
+    )
+    return model_to_dict(ref)
+
+
+def _merge_manifest_artifact_refs(manifest: dict, refs: List[dict]) -> dict:
+    if not refs:
+        return manifest
+    manifest["artifact_refs"] = merge_artifact_ref_dicts(manifest.get("artifact_refs", []), refs)
+    return manifest
+
+
+def _append_manifest_artifact_ref(manifest_path: Path, ref: dict, trace_id: str) -> None:
+    manifest = _load_manifest(manifest_path)
+    if not manifest:
+        return
+    _merge_manifest_artifact_refs(manifest, [ref])
+    validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
+
+
+def _register_manifest_artifact(manifest_path: Path, manifest: dict, trace_id: str) -> None:
+    if not manifest_path.exists():
+        return
+    book_id = manifest.get("book_id") or manifest_path.parent.name
+    _register_file_artifact(
+        path=manifest_path,
+        role="audiobook_manifest",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=manifest.get("document_id"),
+        job_id=manifest.get("job_id"),
+        audiobook_id=manifest.get("audiobook_id") or book_id,
+        mime_type="application/json",
+        schema_version="tts.audiobook_manifest.v1",
+        metadata={"processing_status": manifest.get("processing_status")},
+    )
+
+
+def _record_job_stage(
+        manifest_path: Path,
+        trace_id: str,
+        *,
+        status: str = "running",
+        stage: str,
+        message: str | None = None,
+        event_type: str = "stage_started",
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        error: dict | None = None,
+        metadata: dict | None = None,
+) -> None:
+    manifest = _load_manifest(manifest_path)
+    job_id = manifest.get("job_id")
+    if not job_id:
+        return
+    try:
+        update_job_state(
+            cache_dir=CACHE_DIR,
+            job_id=job_id,
+            trace_id=trace_id or manifest.get("trace_id") or "",
+            document_id=manifest.get("document_id"),
+            audiobook_id=manifest.get("audiobook_id") or manifest.get("book_id"),
+            status=status,
+            stage=stage,
+            progress_current=progress_current,
+            progress_total=progress_total,
+            error=error,
+            artifacts=manifest.get("artifact_refs") or [],
+            metadata_patch={**(metadata or {}), "book_id": manifest.get("book_id")},
+            book_id=manifest.get("book_id"),
+            event_type=event_type,
+            message=message,
+        )
+    except Exception as exc:
+        logger.warning("[%s] Failed to record job stage %s: %s", trace_id, stage, exc)
+
+
+def _artifact_shard_root(book_id: str, role: str) -> Path:
+    safe_book_id = derive_book_id(book_id)
+    safe_role = re.sub(r"[^\w\-]+", "_", role).strip("_") or "artifact"
+    return CACHE_DIR / ARTIFACT_SHARD_DIRNAME / safe_book_id / safe_role
+
+
+def _resolve_source_pdf_for_book(safe_book_id: str, manifest_path: Path) -> tuple[str, dict, Path]:
+    existing_manifest = _load_manifest(manifest_path)
+    source_filename = existing_manifest.get("metadata", {}).get("source_filename")
+
+    if not source_filename:
+        for pdf_file in INPUT_DIR.glob("*.pdf"):
+            if derive_book_id(pdf_file.stem) == safe_book_id:
+                source_filename = pdf_file.name
+                break
+
+    if not source_filename:
+        candidates = [
+            f"{safe_book_id}.pdf",
+            f"{safe_book_id.replace('_', ' ')}.pdf",
+            f"{safe_book_id.replace('_', '-')}.pdf",
+        ]
+        for candidate in candidates:
+            if (INPUT_DIR / candidate).exists():
+                source_filename = candidate
+                break
+
+    if not source_filename:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No PDF found for book_id '{safe_book_id}'. Check INPUT_DIR.",
+        )
+
+    source_pdf_path = INPUT_DIR / source_filename
+    if not source_pdf_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source PDF '{source_filename}' not found in INPUT_DIR.",
+        )
+
+    return str(source_filename), existing_manifest, source_pdf_path
+
+
+def _clear_book_outputs_and_caches(safe_book_id: str, source_filename: str, trace_id: str) -> None:
+    book_dir = OUTPUT_DIR / safe_book_id
+    if book_dir.exists():
+        shutil.rmtree(book_dir)
+        logger.info("[%s] Removed audiobook output directory: %s", trace_id, book_dir)
+    book_dir.mkdir(parents=True, exist_ok=True)
+
+    pdf_stem = Path(source_filename).stem
+    files_to_remove = set(CACHE_DIR.glob(f"{safe_book_id}_*"))
+    files_to_remove.update(CACHE_DIR.glob(f"{pdf_stem}_*"))
+    for file_path in files_to_remove:
+        if not file_path.is_file():
+            continue
+        try:
+            file_path.unlink()
+            logger.info("[%s] Removed cache artifact: %s", trace_id, file_path.name)
+        except Exception as exc:
+            logger.warning("[%s] Failed to remove cache artifact %s: %s", trace_id, file_path.name,
+                           exc)
+
+    shard_root = CACHE_DIR / ARTIFACT_SHARD_DIRNAME / safe_book_id
+    if shard_root.exists():
+        shutil.rmtree(shard_root)
+        logger.info("[%s] Removed shard cache directory: %s", trace_id, shard_root)
+
+
+def _page_number(value: Any) -> Optional[int]:
+    try:
+        page = int(value)
+    except (TypeError, ValueError):
+        return None
+    return page if page > 0 else None
+
+
+def _nonnegative_int(value: Any) -> Optional[int]:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _write_json_artifact_shard_index(
+        *,
+        book_id: str,
+        role: str,
+        schema_version: str,
+        index_payload: dict,
+        trace_id: str,
+        document_id: Optional[str],
+        job_id: Optional[str],
+        audiobook_id: Optional[str],
+) -> dict:
+    root = _artifact_shard_root(book_id, role)
+    root.mkdir(parents=True, exist_ok=True)
+    index_path = root / "index.json"
+    atomic_write_manifest(index_path, index_payload, logger)
+    return _register_file_artifact(
+        path=index_path,
+        role=f"{role}_shard_index",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+        mime_type="application/json",
+        schema_version=schema_version,
+        metadata={
+            "page_count": len(index_payload.get("pages") or []),
+            "shard_dir": str(root),
+        },
+    )
+
+
+def _reset_shard_dir(root: Path) -> None:
+    cache_root = (CACHE_DIR / ARTIFACT_SHARD_DIRNAME).resolve()
+    target = root.resolve()
+    try:
+        target.relative_to(cache_root)
+    except ValueError:
+        raise RuntimeError(f"Refusing to reset shard path outside cache shard root: {target}")
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+
+def _write_semantic_page_shards(
+        semantic_data: dict,
+        *,
+        book_id: str,
+        trace_id: str,
+        document_id: Optional[str],
+        job_id: Optional[str],
+        audiobook_id: Optional[str],
+) -> Optional[dict]:
+    spans = semantic_data.get("spans") or {}
+    if not isinstance(spans, dict) or not spans:
+        return None
+
+    root = _artifact_shard_root(book_id, "semantic")
+    _reset_shard_dir(root)
+
+    pages: dict[int, dict[str, dict]] = {}
+    for cid, span in spans.items():
+        if not isinstance(span, dict):
+            continue
+        page = _page_number(span.get("page_number"))
+        if page is None:
+            continue
+        pages.setdefault(page, {})[str(cid)] = span
+
+    index_pages: list[dict] = []
+    for page in sorted(pages):
+        filename = f"page_{page:06d}.json"
+        payload = {
+            "schema_version": "tts.semantic_page.v1",
+            "artifact_type": "semantic_page",
+            "book_id": book_id,
+            "document_id": document_id,
+            "job_id": job_id,
+            "audiobook_id": audiobook_id,
+            "trace_id": trace_id,
+            "page_number": page,
+            "generated_at": utc_now_iso(),
+            "source_schema_version": semantic_data.get("schema_version"),
+            "spans": pages[page],
+            "summary": _build_semantic_summary(pages[page]),
+        }
+        atomic_write_manifest(root / filename, payload, logger)
+        index_pages.append({
+            "page_number": page,
+            "filename": filename,
+            "span_count": len(pages[page]),
+        })
+
+    index_payload = {
+        "schema_version": "tts.semantic_shard_index.v1",
+        "artifact_type": "semantic_shard_index",
+        "book_id": book_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
+        "trace_id": trace_id,
+        "generated_at": utc_now_iso(),
+        "source_artifact": f"{book_id}_semantic.json",
+        "shard_role": "semantic",
+        "pages": index_pages,
+        "summary": {
+            "total_pages": len(index_pages),
+            "total_spans": sum(item["span_count"] for item in index_pages),
+        },
+    }
+    return _write_json_artifact_shard_index(
+        book_id=book_id,
+        role="semantic",
+        schema_version="tts.semantic_shard_index.v1",
+        index_payload=index_payload,
+        trace_id=trace_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+    )
+
+
+def _write_ui_sentence_page_shards(
+        ui_data: dict,
+        *,
+        book_id: str,
+        trace_id: str,
+        document_id: Optional[str],
+        job_id: Optional[str],
+        audiobook_id: Optional[str],
+) -> Optional[dict]:
+    sentences = ui_data.get("sentences") or []
+    if not isinstance(sentences, list) or not sentences:
+        return None
+
+    root = _artifact_shard_root(book_id, "ui_sentences")
+    _reset_shard_dir(root)
+
+    pages: dict[int, list[dict]] = {}
+    for sentence in sentences:
+        if not isinstance(sentence, dict):
+            continue
+        sentence_pages = sentence.get("pages") or []
+        if not isinstance(sentence_pages, list):
+            sentence_pages = [sentence_pages]
+        normalized = sorted(
+            {page for page in (_page_number(value) for value in sentence_pages) if page})
+        for page in normalized:
+            pages.setdefault(page, []).append(sentence)
+
+    index_pages: list[dict] = []
+    for page in sorted(pages):
+        filename = f"page_{page:06d}.json"
+        page_sentences = sorted(
+            pages[page],
+            key=lambda item: (item.get("timing", {}).get("start", 0), item.get("global_index", 0)),
+        )
+        payload = {
+            "schema_version": "tts.ui_sentences_page.v2",
+            "artifact_type": "ui_sentences_page",
+            "book_id": book_id,
+            "document_id": document_id,
+            "job_id": job_id,
+            "audiobook_id": audiobook_id,
+            "trace_id": trace_id,
+            "page_number": page,
+            "generated_at": utc_now_iso(),
+            "source_schema_version": ui_data.get("schema_version"),
+            "sentences": page_sentences,
+            "summary": {
+                "sentence_count": len(page_sentences),
+                "cross_page_sentence_count": sum(
+                    1 for item in page_sentences if len(item.get("pages") or []) > 1),
+            },
+        }
+        atomic_write_manifest(root / filename, payload, logger)
+        index_pages.append({
+            "page_number": page,
+            "filename": filename,
+            "sentence_count": len(page_sentences),
+        })
+
+    index_payload = {
+        "schema_version": "tts.ui_sentences_shard_index.v2",
+        "artifact_type": "ui_sentences_shard_index",
+        "book_id": book_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
+        "trace_id": trace_id,
+        "generated_at": utc_now_iso(),
+        "source_artifact": f"{book_id}_ui_sentences.json",
+        "shard_role": "ui_sentences",
+        "pages": index_pages,
+        "summary": {
+            "total_pages": len(index_pages),
+            "total_sentences_with_page_membership": sum(
+                item["sentence_count"] for item in index_pages),
+            "source_total_sentences": ui_data.get("summary", {}).get("total_sentences"),
+        },
+    }
+    return _write_json_artifact_shard_index(
+        book_id=book_id,
+        role="ui_sentences",
+        schema_version="tts.ui_sentences_shard_index.v2",
+        index_payload=index_payload,
+        trace_id=trace_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+    )
+
+
+def _stage3_checkpoint_path(book_id: str) -> Path:
+    return OUTPUT_DIR / book_id / "stage3_checkpoint.json"
+
+
+def _stage3_chunk_checkpoint_dir(book_id: str) -> Path:
+    return OUTPUT_DIR / book_id / "stage3_chunks"
+
+
+def _stage3_chunk_checkpoint_path(book_id: str, chunk_id: int) -> Path:
+    return _stage3_chunk_checkpoint_dir(book_id) / f"chunk_{int(chunk_id):06d}.json"
+
+
+def _chunk_page_list(chunk: dict) -> list[int]:
+    values = []
+    raw_pages = chunk.get("pages")
+    if isinstance(raw_pages, list):
+        values.extend(raw_pages)
+    elif raw_pages is not None:
+        values.append(raw_pages)
+    if chunk.get("page") is not None:
+        values.append(chunk.get("page"))
+    return sorted({page for page in (_page_number(value) for value in values) if page})
+
+
+def _write_stage3_chunk_checkpoint(
+        *,
+        book_id: str,
+        trace_id: str,
+        chunk: dict,
+        status: str,
+        worker_id: Optional[int] = None,
+        error_message: Optional[str] = None,
+) -> Optional[dict]:
+    chunk_id = _nonnegative_int(chunk.get("chunk_id"))
+    if chunk_id is None:
+        return None
+    ids = _identity_from_manifest(book_id, trace_id)
+    page = _page_number(chunk.get("page"))
+    audio_filename = f"chunk_{chunk_id:04d}_p{page}.wav" if page is not None else f"chunk_{chunk_id:04d}.wav"
+    payload = {
+        "schema_version": "tts.stage3_chunk_checkpoint.v1",
+        "artifact_type": "stage3_chunk_checkpoint",
+        "book_id": book_id,
+        "document_id": ids.get("document_id"),
+        "job_id": ids.get("job_id"),
+        "audiobook_id": ids.get("audiobook_id"),
+        "trace_id": trace_id,
+        "chunk_id": chunk_id,
+        "page": page,
+        "pages": _chunk_page_list(chunk),
+        "audio_filename": audio_filename,
+        "status": status,
+        "worker_id": worker_id,
+        "error_message": error_message,
+        "updated_at": utc_now_iso(),
+    }
+    if status in {"ready", "failed", "skipped"}:
+        payload["completed_at"] = payload["updated_at"]
+    checkpoint_path = _stage3_chunk_checkpoint_path(book_id, chunk_id)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_manifest(checkpoint_path, payload, logger)
+    return payload
+
+
+def _write_stage3_checkpoint(
+        *,
+        book_id: str,
+        trace_id: str,
+        total_chunks: int,
+        worker_count: int,
+        completed_count: int,
+        succeeded_chunk_ids: list[int],
+        failed_chunks: list[dict],
+) -> dict:
+    ids = _identity_from_manifest(book_id, trace_id)
+    failed_ids = [item.get("chunk_id") for item in failed_chunks if
+                  item.get("chunk_id") is not None]
+    completed_ids = sorted(
+        set(succeeded_chunk_ids + [int(item) for item in failed_ids if isinstance(item, int)]))
+    pending_count = max(0, int(total_chunks) - int(completed_count))
+    payload = {
+        "schema_version": "tts.stage3_checkpoint.v1",
+        "artifact_type": "stage3_checkpoint",
+        "book_id": book_id,
+        "document_id": ids.get("document_id"),
+        "job_id": ids.get("job_id"),
+        "audiobook_id": ids.get("audiobook_id"),
+        "trace_id": trace_id,
+        "stage": "stage_3_audio",
+        "chunk_state_dir": str(_stage3_chunk_checkpoint_dir(book_id)),
+        "worker_count": worker_count,
+        "total_chunks": total_chunks,
+        "completed_count": completed_count,
+        "succeeded_count": len(set(succeeded_chunk_ids)),
+        "failed_count": len(failed_chunks),
+        "pending_count": pending_count,
+        "succeeded_chunk_ids": sorted(set(succeeded_chunk_ids)),
+        "failed_chunks": failed_chunks,
+        "completed_chunk_ids": completed_ids,
+        "updated_at": utc_now_iso(),
+    }
+    atomic_write_manifest(_stage3_checkpoint_path(book_id), payload, logger)
+    return payload
+
+
+def _register_stage3_checkpoint_artifact(book_id: str, trace_id: str, manifest_path: Path) -> \
+        Optional[dict]:
+    checkpoint_path = _stage3_checkpoint_path(book_id)
+    if not checkpoint_path.exists():
+        return None
+    ids = _identity_from_manifest(book_id, trace_id)
+    ref = _register_file_artifact(
+        path=checkpoint_path,
+        role="stage3_checkpoint",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=ids.get("document_id"),
+        job_id=ids.get("job_id"),
+        audiobook_id=ids.get("audiobook_id"),
+        mime_type="application/json",
+        schema_version="tts.stage3_checkpoint.v1",
+        metadata={"stage": "stage_3_audio"},
+    )
+    _append_manifest_artifact_ref(manifest_path, ref, trace_id)
+    return ref
+
+
+def _audio_timing_path(book_id: str) -> Path:
+    return OUTPUT_DIR / book_id / AUDIO_TIMING_FILENAME
+
+
+def _wav_duration_seconds(path: Path) -> Optional[float]:
+    try:
+        with wave.open(str(path), "rb") as wav:
+            frames = wav.getnframes()
+            rate = float(wav.getframerate() or 1)
+            return frames / rate
+    except Exception:
+        return None
+
+
+def _chunk_audio_path(book_id: str, ready_chunk: dict) -> Optional[Path]:
+    filename = ready_chunk.get("filename")
+    if not filename:
+        return None
+    candidate = (OUTPUT_DIR / book_id / str(filename)).resolve()
+    try:
+        candidate.relative_to((OUTPUT_DIR / book_id).resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _sentence_estimated_duration(sentence: dict) -> float:
+    value = sentence.get("duration_seconds")
+    if isinstance(value, (int, float)) and float(value) > 0:
+        return float(value)
+    start = sentence.get("start_time")
+    end = sentence.get("end_time")
+    if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end > start:
+        return float(end - start)
+    return 0.0
+
+
+def _write_audio_timing_artifact(
+        *,
+        book_id: str,
+        trace_id: str,
+        manifest_path: Path,
+        citation_json_path: Path,
+) -> Optional[dict]:
+    """Create measured chunk timing plus proportional sentence timing after Stage 3.
+
+    The current TTS path does not expose true word/sentence timestamps from the
+    TTS engine. This artifact therefore uses actual WAV chunk duration as the
+    measured authority and proportionally maps sentence windows inside the
+    measured chunk using Stage 2 sentence duration estimates. The contract is
+    explicit about that basis so downstream UI can prefer it without mistaking it
+    for word-level forced alignment.
+    """
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[%s] Audio timing skipped; manifest unreadable: %s", trace_id, exc)
+        return None
+
+    try:
+        citation_data = json.loads(
+            citation_json_path.read_text(encoding="utf-8")) if citation_json_path.exists() else {}
+    except Exception:
+        citation_data = {}
+
+    ids = _identity_from_manifest(book_id, trace_id)
+    chunk_source = {int(c.get("chunk_id")): c for c in citation_data.get("chunks", []) if
+                    isinstance(c, dict) and c.get("chunk_id") is not None}
+    timing_chunks = []
+    measured_chunk_count = 0
+    proportional_sentence_count = 0
+
+    next_actual_start: Optional[float] = None
+
+    for ready in sorted(manifest.get("ready_chunks", []) or [],
+                        key=lambda item: item.get("chunk_id", 0)):
+        if not isinstance(ready, dict):
+            continue
+        chunk_id = _nonnegative_int(ready.get("chunk_id"))
+        if chunk_id is None:
+            continue
+        audio_path = _chunk_audio_path(book_id, ready)
+        actual_duration = _wav_duration_seconds(
+            audio_path) if audio_path and audio_path.exists() else None
+        if actual_duration is not None:
+            measured_chunk_count += 1
+
+        estimated_start = float(ready.get("start_time") or 0.0)
+        estimated_duration = float(ready.get("duration_seconds") or 0.0)
+        estimated_end = float(ready.get("end_time") or (estimated_start + estimated_duration))
+        actual_duration_for_timeline = float(
+            actual_duration if actual_duration is not None else estimated_duration
+        )
+        actual_start = estimated_start if next_actual_start is None else next_actual_start
+        actual_end = actual_start + max(0.0, actual_duration_for_timeline)
+        next_actual_start = actual_end
+
+        source_chunk = chunk_source.get(chunk_id) or ready
+        source_sentences = source_chunk.get("sentences") or ready.get("sentences") or []
+        sentence_durations = [_sentence_estimated_duration(s) for s in source_sentences if
+                              isinstance(s, dict)]
+        total_estimated_sentence_duration = sum(v for v in sentence_durations if v > 0)
+        actual_cursor = actual_start
+        sentences = []
+
+        for idx, sentence in enumerate(source_sentences):
+            if not isinstance(sentence, dict):
+                continue
+            estimated_sentence_duration = _sentence_estimated_duration(sentence)
+            if actual_duration is not None and total_estimated_sentence_duration > 0 and estimated_sentence_duration > 0:
+                actual_sentence_duration = float(actual_duration) * (
+                        estimated_sentence_duration / total_estimated_sentence_duration)
+                timing_basis = "measured_chunk_proportional_sentence"
+                confidence = "medium"
+            else:
+                actual_sentence_duration = estimated_sentence_duration
+                timing_basis = "estimated_text"
+                confidence = "low"
+
+            sentence_actual_start = actual_cursor
+            sentence_actual_end = sentence_actual_start + max(0.0, actual_sentence_duration)
+            actual_cursor = sentence_actual_end
+            proportional_sentence_count += 1
+            sentences.append({
+                "global_index": sentence.get("global_index"),
+                "sentence_in_chunk": sentence.get("sentence_in_chunk", idx),
+                "estimated_start": float(sentence.get("start_time") or 0.0),
+                "estimated_end": float(sentence.get("end_time") or 0.0),
+                "estimated_duration_seconds": estimated_sentence_duration,
+                "actual_start": sentence_actual_start,
+                "actual_end": sentence_actual_end,
+                "actual_duration_seconds": max(0.0, actual_sentence_duration),
+                "timing_basis": timing_basis,
+                "confidence": confidence,
+            })
+
+        timing_chunks.append({
+            "chunk_id": chunk_id,
+            "filename": ready.get("filename"),
+            "pages": ready.get("pages") or (
+                [ready.get("page")] if ready.get("page") is not None else []),
+            "estimated_start": estimated_start,
+            "estimated_end": estimated_end,
+            "estimated_duration_seconds": estimated_duration,
+            "actual_start": actual_start,
+            "actual_end": actual_end,
+            "actual_duration_seconds": actual_duration,
+            "timing_basis": "measured_wav" if actual_duration is not None else "estimated_text",
+            "confidence": "high" if actual_duration is not None else "low",
+            "audio_path": str(audio_path) if audio_path else None,
+            "sentences": sentences,
+        })
+
+    payload = {
+        "schema_version": "tts.audio_timing.v1",
+        "artifact_type": "audio_timing",
+        "book_id": book_id,
+        "document_id": ids.get("document_id"),
+        "job_id": ids.get("job_id"),
+        "audiobook_id": ids.get("audiobook_id"),
+        "trace_id": trace_id,
+        "generated_at": utc_now_iso(),
+        "timing_basis": "measured_wav_chunk_proportional_sentence",
+        "coordinate_timebase": "global_audiobook_seconds",
+        "timeline_policy": "contiguous_cumulative_chunk_audio",
+        "chunks": timing_chunks,
+        "summary": {
+            "ready_chunk_count": len(manifest.get("ready_chunks", []) or []),
+            "timing_chunk_count": len(timing_chunks),
+            "measured_chunk_count": measured_chunk_count,
+            "proportional_sentence_count": proportional_sentence_count,
+        },
+    }
+    output_path = _audio_timing_path(book_id)
+    atomic_write_manifest(output_path, payload, logger)
+    ref = _register_file_artifact(
+        path=output_path,
+        role="audio_timing",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=ids.get("document_id"),
+        job_id=ids.get("job_id"),
+        audiobook_id=ids.get("audiobook_id"),
+        mime_type="application/json",
+        schema_version="tts.audio_timing.v1",
+        metadata=payload["summary"],
+    )
+    try:
+        manifest["audio_timing_ready"] = True
+        manifest["audio_timing_artifact_ref"] = ref
+        _merge_manifest_artifact_refs(manifest, [ref])
+        validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
+    except Exception as exc:
+        logger.warning("[%s] Audio timing artifact written but manifest update failed: %s",
+                       trace_id, exc)
+    _record_job_stage(
+        manifest_path,
+        trace_id,
+        status=manifest.get("processing_status") or "stage_3_partial",
+        stage="stage_3_audio_timing",
+        message="Audio timing artifact generated from measured WAV chunk durations.",
+        event_type="audio_timing_generated",
+        metadata=payload["summary"],
+    )
+    return ref
+
+
+def _should_emit_stage3_progress(completed: int, total: int) -> bool:
+    if completed <= 0:
+        return False
+    return completed == total or completed == 1 or completed % TTS_STAGE3_PROGRESS_EVENT_EVERY == 0
+
+
+async def _generate_audio_chunks_bounded(
+        *,
+        chunks: list[dict],
+        book_id: str,
+        trace_id: str,
+        manifest_path: Path,
+) -> dict:
+    """Run Stage 3 with a fixed-size worker pool instead of one task per chunk."""
+    total = len(chunks)
+    worker_count = min(max(1, TTS_STAGE3_WORKER_COUNT), total)
+    queue: asyncio.Queue[tuple[int, dict] | None] = asyncio.Queue(maxsize=max(1, worker_count * 2))
+    progress_lock = asyncio.Lock()
+    succeeded_chunk_ids: list[int] = []
+    failed_chunks: list[dict] = []
+    state = {"completed": 0, "successes": 0, "failures": 0}
+
+    try:
+        _write_stage3_checkpoint(
+            book_id=book_id,
+            trace_id=trace_id,
+            total_chunks=total,
+            worker_count=worker_count,
+            completed_count=0,
+            succeeded_chunk_ids=succeeded_chunk_ids,
+            failed_chunks=failed_chunks,
+        )
+    except Exception as exc:
+        logger.warning("[%s] Failed to write initial Stage 3 checkpoint: %s", trace_id, exc)
+
+    async def worker(worker_id: int) -> None:
+        while True:
+            item = await queue.get()
+            try:
+                if item is None:
+                    return
+                index, chunk = item
+                chunk_id = chunk.get("chunk_id", index)
+                ok = False
+                error_message = None
+                try:
+                    try:
+                        _write_stage3_chunk_checkpoint(
+                            book_id=book_id,
+                            trace_id=trace_id,
+                            chunk=chunk,
+                            status="running",
+                            worker_id=worker_id,
+                        )
+                    except Exception as checkpoint_exc:
+                        logger.warning(
+                            "[%s] Failed to write running checkpoint for chunk %s: %s",
+                            trace_id, chunk_id, checkpoint_exc
+                        )
+                    ok = await generate_single_chunk(chunk, book_id, trace_id, manifest_path,
+                                                     logger)
+                except Exception as exc:
+                    error_message = f"{type(exc).__name__}: {exc}"
+                    logger.error(
+                        "[%s] Stage 3 worker %s crashed on chunk %s",
+                        trace_id,
+                        worker_id,
+                        chunk_id,
+                        exc_info=True,
+                    )
+
+                async with progress_lock:
+                    state["completed"] += 1
+                    normalized_chunk_id = _nonnegative_int(chunk_id)
+                    if normalized_chunk_id is None:
+                        normalized_chunk_id = int(index)
+                    if ok:
+                        state["successes"] += 1
+                        succeeded_chunk_ids.append(normalized_chunk_id)
+                        try:
+                            _write_stage3_chunk_checkpoint(
+                                book_id=book_id,
+                                trace_id=trace_id,
+                                chunk=chunk,
+                                status="ready",
+                                worker_id=worker_id,
+                            )
+                        except Exception as checkpoint_exc:
+                            logger.warning(
+                                "[%s] Failed to write ready checkpoint for chunk %s: %s",
+                                trace_id, normalized_chunk_id, checkpoint_exc
+                            )
+                    else:
+                        state["failures"] += 1
+                        failure = {
+                            "chunk_id": normalized_chunk_id,
+                            "worker_id": worker_id,
+                            "reason": error_message or "generation_failed",
+                        }
+                        failed_chunks.append(failure)
+                        try:
+                            _write_stage3_chunk_checkpoint(
+                                book_id=book_id,
+                                trace_id=trace_id,
+                                chunk=chunk,
+                                status="failed",
+                                worker_id=worker_id,
+                                error_message=failure["reason"],
+                            )
+                        except Exception as checkpoint_exc:
+                            logger.warning(
+                                "[%s] Failed to write failed checkpoint for chunk %s: %s",
+                                trace_id, normalized_chunk_id, checkpoint_exc
+                            )
+                    try:
+                        _write_stage3_checkpoint(
+                            book_id=book_id,
+                            trace_id=trace_id,
+                            total_chunks=total,
+                            worker_count=worker_count,
+                            completed_count=state["completed"],
+                            succeeded_chunk_ids=succeeded_chunk_ids,
+                            failed_chunks=failed_chunks,
+                        )
+                    except Exception as exc:
+                        logger.warning("[%s] Failed to write Stage 3 checkpoint: %s", trace_id, exc)
+                    if _should_emit_stage3_progress(state["completed"], total):
+                        _record_job_stage(
+                            manifest_path, trace_id,
+                            status="stage_3_running",
+                            stage="stage_3_audio",
+                            message=(
+                                f"Stage 3 progress: {state['completed']}/{total} chunks "
+                                f"({state['successes']} ready, {state['failures']} failed)."
+                            ),
+                            event_type="stage_3_progress",
+                            progress_current=state["completed"],
+                            progress_total=total,
+                            metadata={
+                                "worker_count": worker_count,
+                                "succeeded_count": state["successes"],
+                                "failed_count": state["failures"],
+                            },
+                        )
+            finally:
+                queue.task_done()
+
+    workers = [asyncio.create_task(worker(i + 1)) for i in range(worker_count)]
+    for index, chunk in enumerate(chunks):
+        await queue.put((index, chunk))
+    await queue.join()
+    for _ in workers:
+        await queue.put(None)
+    await asyncio.gather(*workers)
+
+    _register_stage3_checkpoint_artifact(book_id, trace_id, manifest_path)
+    return {
+        "total": total,
+        "worker_count": worker_count,
+        "successes": state["successes"],
+        "failures": state["failures"],
+        "failed_chunks": failed_chunks,
+        "succeeded_chunk_ids": sorted(set(succeeded_chunk_ids)),
+    }
+
+
+def _sync_manifest_job_state(manifest_path: Path, manifest: dict,
+                             event_type: Optional[str] = None) -> None:
+    if manifest_path.name != "manifest.json":
+        return
+    try:
+        sync_job_from_manifest(
+            manifest,
+            cache_dir=CACHE_DIR,
+            audiobook_dir=manifest_path.parent,
+            event_type=event_type,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[%s] Failed to sync job state for %s: %s",
+            manifest.get("trace_id") or "N/A",
+            manifest.get("job_id") or manifest_path,
+            exc,
+        )
+
+
+def _with_job_progress_fields(manifest: dict) -> dict:
+    payload = dict(manifest or {})
+    payload.update(manifest_job_fields(payload))
+    return payload
+
+
+def _seed_document_asset(
+        *,
+        pdf_path: Path,
+        trace_id: str,
+        document_id: str,
+        job_id: str,
+        audiobook_id: str,
+        source_filename: str,
+        canonical_pdf_ref: dict,
+) -> None:
+    try:
+        asset = DocumentAsset(
+            document_id=document_id,
+            trace_id=trace_id,
+            source_kind="upload_pdf",
+            source_filename=source_filename,
+            content_sha256=sha256_file(pdf_path),
+            canonical_pdf=canonical_pdf_ref,
+            metadata={"processor_source_filename": source_filename},
+        )
+        write_document_asset(asset, cache_dir=CACHE_DIR)
+    except Exception as exc:
+        logger.warning("[%s] Failed to write document asset %s: %s", trace_id, document_id, exc)
+
+
+def _build_initial_manifest_for_pdf(pdf_path: Path, source_filename: str, book_id: str,
+                                    trace_id: str) -> dict:
+    document_id = document_id_for_file(pdf_path)
+    audiobook_id = book_id
+    job_id = new_job_id()
+    canonical_pdf_ref = _register_file_artifact(
+        path=pdf_path,
+        role="canonical_pdf",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+        mime_type="application/pdf",
+        schema_version="tts.canonical_pdf.v1",
+        metadata={"source_filename": source_filename, "source": "processor_direct"},
+    )
+    _seed_document_asset(
+        pdf_path=pdf_path,
+        trace_id=trace_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+        source_filename=source_filename,
+        canonical_pdf_ref=canonical_pdf_ref,
+    )
+    return {
+        "schema_version": "tts.audiobook_manifest.v1",
+        "metadata": {"source_filename": source_filename},
+        "book_id": book_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
+        "trace_id": trace_id,
+        "processing_status": "processing_started",
+        "total_chunks": 0,
+        "ready_chunks": [],
+        "artifact_refs": [canonical_pdf_ref],
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+
+
+def _extraction_engine_check() -> str:
+    return "ok"
 
 
 # ========================================
@@ -224,6 +1351,7 @@ def _concatenate_wav_with_gaps(wav_segments: List[bytes], gap_ms: int = 40) -> b
 
 @app.on_event("startup")
 async def startup_event():
+    _ensure_workspace_dirs()
     TTS_SERVICE_ROOT = TTS_SERVICE_URL.replace("/api/tts", "/")
     if not TTS_SERVICE_URL or TTS_SERVICE_URL == "http://tts-service:8000/api/tts":
         logger.warning("TTS_SERVICE_URL not configured. Verify environment variable.")
@@ -241,12 +1369,45 @@ async def shutdown_event():
     logger.info("HTTP client closed.")
 
 
+@app.get("/health")
+async def health():
+    checks = {
+        "input_dir": "ok" if INPUT_DIR.exists() else f"error: missing {INPUT_DIR}",
+        "cache_dir": "ok" if CACHE_DIR.exists() else f"error: missing {CACHE_DIR}",
+        "output_dir": "ok" if OUTPUT_DIR.exists() else f"error: missing {OUTPUT_DIR}",
+        "extraction_engine": _extraction_engine_check(),
+        "tts_service_url": "ok" if TTS_SERVICE_URL else "error: not configured",
+    }
+    return build_health_response(
+        service="tts_pdf_processor",
+        role="pdf_processor_api",
+        checks=checks,
+        details={
+            "input_dir": str(INPUT_DIR),
+            "cache_dir": str(CACHE_DIR),
+            "output_dir": str(OUTPUT_DIR),
+            "tts_service_url": TTS_SERVICE_URL,
+            "doctr_service_url": DOCTR_SERVICE_URL,
+            "extractor_version": EXTRACTOR_VERSION,
+            "stage3_worker_count": TTS_STAGE3_WORKER_COUNT,
+            "stage3_progress_event_every": TTS_STAGE3_PROGRESS_EVENT_EVERY,
+            "artifact_shard_dir": str(CACHE_DIR / ARTIFACT_SHARD_DIRNAME),
+        },
+    )
+
+
 # ========================================
 # API Endpoints
 # ========================================
 
+
 @app.post("/api/v1/process/{pdf_filename}")
-async def start_pdf_processing(pdf_filename: str, background_tasks: BackgroundTasks):
+async def start_pdf_processing(
+        pdf_filename: str,
+        background_tasks: BackgroundTasks,
+        raw_request: Request,
+):
+    _ensure_workspace_dirs()
     safe_filename = re_sanitize(pdf_filename)
     if not safe_filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Must be a PDF file")
@@ -255,31 +1416,88 @@ async def start_pdf_processing(pdf_filename: str, background_tasks: BackgroundTa
     if not pdf_path.exists():
         raise HTTPException(status_code=404, detail="PDF not found")
 
-    book_id = derive_book_id(pdf_path.stem)
-    trace_id = str(uuid.uuid4())
+    ids = _processing_identity_from_request(pdf_path, raw_request)
+    trace_id = ids["trace_id"]
+    document_id = ids["document_id"]
+    job_id = ids["job_id"]
+    audiobook_id = ids["audiobook_id"]
+    book_id = ids["book_id"]
+
     audio_dir = OUTPUT_DIR / book_id
     manifest_path = audio_dir / "manifest.json"
 
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    stub_manifest = {
+    canonical_pdf_ref = _register_file_artifact(
+        path=pdf_path,
+        role="canonical_pdf",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+        mime_type="application/pdf",
+        schema_version="tts.canonical_pdf.v1",
+        metadata={"source_filename": safe_filename},
+    )
+    _seed_document_asset(
+        pdf_path=pdf_path,
+        trace_id=trace_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+        source_filename=safe_filename,
+        canonical_pdf_ref=canonical_pdf_ref,
+    )
+
+    initial_manifest = {
+        "schema_version": "tts.audiobook_manifest.v1",
         "metadata": {"source_filename": safe_filename},
         "book_id": book_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
         "trace_id": trace_id,
         "processing_status": "processing_started",
         "total_chunks": 0,
-        "ready_chunks": []
+        "ready_chunks": [],
+        "artifact_refs": [canonical_pdf_ref],
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
     }
 
     try:
-        validate_and_write_manifest(manifest_path, stub_manifest, trace_id, logger)
+        validate_and_write_manifest(manifest_path, initial_manifest, trace_id, logger)
+        append_job_event(
+            cache_dir=CACHE_DIR,
+            job_id=job_id,
+            trace_id=trace_id,
+            event_type="processor_job_accepted",
+            status="running",
+            stage="processing_started",
+            document_id=document_id,
+            audiobook_id=audiobook_id,
+            book_id=book_id,
+            message="Processor accepted audiobook job.",
+            progress_current=0,
+            progress_total=0,
+            data={"pdf_filename": safe_filename, "book_id": book_id},
+        )
     except Exception as e:
-        logger.error(f"[{trace_id}] Failed to create manifest stub: {e}")
+        logger.error(f"[{trace_id}] Failed to create initial manifest: {e}")
         raise HTTPException(status_code=500, detail="Failed to initialize processing")
 
     background_tasks.add_task(run_full_pipeline, safe_filename, book_id, trace_id, False)
 
-    return {"status": "processing_started", "book_id": book_id, "trace_id": trace_id}
+    return {
+        "status": "processing_started",
+        "book_id": book_id,
+        "trace_id": trace_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
+        "canonical_pdf_artifact_id": canonical_pdf_ref.get("artifact_id"),
+    }
 
 
 @app.post("/api/v1/retry/{book_id}")
@@ -288,128 +1506,93 @@ async def retry_processing(
         background_tasks: BackgroundTasks,
         force_rebuild: bool = False
 ):
-    logger.info(f"--- RETRY DEBUG: Start for '{book_id}' ---")
+    _ensure_workspace_dirs()
+    logger.info("Retry requested for audiobook %s", book_id)
 
-    # 1. Resolve book ID
     safe_book_id = re_sanitize(book_id)
     manifest_path = OUTPUT_DIR / safe_book_id / "manifest.json"
 
-    # 2. Try to find source filename from multiple sources
-    source_filename = None
-    existing_manifest = None
+    source_filename, existing_manifest, source_pdf_path = _resolve_source_pdf_for_book(safe_book_id,
+                                                                                       manifest_path)
 
-    # Source A: Existing manifest
-    if manifest_path.exists():
-        try:
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                existing_manifest = json.load(f)
-            source_filename = existing_manifest.get('metadata', {}).get('source_filename')
-            logger.info(f"Found source from manifest: {source_filename}")
-        except Exception as e:
-            logger.warning(f"Failed to read manifest: {e}")
-
-    # Source B: Scan INPUT_DIR for matching PDF (Lead's approach)
-    if not source_filename:
-        for pdf_file in INPUT_DIR.glob("*.pdf"):
-            if derive_book_id(pdf_file.stem) == safe_book_id:
-                source_filename = pdf_file.name
-                logger.info(f"Found source from INPUT_DIR scan: {source_filename}")
-                break
-
-    # Source C: Try common naming patterns (Specialist addition)
-    if not source_filename:
-        candidates = [
-            f"{safe_book_id}.pdf",
-            f"{safe_book_id.replace('_', ' ')}.pdf",
-            f"{safe_book_id.replace('_', '-')}.pdf",
-        ]
-        for candidate in candidates:
-            if (INPUT_DIR / candidate).exists():
-                source_filename = candidate
-                logger.info(f"Found source from pattern match: {source_filename}")
-                break
-
-    # 3. Final check - must have source file (Specialist addition)
-    if not source_filename:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No PDF found for book_id '{safe_book_id}'. Check INPUT_DIR."
-        )
-
-    # Verify the PDF actually exists (Specialist addition)
-    if not (INPUT_DIR / source_filename).exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Source PDF '{source_filename}' not found in INPUT_DIR."
-        )
-
-    # 4. Status check (only if not force_rebuild and manifest exists)
+    # 3. Status check (only if not force_rebuild and manifest exists)
     if not force_rebuild:
         if not existing_manifest:
             raise HTTPException(
                 status_code=404,
                 detail=f"No manifest found for '{safe_book_id}'. Use force_rebuild=true."
             )
-        if existing_manifest.get('processing_status') not in ['failed', 'stage_3_partial', 'stage_3_started']:
+        if existing_manifest.get('processing_status') not in ['failed', 'stage_3_partial',
+                                                              'stage_3_started']:
             raise HTTPException(
                 status_code=400,
                 detail="Job is not in a retryable state. Use force_rebuild=true."
             )
 
-    new_trace_id = str(uuid.uuid4())
+    generated_trace_id = new_trace_id()
+    retry_document_id = (existing_manifest or {}).get("document_id") or document_id_for_file(
+        source_pdf_path)
+    retry_audiobook_id = (existing_manifest or {}).get("audiobook_id") or safe_book_id
+    retry_job_id = new_job_id()
 
-    # 5. SCORCHED EARTH (Combined approach)
+    # 4. Full rebuild replaces generated outputs and derived caches for this audiobook.
     if force_rebuild:
-        logger.warning(f"Force Rebuild: Scorched Earth for '{safe_book_id}'")
+        _clear_book_outputs_and_caches(safe_book_id, source_filename, generated_trace_id)
 
-        # A. Nuke output directory
-        book_dir = OUTPUT_DIR / safe_book_id
-        if book_dir.exists():
-            shutil.rmtree(book_dir)
-            logger.info(f"Deleted output directory: {book_dir}")
-        book_dir.mkdir(parents=True, exist_ok=True)
-
-        # B. Nuke caches - Glob pattern approach (Lead's approach)
-        pdf_stem = Path(source_filename).stem
-
-        # Use set to avoid duplicate deletion attempts
-        files_to_nuke = set()
-        files_to_nuke.update(CACHE_DIR.glob(f"{safe_book_id}_*"))
-        files_to_nuke.update(CACHE_DIR.glob(f"{pdf_stem}_*"))
-
-        # Delete with error handling (Lead's approach)
-        for file_path in files_to_nuke:
-            try:
-                if file_path.is_file():
-                    file_path.unlink()
-                    logger.info(f"Deleted cache: {file_path.name}")
-            except Exception as e:
-                logger.warning(f"Failed to delete {file_path.name}: {e}")
-
-        # C. Fresh manifest
+        canonical_pdf_ref = _register_file_artifact(
+            path=source_pdf_path,
+            role="canonical_pdf",
+            trace_id=generated_trace_id,
+            book_id=safe_book_id,
+            document_id=retry_document_id,
+            job_id=retry_job_id,
+            audiobook_id=retry_audiobook_id,
+            mime_type="application/pdf",
+            schema_version="tts.canonical_pdf.v1",
+            metadata={"source_filename": source_filename, "retry_force_rebuild": True},
+        )
         manifest = {
+            "schema_version": "tts.audiobook_manifest.v1",
             "metadata": {"source_filename": source_filename},
             "book_id": safe_book_id,
-            "trace_id": new_trace_id,
+            "document_id": retry_document_id,
+            "job_id": retry_job_id,
+            "audiobook_id": retry_audiobook_id,
+            "trace_id": generated_trace_id,
             "processing_status": "processing_started",
             "total_chunks": 0,
             "ready_chunks": [],
-            "error_message": None
+            "artifact_refs": [canonical_pdf_ref],
+            "error_message": None,
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
         }
     else:
         manifest = dict(existing_manifest)
         manifest['processing_status'] = 'processing_started'
-        manifest['trace_id'] = new_trace_id
+        manifest['trace_id'] = generated_trace_id
+        manifest['document_id'] = retry_document_id
+        manifest['job_id'] = retry_job_id
+        manifest['audiobook_id'] = retry_audiobook_id
         manifest['error_message'] = None
+        manifest['updated_at'] = utc_now_iso()
 
     # 6. Write manifest and start pipeline
-    validate_and_write_manifest(manifest_path, manifest, new_trace_id, logger)
+    validate_and_write_manifest(manifest_path, manifest, generated_trace_id, logger)
+    _register_manifest_artifact(manifest_path, manifest, generated_trace_id)
 
     background_tasks.add_task(
-        run_full_pipeline, source_filename, safe_book_id, new_trace_id, force_rebuild
+        run_full_pipeline, source_filename, safe_book_id, generated_trace_id, force_rebuild
     )
 
-    return {"status": "retry_started", "book_id": safe_book_id, "trace_id": new_trace_id}
+    return {
+        "status": "retry_started",
+        "book_id": safe_book_id,
+        "trace_id": generated_trace_id,
+        "document_id": retry_document_id,
+        "job_id": retry_job_id,
+        "audiobook_id": retry_audiobook_id,
+    }
 
 
 @app.post("/api/v1/rebuild_selective/{book_id}")
@@ -420,10 +1603,7 @@ async def rebuild_selective(
         pages: Optional[str] = None,
 ):
     """
-    Selective rebuild: full Stages 1+2, targeted Stage 3.
-
-    Runs identical scorched-earth + full extraction + full semantic chunking.
-    Only Stage 3 (TTS audio generation) is filtered to target chunks.
+    Selective rebuild: full extraction and semantic preparation with targeted Stage 3 audio generation.
 
     Args:
         book_id: Target book identifier (from URL path).
@@ -431,9 +1611,9 @@ async def rebuild_selective(
         chunk_ids: Comma-separated chunk IDs, e.g. "0,5,9"
         pages: Comma-separated page numbers, e.g. "1,3" (resolved to chunk IDs after Stage 2)
     """
-    logger.info(f"--- SELECTIVE REBUILD: Start for '{book_id}' ---")
+    _ensure_workspace_dirs()
+    logger.info("Selective rebuild requested for audiobook %s", book_id)
 
-    # 1. Resolve book ID
     safe_book_id = re_sanitize(book_id)
     manifest_path = OUTPUT_DIR / safe_book_id / "manifest.json"
 
@@ -463,87 +1643,57 @@ async def rebuild_selective(
             detail="Must specify chunk_ids and/or pages. For full rebuild use retry with force_rebuild=true."
         )
 
-    # 3. Find source filename
-    # NOTE: This resolution logic mirrors retry endpoint (lines 297-344).
-    # Intentional duplication: extracting a shared helper would refactor
-    # the existing endpoint, which is outside scope.
-    source_filename = None
+    source_filename, existing_identity_manifest, source_pdf_path = _resolve_source_pdf_for_book(
+        safe_book_id, manifest_path
+    )
 
-    # Source A: Existing manifest
-    if manifest_path.exists():
-        try:
-            with open(manifest_path, 'r', encoding='utf-8') as f:
-                existing_manifest = json.load(f)
-            source_filename = existing_manifest.get('metadata', {}).get('source_filename')
-        except Exception as e:
-            logger.warning(f"Failed to read manifest: {e}")
+    generated_trace_id = new_trace_id()
+    selective_document_id = existing_identity_manifest.get("document_id") or document_id_for_file(
+        source_pdf_path)
+    selective_audiobook_id = existing_identity_manifest.get("audiobook_id") or safe_book_id
+    selective_job_id = new_job_id()
 
-    # Source B: Scan INPUT_DIR
-    if not source_filename:
-        for pdf_file in INPUT_DIR.glob("*.pdf"):
-            if derive_book_id(pdf_file.stem) == safe_book_id:
-                source_filename = pdf_file.name
-                break
-
-    # Source C: Pattern match
-    if not source_filename:
-        candidates = [
-            f"{safe_book_id}.pdf",
-            f"{safe_book_id.replace('_', ' ')}.pdf",
-            f"{safe_book_id.replace('_', '-')}.pdf",
-        ]
-        for candidate in candidates:
-            if (INPUT_DIR / candidate).exists():
-                source_filename = candidate
-                break
-
-    if not source_filename:
-        raise HTTPException(status_code=404, detail=f"No PDF found for book_id '{safe_book_id}'.")
-
-    if not (INPUT_DIR / source_filename).exists():
-        raise HTTPException(status_code=404, detail=f"Source PDF '{source_filename}' not found.")
-
-    new_trace_id = str(uuid.uuid4())
-
-    # 4. Scorched earth (identical to force_rebuild)
-    logger.warning(f"[{new_trace_id}] Selective Rebuild: Scorched Earth for '{safe_book_id}'")
-
-    book_dir = OUTPUT_DIR / safe_book_id
-    if book_dir.exists():
-        shutil.rmtree(book_dir)
-        logger.info(f"Deleted output directory: {book_dir}")
-    book_dir.mkdir(parents=True, exist_ok=True)
-
-    pdf_stem = Path(source_filename).stem
-    files_to_nuke = set()
-    files_to_nuke.update(CACHE_DIR.glob(f"{safe_book_id}_*"))
-    files_to_nuke.update(CACHE_DIR.glob(f"{pdf_stem}_*"))
-    for file_path in files_to_nuke:
-        try:
-            if file_path.is_file():
-                file_path.unlink()
-                logger.info(f"Deleted cache: {file_path.name}")
-        except Exception as e:
-            logger.warning(f"Failed to delete {file_path.name}: {e}")
+    # 4. Selective rebuild replaces generated outputs and derived caches for this audiobook.
+    _clear_book_outputs_and_caches(safe_book_id, source_filename, generated_trace_id)
 
     # 5. Fresh manifest
+    canonical_pdf_ref = _register_file_artifact(
+        path=source_pdf_path,
+        role="canonical_pdf",
+        trace_id=generated_trace_id,
+        book_id=safe_book_id,
+        document_id=selective_document_id,
+        job_id=selective_job_id,
+        audiobook_id=selective_audiobook_id,
+        mime_type="application/pdf",
+        schema_version="tts.canonical_pdf.v1",
+        metadata={"source_filename": source_filename, "selective_rebuild": True},
+    )
     manifest = {
+        "schema_version": "tts.audiobook_manifest.v1",
         "metadata": {"source_filename": source_filename},
         "book_id": safe_book_id,
-        "trace_id": new_trace_id,
+        "document_id": selective_document_id,
+        "job_id": selective_job_id,
+        "audiobook_id": selective_audiobook_id,
+        "trace_id": generated_trace_id,
         "processing_status": "processing_started",
         "total_chunks": 0,
         "ready_chunks": [],
-        "error_message": None
+        "artifact_refs": [canonical_pdf_ref],
+        "error_message": None,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
     }
-    validate_and_write_manifest(manifest_path, manifest, new_trace_id, logger)
+    validate_and_write_manifest(manifest_path, manifest, generated_trace_id, logger)
+    _register_manifest_artifact(manifest_path, manifest, generated_trace_id)
 
     # 6. Dispatch selective pipeline
     background_tasks.add_task(
         run_selective_pipeline,
         source_filename,
         safe_book_id,
-        new_trace_id,
+        generated_trace_id,
         target_chunk_ids,
         target_pages,
     )
@@ -551,7 +1701,10 @@ async def rebuild_selective(
     return {
         "status": "selective_rebuild_started",
         "book_id": safe_book_id,
-        "trace_id": new_trace_id,
+        "trace_id": generated_trace_id,
+        "document_id": selective_document_id,
+        "job_id": selective_job_id,
+        "audiobook_id": selective_audiobook_id,
         "target_chunk_ids": sorted(target_chunk_ids) if target_chunk_ids else None,
         "target_pages": sorted(target_pages) if target_pages else None,
     }
@@ -593,6 +1746,99 @@ async def serve_pdf_document(pdf_filename: str):
     )
 
 
+@app.get("/api/v1/jobs")
+async def list_processing_jobs(
+        status: Optional[str] = None,
+        book_id: Optional[str] = None,
+        limit: int = 100,
+):
+    return {"jobs": list_jobs(cache_dir=CACHE_DIR, status=status, book_id=book_id, limit=limit)}
+
+
+@app.get("/api/v1/jobs/{job_id}")
+async def get_processing_job(job_id: str):
+    job = load_job(job_id, cache_dir=CACHE_DIR)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return job
+
+
+@app.get("/api/v1/jobs/{job_id}/events")
+async def get_processing_job_events(job_id: str, limit: int = 500):
+    if not load_job(job_id, cache_dir=CACHE_DIR):
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    return {"job_id": job_id, "events": list_job_events(job_id, cache_dir=CACHE_DIR, limit=limit)}
+
+
+def _safe_shard_role(role: str) -> str:
+    candidate = re.sub(r"[^\w\-]+", "_", role).strip("_")
+    if candidate not in {"semantic", "ui_sentences"}:
+        raise HTTPException(status_code=404, detail=f"Shard role not found: {role}")
+    return candidate
+
+
+@app.get("/api/v1/audiobooks/{book_id}/stage3-checkpoint")
+async def get_stage3_checkpoint(book_id: str):
+    safe_book_id = derive_book_id(book_id)
+    path = _stage3_checkpoint_path(safe_book_id)
+    data = _load_manifest(path)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Stage 3 checkpoint not found: {book_id}")
+    return data
+
+
+@app.get("/api/v1/audiobooks/{book_id}/stage3/checkpoint")
+async def get_stage3_checkpoint_canonical(book_id: str):
+    return await get_stage3_checkpoint(book_id)
+
+
+@app.get("/api/v1/audiobooks/{book_id}/audio-timing")
+async def get_audio_timing_artifact(book_id: str):
+    safe_book_id = sanitize_filename(book_id)
+    path = _audio_timing_path(safe_book_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Audio timing artifact not found: {book_id}")
+    return FileResponse(path, media_type="application/json")
+
+
+@app.get("/api/v1/audiobooks/{book_id}/stage3/chunks/{chunk_id}")
+async def get_stage3_chunk_checkpoint(book_id: str, chunk_id: int):
+    safe_book_id = derive_book_id(book_id)
+    if chunk_id < 0:
+        raise HTTPException(status_code=400, detail="chunk_id must be non-negative")
+    path = _stage3_chunk_checkpoint_path(safe_book_id, chunk_id)
+    data = _load_manifest(path)
+    if not data:
+        raise HTTPException(status_code=404,
+                            detail=f"Stage 3 chunk checkpoint not found: {book_id}/{chunk_id}")
+    return data
+
+
+@app.get("/api/v1/audiobooks/{book_id}/shards/{role}")
+async def get_artifact_shard_index(book_id: str, role: str):
+    safe_book_id = derive_book_id(book_id)
+    safe_role = _safe_shard_role(role)
+    path = _artifact_shard_root(safe_book_id, safe_role) / "index.json"
+    data = _load_manifest(path)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Shard index not found: {book_id}/{role}")
+    return data
+
+
+@app.get("/api/v1/audiobooks/{book_id}/shards/{role}/pages/{page_number}")
+async def get_artifact_shard_page(book_id: str, role: str, page_number: int):
+    safe_book_id = derive_book_id(book_id)
+    safe_role = _safe_shard_role(role)
+    if page_number < 1:
+        raise HTTPException(status_code=400, detail="page_number must be positive")
+    path = _artifact_shard_root(safe_book_id, safe_role) / f"page_{page_number:06d}.json"
+    data = _load_manifest(path)
+    if not data:
+        raise HTTPException(status_code=404,
+                            detail=f"Shard page not found: {book_id}/{role}/{page_number}")
+    return data
+
+
 # ========================================
 # Pipeline Orchestrator
 # ========================================
@@ -603,6 +1849,7 @@ async def run_full_pipeline(
         trace_id: str,
         force_rebuild: bool = False
 ):
+    _ensure_workspace_dirs()
     logger.info(f"[{trace_id}] Pipeline started for: {pdf_filename}")
 
     pdf_path = INPUT_DIR / pdf_filename
@@ -613,7 +1860,7 @@ async def run_full_pipeline(
     m = None  # Initialized; assigned when manifest is read/created
     try:
         # ====================================================================
-        # P0 FIX: Version-Aware Cache Check
+        # Version-aware cache gate
         # ====================================================================
         use_cache = False
 
@@ -643,15 +1890,9 @@ async def run_full_pipeline(
             with open(citation_cache_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if not manifest_path.exists():
-                m = {
-                    "metadata": {"source_filename": pdf_filename},
-                    "book_id": book_id,
-                    "trace_id": trace_id,
-                    "processing_status": "processing_started",
-                    "total_chunks": 0,
-                    "ready_chunks": []
-                }
+                m = _build_initial_manifest_for_pdf(pdf_path, pdf_filename, book_id, trace_id)
                 validate_and_write_manifest(manifest_path, m, trace_id, logger)
+                _register_manifest_artifact(manifest_path, m, trace_id)
 
             with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
@@ -668,20 +1909,21 @@ async def run_full_pipeline(
             # Stage 1: Extraction (extraction_engine)
             logger.info(
                 f"[{trace_id}] Stage 1: Extraction (extraction_engine v{EXTRACTOR_VERSION})...")
+            _record_job_stage(
+                manifest_path, trace_id,
+                status="running",
+                stage="stage_1_extracting",
+                message="Stage 1 extraction started.",
+                event_type="stage_1_started",
+            )
             raw_cache_path = process_pdf(pdf_filename, book_id, trace_id)
             if not raw_cache_path:
                 raise RuntimeError("Stage 1 failed")
 
             if not manifest_path.exists():
-                m = {
-                    "metadata": {"source_filename": pdf_filename},
-                    "book_id": book_id,
-                    "trace_id": trace_id,
-                    "processing_status": "processing_started",
-                    "total_chunks": 0,
-                    "ready_chunks": []
-                }
+                m = _build_initial_manifest_for_pdf(pdf_path, pdf_filename, book_id, trace_id)
                 validate_and_write_manifest(manifest_path, m, trace_id, logger)
+                _register_manifest_artifact(manifest_path, m, trace_id)
 
             with open(manifest_path, 'r', encoding='utf-8') as f:
                 m = json.load(f)
@@ -691,6 +1933,13 @@ async def run_full_pipeline(
 
             # Stage 2: Semantic Chunking
             logger.info(f"[{trace_id}] Stage 2: Semantic Chunking...")
+            _record_job_stage(
+                manifest_path, trace_id,
+                status="running",
+                stage="stage_2_semantic",
+                message="Stage 2 semantic chunking started.",
+                event_type="stage_2_started",
+            )
             citation_ready_path = prepare_tts_chunks_with_citations(raw_cache_path, trace_id)
             if not citation_ready_path:
                 raise RuntimeError("Stage 2 failed")
@@ -707,6 +1956,14 @@ async def run_full_pipeline(
         # Stage 3: Audio Generation (ALWAYS RUN)
 
         logger.info(f"[{trace_id}] Stage 3: Audio Generation...")
+
+        _record_job_stage(
+            manifest_path, trace_id,
+            status="running",
+            stage="stage_3_audio",
+            message="Stage 3 audio generation started.",
+            event_type="stage_3_started",
+        )
 
         with open(manifest_path, 'r', encoding='utf-8') as f:
             m = json.load(f)
@@ -736,6 +1993,14 @@ async def run_full_pipeline(
             m['processing_status'] = 'failed'
             m['error_message'] = str(e)
             validate_and_write_manifest(manifest_path, m, trace_id, logger)
+            _record_job_stage(
+                manifest_path, trace_id,
+                status="failed",
+                stage="failed",
+                message=str(e),
+                event_type="pipeline_failed",
+                error={"message": str(e)},
+            )
         except Exception as manifest_err:
             logger.warning(
                 f"[{trace_id}] Failed to update manifest after pipeline failure: {manifest_err}")
@@ -765,6 +2030,14 @@ async def run_selective_pipeline(
         # ══════════════════════════════════════════════════════════════
         logger.info(
             f"[{trace_id}] Stage 1: Extraction (extraction_engine v{EXTRACTOR_VERSION})...")
+        _record_job_stage(
+            manifest_path, trace_id,
+            status="running",
+            stage="stage_1_extracting",
+            message="Selective rebuild Stage 1 extraction started.",
+            event_type="stage_1_started",
+            metadata={"selective_rebuild": True},
+        )
         raw_cache_path = process_pdf(pdf_filename, book_id, trace_id)
         if not raw_cache_path:
             raise RuntimeError("Stage 1 failed")
@@ -778,6 +2051,14 @@ async def run_selective_pipeline(
         # STAGE 2: Semantic Chunking (identical to run_full_pipeline)
         # ══════════════════════════════════════════════════════════════
         logger.info(f"[{trace_id}] Stage 2: Semantic Chunking...")
+        _record_job_stage(
+            manifest_path, trace_id,
+            status="running",
+            stage="stage_2_semantic",
+            message="Selective rebuild Stage 2 semantic chunking started.",
+            event_type="stage_2_started",
+            metadata={"selective_rebuild": True},
+        )
         citation_ready_path = prepare_tts_chunks_with_citations(raw_cache_path, trace_id)
         if not citation_ready_path:
             raise RuntimeError("Stage 2 failed")
@@ -819,6 +2100,15 @@ async def run_selective_pipeline(
         logger.info(
             f"[{trace_id}] Stage 3: Selective Audio Generation "
             f"(targeting {len(resolved_chunk_ids)} chunks: {sorted(resolved_chunk_ids)})"
+        )
+
+        _record_job_stage(
+            manifest_path, trace_id,
+            status="running",
+            stage="stage_3_audio",
+            message="Selective rebuild Stage 3 audio generation started.",
+            event_type="stage_3_started",
+            metadata={"selective_rebuild": True, "target_chunk_count": len(resolved_chunk_ids)},
         )
 
         with open(manifest_path, 'r', encoding='utf-8') as f:
@@ -931,6 +2221,7 @@ def _route_page_to_doctr(
         )
         return []
 
+
 # ========================================
 # STAGE 1: Extraction (extraction_engine)
 # ========================================
@@ -1040,7 +2331,7 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
                 "author": doc.metadata.get("author", "Unknown"),
                 "source_filename": pdf_path.name,
                 "total_pages": doc.page_count,
-                "extractor_version": EXTRACTOR_VERSION  # NEW
+                "extractor_version": EXTRACTOR_VERSION
             }
 
             # Stage 1: Extract all pages using extraction_engine
@@ -1078,15 +2369,41 @@ def process_pdf(pdf_filename: str, book_id: str = None, trace_id: str = None):
             )
 
         # Build output structure compatible with Stage 2
+        effective_book_id = book_id or derive_book_id(pdf_path.stem)
+        ids = _identity_from_manifest(effective_book_id, trace_id)
+        metadata.update({
+            "document_id": ids.get("document_id"),
+            "job_id": ids.get("job_id"),
+            "audiobook_id": ids.get("audiobook_id"),
+        })
         output_data = {
+            "schema_version": "tts.raw_extraction.v1",
             "metadata": metadata,
             "pages": page_outputs,
-            "book_id": book_id or derive_book_id(pdf_path.stem),
-            "trace_id": trace_id
+            "book_id": effective_book_id,
+            "document_id": ids.get("document_id"),
+            "job_id": ids.get("job_id"),
+            "audiobook_id": ids.get("audiobook_id"),
+            "trace_id": trace_id,
+            "generated_at": utc_now_iso(),
         }
 
-        with open(cache_file_path, 'w', encoding='utf-8') as f:
-            json.dump(output_data, f, indent=2, ensure_ascii=False, default=str)
+        atomic_write_manifest(cache_file_path, output_data, logger)
+        raw_ref = _register_file_artifact(
+            path=cache_file_path,
+            role="raw_extraction",
+            trace_id=trace_id or ids.get("trace_id"),
+            book_id=effective_book_id,
+            document_id=ids.get("document_id"),
+            job_id=ids.get("job_id"),
+            audiobook_id=ids.get("audiobook_id"),
+            mime_type="application/json",
+            schema_version="tts.raw_extraction.v1",
+            metadata={"total_pages": metadata.get("total_pages"),
+                      "extractor_version": EXTRACTOR_VERSION},
+        )
+        _append_manifest_artifact_ref(OUTPUT_DIR / effective_book_id / "manifest.json", raw_ref,
+                                      trace_id or ids.get("trace_id"))
 
         logger.info(
             f"[{trace_id or 'N/A'}] Stage 1 complete: {len(page_outputs)} pages extracted"
@@ -1149,11 +2466,14 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
         if stem.endswith("_raw"):
             stem = stem[:-4]
         book_id = data.get('book_id') or derive_book_id(stem)
+        ids = _identity_from_manifest(book_id, trace_id)
+        document_id = data.get('document_id') or ids.get("document_id")
+        job_id = data.get('job_id') or ids.get("job_id")
+        audiobook_id = data.get('audiobook_id') or ids.get("audiobook_id")
 
         # ═══════════════════════════════════════════════════════════════════
         # SEMANTIC ARTIFACT: Persist RONC/A2/disposition decisions
-        # P6 FIX: Use processed_spans from tts_result (contains P6 modifications)
-        # instead of page_outputs (original unmodified spans)
+        # using the Stage 2 processed span authority rather than raw pages.
         # ═══════════════════════════════════════════════════════════════════
         semantic_path = CACHE_DIR / f"{book_id}_semantic.json"
         processed_spans = tts_result.get('processed_spans', {})
@@ -1187,9 +2507,14 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
                         )
 
         output_data = {
+            'schema_version': 'tts.citation_ready.v1',
             'metadata': data['metadata'],
             'book_id': book_id,
+            'document_id': document_id,
+            'job_id': job_id,
+            'audiobook_id': audiobook_id,
             'trace_id': trace_id,
+            'generated_at': utc_now_iso(),
             'processing': tts_result['processing'],
             'document_headers': tts_result.get('document_headers', []),
             'document_footers': tts_result.get('document_footers', []),
@@ -1199,6 +2524,20 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
         }
 
         atomic_write_manifest(citation_path, output_data, logger)
+        citation_ref = _register_file_artifact(
+            path=citation_path,
+            role="citation_ready",
+            trace_id=trace_id,
+            book_id=book_id,
+            document_id=document_id,
+            job_id=job_id,
+            audiobook_id=audiobook_id,
+            mime_type="application/json",
+            schema_version="tts.citation_ready.v1",
+            metadata={"total_chunks": tts_result['processing'].get('total_chunks')},
+        )
+        _append_manifest_artifact_ref(OUTPUT_DIR / book_id / "manifest.json", citation_ref,
+                                      trace_id)
 
         # ═══════════════════════════════════════════════════════════════════
         # STAGE 2.5: UI PRESENTATION SYNTHESIS (NON-FATAL)
@@ -1233,7 +2572,7 @@ def prepare_tts_chunks_with_citations(cache_file_path: Path, trace_id: str = Non
 
 def _format_chunks_for_manifest(chunks: List[dict]) -> List[dict]:
     """
-    Formats extraction_engine chunks for manifest/citation compatibility.
+    Formats extraction_engine chunks for manifest and citation artifacts.
     """
     formatted = []
     for chunk in chunks:
@@ -1281,7 +2620,7 @@ def _format_chunks_for_manifest(chunks: List[dict]) -> List[dict]:
 
 def _format_sentences_for_manifest(sentences: List[dict]) -> List[dict]:
     """
-    Formats extraction_engine sentences for manifest compatibility.
+    Formats extraction_engine sentences for manifest artifacts.
 
     V2.1: Includes full provenance for joinability and forensic debugging.
 
@@ -1433,21 +2772,24 @@ def _generate_ui_sentences_artifact(
 ) -> Optional[Path]:
     """
     STAGE 2.5: Generate UI presentation synthesis artifact.
-    [docstring unchanged]
+    Build the frontend-facing sentence, geometry, and timing artifact from
+    citation_ready and semantic artifacts.
     """
     try:
-        # ... load source artifacts (unchanged) ...
-
         with open(citation_ready_path, 'r', encoding='utf-8') as f:
             citation_data = json.load(f)
 
         with open(semantic_path, 'r', encoding='utf-8') as f:
             semantic_data = json.load(f)
 
-        # ─────────────────────────────────────────────────────────────────
-        # CORRECTION 6: Prefer file's book_id over parameter
-        # ─────────────────────────────────────────────────────────────────
+        # Prefer the artifact's own book_id over the caller parameter.
         effective_book_id = citation_data.get("book_id") or book_id
+        ids = _identity_from_manifest(effective_book_id, trace_id)
+        document_id = citation_data.get("document_id") or semantic_data.get(
+            "document_id") or ids.get("document_id")
+        job_id = citation_data.get("job_id") or semantic_data.get("job_id") or ids.get("job_id")
+        audiobook_id = citation_data.get("audiobook_id") or semantic_data.get(
+            "audiobook_id") or ids.get("audiobook_id")
 
         span_lookup: dict[str, dict] = semantic_data.get("spans", {})
 
@@ -1456,8 +2798,8 @@ def _generate_ui_sentences_artifact(
 
         cross_page_count = 0
         stitched_count = 0
-        skipped_no_index = 0  # CORRECTION 3: Track skipped sentences
-        skipped_no_geometry = 0  # Track sentences with no resolved geometry
+        skipped_no_index = 0
+        skipped_no_geometry = 0
         all_pages: set = set()
 
         for chunk in citation_data.get("chunks", []):
@@ -1466,9 +2808,7 @@ def _generate_ui_sentences_artifact(
             for sent in chunk.get("sentences", []):
                 global_idx = sent.get("global_index")
 
-                # ─────────────────────────────────────────────────────────
-                # CORRECTION 3: Guard against missing global_index
-                # ─────────────────────────────────────────────────────────
+                # Guard against missing or invalid global_index.
                 if not isinstance(global_idx, int):
                     skipped_no_index += 1
                     if trace_id:
@@ -1487,10 +2827,14 @@ def _generate_ui_sentences_artifact(
                 # ═══════════════════════════════════════════════════════════════
                 source_cids = _filter_excluded_cids(raw_source_cids, span_lookup)
 
-                # Resolve geometry (preserves source_cids order)
+                coverage_by_cid = _compute_sentence_cid_coverage(sent, source_cids, span_lookup)
+
+                # Resolve geometry (preserves source_cids order), now carrying
+                # backend sentence-ownership ratios for progressive highlighting.
                 geometry_by_page = _resolve_geometry_by_page_for_ui(
                     source_cids,
-                    span_lookup
+                    span_lookup,
+                    coverage_by_cid=coverage_by_cid,
                 )
 
                 pages = sorted(int(p) for p in geometry_by_page.keys())
@@ -1509,22 +2853,51 @@ def _generate_ui_sentences_artifact(
 
                 # ─────────────────────────────────────────────────────────
                 # BUILD UI SENTENCE RECORD
-                # CORRECTION 2: Add 'cids' field for I1 validation
+                # V2: explicit display/spoken split, sentence-owned CIDs,
+                # coordinate-space/timing declarations, and geometry coverage.
                 # ─────────────────────────────────────────────────────────
-                ui_sent: dict[str, any] = {
+                spoken_text = sent.get("spoken_text") or sent.get("text") or ""
+                display_text = sent.get("display_text") or sent.get("raw_text") or sent.get(
+                    "text") or ""
+                normalized_text = _normalize_for_alignment(display_text or spoken_text)
+                estimated_start = float(sent.get("start_time", 0.0))
+                estimated_end = float(sent.get("end_time", 0.0))
+                ui_sent: dict[str, Any] = {
                     "global_index": global_idx,
                     "chunk_id": chunk_id,
-                    "text": sent.get("text", ""),
+                    "text": display_text,
+                    "display_text": display_text,
+                    "spoken_text": spoken_text,
+                    "normalized_text": normalized_text,
                     "role": sent.get("role", "body"),
                     "timing": {
-                        "start": float(sent.get("start_time", 0.0)),
-                        "end": float(sent.get("end_time", 0.0))
+                        "start": estimated_start,
+                        "end": estimated_end,
+                        "estimated_start": estimated_start,
+                        "estimated_end": estimated_end,
+                        "estimated_duration_seconds": max(0.0, estimated_end - estimated_start),
+                        "actual_start": None,
+                        "actual_end": None,
+                        "actual_duration_seconds": None,
+                        "basis": "estimated_text",
+                        "confidence": "estimated",
                     },
                     "pages": pages,
-                    "cids": source_cids,  # NEW: preserves exact order for I1
+                    "cids": source_cids,
+                    "source_cids": source_cids,
+                    "geometry_cids": source_cids,
                     "geometry": geometry_by_page,
+                    "char_start": sent.get("char_start"),
+                    "char_end": sent.get("char_end"),
                     "is_stitched": bool(sent.get("is_stitched", False)),
-                    "alignment_quality": sent.get("alignment_method", "unknown")
+                    "alignment_quality": sent.get("alignment_method", "unknown"),
+                    "alignment": {
+                        "coverage_method": "backend_text_unique_when_available",
+                        "has_backend_coverage": any(
+                            (v.get("coverage_method") == "text_unique_alignment")
+                            for v in (coverage_by_cid or {}).values()
+                        ),
+                    },
                 }
 
                 # Update counters
@@ -1544,22 +2917,17 @@ def _generate_ui_sentences_artifact(
                     if global_idx not in page_index[page_key]["sentence_indices"]:
                         page_index[page_key]["sentence_indices"].append(global_idx)
 
-        # ─────────────────────────────────────────────────────────────────
-        # CORRECTION 4: Sort page_index sentence lists numerically
-        # ─────────────────────────────────────────────────────────────────
+        # Sort page_index sentence lists numerically for deterministic UI loads.
         for page_key in page_index:
             page_index[page_key]["sentence_indices"].sort()
 
-        # ─────────────────────────────────────────────────────────────────
-        # CORRECTION 1: Attach page turns AFTER sentences are built
-        # Compute from_page from sentence's pages list
-        # ─────────────────────────────────────────────────────────────────
+        # Attach page turns after sentence construction so from_page is computed
+        # from the sentence's own resolved page list.
         page_turn_markers = citation_data.get("page_turn_markers", [])
         _attach_page_turns_to_sentences(ui_sentences, page_turn_markers)
 
         # ─────────────────────────────────────────────────────────────────
         # ASSEMBLE OUTPUT
-        # CORRECTION 6: Use timezone-aware UTC
         # ═══════════════════════════════════════════════════════════════════
         # ARCHITECTURAL NOTE: excluded_spans intentionally NOT included
         #
@@ -1570,15 +2938,28 @@ def _generate_ui_sentences_artifact(
         # This keeps ui_sentences.json single-purpose and avoids
         # data duplication with semantic.json.
         # ─────────────────────────────────────────────────────────────────
-        output: dict[str, any] = {
-            "schema_version": "1.1",
+        output: dict[str, Any] = {
+            "schema_version": "tts.ui_sentences.v2",
             "artifact_type": "ui_sentences",
             "ui_scope": "tts_playback",
+            "coordinate_space": {
+                "units": "pdf_points",
+                "origin": "top_left",
+                "bbox_format": "[x0, y0, x1, y1]",
+                "page_rotation_applied": False,
+                "geometry_authority": "backend_ui_sentences",
+            },
+            "timing_contract": {
+                "timebase": "global_audiobook_seconds",
+                "default_basis": "estimated_text",
+                "actual_timing_artifact": AUDIO_TIMING_FILENAME,
+            },
             "book_id": effective_book_id,
+            "document_id": document_id,
+            "job_id": job_id,
+            "audiobook_id": audiobook_id,
             "trace_id": trace_id,
-            "generated_at": datetime.datetime.now(
-                datetime.timezone.utc
-            ).isoformat(),
+            "generated_at": utc_now_iso(),
             "source_artifacts": {
                 "citation_ready": citation_ready_path.name,
                 "semantic": semantic_path.name
@@ -1597,6 +2978,31 @@ def _generate_ui_sentences_artifact(
 
         output_path = citation_ready_path.parent / f"{effective_book_id}_ui_sentences.json"
         atomic_write_manifest(output_path, output, logger)
+        ui_ref = _register_file_artifact(
+            path=output_path,
+            role="ui_sentences",
+            trace_id=trace_id,
+            book_id=effective_book_id,
+            document_id=document_id,
+            job_id=job_id,
+            audiobook_id=audiobook_id,
+            mime_type="application/json",
+            schema_version="tts.ui_sentences.v2",
+            metadata={"total_sentences": len(ui_sentences), "total_pages": len(all_pages)},
+        )
+        shard_ref = _write_ui_sentence_page_shards(
+            output,
+            book_id=effective_book_id,
+            trace_id=trace_id,
+            document_id=document_id,
+            job_id=job_id,
+            audiobook_id=audiobook_id,
+        )
+        _append_manifest_artifact_ref(OUTPUT_DIR / effective_book_id / "manifest.json", ui_ref,
+                                      trace_id)
+        if shard_ref:
+            _append_manifest_artifact_ref(OUTPUT_DIR / effective_book_id / "manifest.json",
+                                          shard_ref, trace_id)
 
         logger.info(
             "[%s] Stage 2.5 complete: %d sentences, %d pages, "
@@ -1626,7 +3032,7 @@ def _attach_page_turns_to_sentences(
         page_turn_markers: List[dict]
 ) -> None:
     """
-    CORRECTION 1: Attach page turns to sentences with correctly computed from_page.
+    Attach page turns to sentences with correctly computed from_page.
 
     Computes from_page by examining the sentence's own pages list,
     rather than assuming to_page - 1.
@@ -1677,9 +3083,107 @@ def _attach_page_turns_to_sentences(
         }
 
 
+def _normalize_for_alignment(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _sentence_alignment_text(sentence: dict) -> str:
+    for key in ("display_text", "text", "spoken_text", "tts_text"):
+        value = sentence.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _compute_sentence_cid_coverage(sentence: dict, source_cids: List[str],
+                                   span_lookup: dict[str, dict]) -> dict[str, dict]:
+    """Return per-CID sentence ownership ratios for UI highlight geometry.
+
+    This is intentionally conservative. When the sentence cannot be uniquely
+    aligned within concatenated source span text, every CID remains full-width
+    and the method is marked non-authoritative rather than inventing precision.
+    """
+    coverage = {
+        cid: {
+            "coverage_start_ratio": 0.0,
+            "coverage_end_ratio": 1.0,
+            "char_start": None,
+            "char_end": None,
+            "coverage_method": "full_span_default",
+            "coverage_confidence": "low",
+        }
+        for cid in source_cids
+        if cid
+    }
+    if not source_cids or not span_lookup:
+        return coverage
+
+    pieces = []
+    combined = ""
+    for cid in source_cids:
+        span = span_lookup.get(cid) or {}
+        cleaned = _normalize_for_alignment(span.get("cleaned_text") or span.get("raw_text") or "")
+        start = len(combined)
+        combined += cleaned
+        end = len(combined)
+        combined += " "
+        pieces.append({"cid": cid, "text": cleaned, "start": start, "end": end})
+    combined = combined.rstrip()
+    needle = _normalize_for_alignment(_sentence_alignment_text(sentence))
+    if len(needle) < 3 or not combined:
+        return coverage
+
+    match = combined.find(needle)
+    if match < 0:
+        return coverage
+    if combined.find(needle, match + 1) >= 0:
+        return coverage
+
+    sentence_start = match
+    sentence_end = match + len(needle)
+    for piece in pieces:
+        cid = piece["cid"]
+        text_value = piece["text"]
+        length = len(text_value)
+        if length <= 0:
+            coverage[cid] = {
+                "coverage_start_ratio": 0.0,
+                "coverage_end_ratio": 0.0,
+                "char_start": 0,
+                "char_end": 0,
+                "coverage_method": "text_unique_empty_span",
+                "coverage_confidence": "medium",
+            }
+            continue
+        overlap_start = max(piece["start"], sentence_start)
+        overlap_end = min(piece["end"], sentence_end)
+        if overlap_end <= overlap_start:
+            coverage[cid] = {
+                "coverage_start_ratio": 0.0,
+                "coverage_end_ratio": 0.0,
+                "char_start": 0,
+                "char_end": 0,
+                "coverage_method": "text_unique_outside_sentence",
+                "coverage_confidence": "medium",
+            }
+            continue
+        local_start = max(0, overlap_start - piece["start"])
+        local_end = max(local_start, overlap_end - piece["start"])
+        coverage[cid] = {
+            "coverage_start_ratio": round(max(0.0, min(1.0, local_start / length)), 6),
+            "coverage_end_ratio": round(max(0.0, min(1.0, local_end / length)), 6),
+            "char_start": int(local_start),
+            "char_end": int(local_end),
+            "coverage_method": "text_unique_alignment",
+            "coverage_confidence": "high",
+        }
+    return coverage
+
+
 def _resolve_geometry_by_page_for_ui(
         source_cids: List[str],
-        span_lookup: dict[str, dict]
+        span_lookup: dict[str, dict],
+        coverage_by_cid: Optional[dict[str, dict]] = None
 ) -> dict[str, List[dict]]:
     """
     Resolve CID list to geometry grouped by page.
@@ -1728,17 +3232,20 @@ def _resolve_geometry_by_page_for_ui(
         if page_key not in geometry_by_page:
             geometry_by_page[page_key] = []
 
-        geometry_by_page[page_key].append({
+        geom_entry = {
             "cid": cid,
             "bbox": list(bbox[:4])  # Ensure list, take first 4 elements
-        })
+        }
+        if coverage_by_cid and cid in coverage_by_cid:
+            geom_entry.update(coverage_by_cid[cid])
+        geometry_by_page[page_key].append(geom_entry)
 
     return geometry_by_page
 
 
 def validate_ui_sentences_contract(
-        ui_data: dict[str, any],
-        semantic_data: Optional[dict[str, any]] = None
+        ui_data: dict[str, Any],
+        semantic_data: Optional[dict[str, Any]] = None
 ) -> List[str]:
     """
     Validate ui_sentences.json against schema invariants.
@@ -1907,7 +3414,7 @@ def validate_ui_sentences_contract(
     forbidden_fields = [
         "_ronc_contract", "_semantic_confidence", "_semantic_disposition",
         "_tts_exclude_reason", "_source_span_ids", "cleaned_text", "raw_text",
-        "span_start_index", "span_end_index", "char_start", "char_end"
+        "span_start_index", "span_end_index"
     ]
 
     for sent in sentences:
@@ -1979,8 +3486,8 @@ def _save_semantic_artifact(
     """
     STAGE 2 OUTPUT: Semantic authority artifact.
 
-    P6 FIX: Now receives processed_spans dict (keyed by CID) directly from
-    compile_tts_ready_content, which includes P6 same-line promotions.
+    Receives the processed_spans dict keyed by canonical span ID from
+    compile_tts_ready_content.
 
     Schema v1.0 Contract:
         - extraction artifact = geometry + basic classification (Stage 1)
@@ -1991,83 +3498,92 @@ def _save_semantic_artifact(
         - _tts_excluded is a Stage 2 eligibility decision
         - manifest.json is the emission authority (Stage 3)
     """
+    ids = _identity_from_manifest(book_id, trace_id)
+    document_id = metadata.get("document_id") or ids.get("document_id")
+    job_id = metadata.get("job_id") or ids.get("job_id")
+    audiobook_id = metadata.get("audiobook_id") or ids.get("audiobook_id")
     semantic_data = {
+        "schema_version": "tts.semantic.v1",
         "metadata": {
             **metadata,
             "artifact_type": "semantic",
-            "schema_version": "1.1",
+            "schema_version": "tts.semantic.v1",
             "stage": "2",
             "authority_scope": "semantic_eligibility",
         },
         "book_id": book_id,
+        "document_id": document_id,
+        "job_id": job_id,
+        "audiobook_id": audiobook_id,
         "trace_id": trace_id,
-        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "generated_at": utc_now_iso(),
         "spans": {}
     }
 
-    # P6 FIX: Iterate processed_spans dict directly (already keyed by CID)
+    # Iterate processed_spans dict directly; it is already keyed by CID.
     for cid, sp in processed_spans.items():
         if not cid:
             continue
 
         semantic_data["spans"][cid] = {
-                # RONC Contract (full authority record)
-                "_ronc_contract": sp.get("_ronc_contract"),
-                # Canonical ID (P5 FIX: required for provenance tracking)
-                "_canonical_span_id": cid,
-                # A2 Edge Qualification (Phase 7)
-                "_a2_edge_exists": sp.get("_a2_edge_exists"),
-                "_a2_cross_stream": sp.get("_a2_cross_stream"),
-                "_a2_qualified": sp.get("_a2_qualified"),
-                "_a2_edge_prev_id": sp.get("_a2_edge_prev_id"),
-                # Semantic Disposition (with confidence)
-                "_semantic_disposition": sp.get("_semantic_disposition"),
-                "_semantic_reasons": sp.get("_semantic_reasons"),
-                "_semantic_confidence": sp.get("_semantic_confidence"),
-                # TTS Eligibility (Stage 2 decision, not emission truth)
-                "_tts_excluded": sp.get("_tts_excluded"),
-                "_tts_exclude_reason": sp.get("_tts_exclude_reason"),
-                "_tts_include_reason": sp.get("_tts_include_reason"),
-                # RONC Legacy Fields
-                "_ronc_atomic_unit_id": sp.get("_ronc_atomic_unit_id"),
-                "_ronc_atomic_role": sp.get("_ronc_atomic_role"),
-                "_ronc_break_after": sp.get("_ronc_break_after"),
-                "_ronc_rescue_applied": sp.get("_ronc_rescue_applied"),
-                # Structural Context (for diagnostics)
-                "layout_stream": sp.get("layout_stream"),
-                "role": sp.get("role"),
-                "page_number": sp.get("page_number"),
-                "block_id": sp.get("block_id"),
-                "cleaned_text": (sp.get("cleaned_text") or "")[:100],
-                "line_index": sp.get("line_index"),
-                "span_index_in_line": sp.get("span_index_in_line"),
-                "line_id": sp.get("line_id"),
-                "bbox": sp.get("bbox"),
+            # RONC Contract (full authority record)
+            "_ronc_contract": sp.get("_ronc_contract"),
+            # Canonical ID required for provenance tracking
+            "_canonical_span_id": cid,
+            # A2 Edge Qualification (Phase 7)
+            "_a2_edge_exists": sp.get("_a2_edge_exists"),
+            "_a2_cross_stream": sp.get("_a2_cross_stream"),
+            "_a2_qualified": sp.get("_a2_qualified"),
+            "_a2_edge_prev_id": sp.get("_a2_edge_prev_id"),
+            # Semantic Disposition (with confidence)
+            "_semantic_disposition": sp.get("_semantic_disposition"),
+            "_semantic_reasons": sp.get("_semantic_reasons"),
+            "_semantic_confidence": sp.get("_semantic_confidence"),
+            # TTS Eligibility (Stage 2 decision, not emission truth)
+            "_tts_excluded": sp.get("_tts_excluded"),
+            "_tts_exclude_reason": sp.get("_tts_exclude_reason"),
+            "_tts_include_reason": sp.get("_tts_include_reason"),
+            # RONC source fields
+            "_ronc_atomic_unit_id": sp.get("_ronc_atomic_unit_id"),
+            "_ronc_atomic_role": sp.get("_ronc_atomic_role"),
+            "_ronc_break_after": sp.get("_ronc_break_after"),
+            "_ronc_rescue_applied": sp.get("_ronc_rescue_applied"),
+            # Structural Context (for diagnostics)
+            "layout_stream": sp.get("layout_stream"),
+            "role": sp.get("role"),
+            "page_number": sp.get("page_number"),
+            "block_id": sp.get("block_id"),
+            "cleaned_text": sp.get("cleaned_text") or "",
+            "cleaned_text_preview": (sp.get("cleaned_text") or "")[:100],
+            "line_index": sp.get("line_index"),
+            "span_index_in_line": sp.get("span_index_in_line"),
+            "line_id": sp.get("line_id"),
+            "bbox": sp.get("bbox"),
 
-                # ─────────────────────────────────────────────────────
-                # Phase 1.3 Line-Aware Rescue Audit
-                # ─────────────────────────────────────────────────────
-                "_tts_rescued": sp.get("_tts_rescued"),
-                "_tts_rescue_reason": sp.get("_tts_rescue_reason"),
-                "_tts_promoted_to_body_stream": sp.get("_tts_promoted_to_body_stream"),
-                "_tts_promotion_reason": sp.get("_tts_promotion_reason"),
-                "_tts_inline_detection_method": sp.get("_tts_inline_detection_method"),
+            # ─────────────────────────────────────────────────────
+            # Phase 1.3 Line-Aware Rescue Audit
+            # ─────────────────────────────────────────────────────
+            "_tts_rescued": sp.get("_tts_rescued"),
+            "_tts_rescue_reason": sp.get("_tts_rescue_reason"),
+            "_tts_promoted_to_body_stream": sp.get("_tts_promoted_to_body_stream"),
+            "_tts_promotion_reason": sp.get("_tts_promotion_reason"),
+            "_tts_inline_detection_method": sp.get("_tts_inline_detection_method"),
 
-                # ─────────────────────────────────────────────────────
-                # Phase 1.5 Continuity Override Audit
-                # ─────────────────────────────────────────────────────
-                "_continuity_override": sp.get("_continuity_override"),
-                "_continuity_override_reason": sp.get("_continuity_override_reason"),
-                "_original_geometry_role": sp.get("_original_geometry_role"),
+            # ─────────────────────────────────────────────────────
+            # Phase 1.5 Continuity Override Audit
+            # ─────────────────────────────────────────────────────
+            "_continuity_override": sp.get("_continuity_override"),
+            "_continuity_override_reason": sp.get("_continuity_override_reason"),
+            "_original_geometry_role": sp.get("_original_geometry_role"),
 
-                # ─────────────────────────────────────────────────────
-                # P6 Same-Line Promotion Audit
-                # ─────────────────────────────────────────────────────
-                "_same_line_promoted": sp.get("_same_line_promoted"),
-                "_zombie_role_fixed": sp.get("_zombie_role_fixed"),
-                "_original_role": sp.get("_original_role"),
-                "_original_layout_stream": sp.get("_original_layout_stream"),
-            }
+            # ─────────────────────────────────────────────────────
+            # Same-line promotion audit
+            # ─────────────────────────────────────────────────────
+            "_same_line_promoted": sp.get("_same_line_promoted"),
+            "_zombie_role_fixed": sp.get("_zombie_role_fixed"),
+            "_original_role": sp.get("_original_role"),
+            "_original_layout_stream": sp.get("_original_layout_stream"),
+        }
 
     # ------------------------------------------------------------------
     # Bibliography detection audit (non-behavioral, diagnostics only)
@@ -2086,6 +3602,29 @@ def _save_semantic_artifact(
 
     semantic_data["summary"] = _build_semantic_summary(semantic_data["spans"])
     atomic_write_manifest(output_path, semantic_data, logger)
+    semantic_ref = _register_file_artifact(
+        path=output_path,
+        role="semantic",
+        trace_id=trace_id,
+        book_id=book_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+        mime_type="application/json",
+        schema_version="tts.semantic.v1",
+        metadata={"span_count": len(semantic_data["spans"])},
+    )
+    shard_ref = _write_semantic_page_shards(
+        semantic_data,
+        book_id=book_id,
+        trace_id=trace_id,
+        document_id=document_id,
+        job_id=job_id,
+        audiobook_id=audiobook_id,
+    )
+    _append_manifest_artifact_ref(OUTPUT_DIR / book_id / "manifest.json", semantic_ref, trace_id)
+    if shard_ref:
+        _append_manifest_artifact_ref(OUTPUT_DIR / book_id / "manifest.json", shard_ref, trace_id)
     logger.info(
         f"[{trace_id}] Semantic artifact saved: {len(semantic_data['spans'])} spans"
     )
@@ -2142,8 +3681,9 @@ def _build_semantic_summary(spans: dict) -> dict:
         ),
     }
 
+
 # ========================================
-# STAGE 3: TTS Generation (Unchanged)
+# STAGE 3: TTS Generation
 # ========================================
 def _prepare_synthesis_units(
         sent: dict,
@@ -2761,8 +4301,6 @@ def _validate_tts_audio(
         expected_duration: float,
         trace_id: str,
         chunk_id: int,
-        *,
-        is_clause_aware: bool = False,
 ) -> bool:
     """
     Validate TTS output duration against expected.
@@ -2774,7 +4312,6 @@ def _validate_tts_audio(
         3. Fail-open if expected is None/non-numeric/tiny
         4. Enforce ratio bounds
     """
-    _ = is_clause_aware  # Vestigial; preserved for call-site compatibility
     # ════════════════════════════════════════════════════════════════
     # STEP 1: Parse WAV to extract actual duration
     # Must happen first so ceiling can be enforced regardless of expected
@@ -2829,6 +4366,7 @@ def _validate_tts_audio(
 
     return True
 
+
 async def generate_single_chunk(
         chunk: dict,
         book_id: str,
@@ -2845,6 +4383,7 @@ async def generate_single_chunk(
     page = chunk['page']
     audio_filename = f"chunk_{chunk_id:04d}_p{page}.wav"
     audio_path = OUTPUT_DIR / book_id / audio_filename
+    ids = _identity_from_manifest(book_id, trace_id)
     logger = _logger
 
     async with TTS_SEMAPHORE:
@@ -2859,6 +4398,19 @@ async def generate_single_chunk(
 
                     if not any(c.get('chunk_id') == chunk_id
                                for c in manifest.get('ready_chunks', [])):
+                        audio_ref = _register_file_artifact(
+                            path=audio_path,
+                            role="audio_chunk",
+                            trace_id=trace_id,
+                            book_id=book_id,
+                            document_id=ids.get("document_id"),
+                            job_id=ids.get("job_id"),
+                            audiobook_id=ids.get("audiobook_id"),
+                            mime_type="audio/wav",
+                            schema_version="tts.audio_chunk.v1",
+                            metadata={"chunk_id": chunk_id, "page": page,
+                                      "recovered_from_disk": True},
+                        )
                         manifest['ready_chunks'].append({
                             "chunk_id": chunk_id,
                             "filename": audio_filename,
@@ -2873,9 +4425,11 @@ async def generate_single_chunk(
                             "start_time": chunk['start_time'],
                             "duration_seconds": chunk['duration_seconds'],
                             "end_time": chunk['end_time'],
-                            "sentences": chunk.get('sentences', [])
+                            "sentences": chunk.get('sentences', []),
+                            "artifact_ref": audio_ref,
                         })
                         manifest['ready_chunks'].sort(key=lambda c: c['chunk_id'])
+                        _merge_manifest_artifact_refs(manifest, [audio_ref])
                         validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
                         logger.info(f"[{trace_id}] Chunk {chunk_id} recovered from disk.")
                     return True
@@ -3018,7 +4572,6 @@ async def generate_single_chunk(
                                     unit_expected_duration,
                                     trace_id,
                                     chunk_id,
-                                    is_clause_aware=True,
                             ):
                                 if _attempt == 0:
                                     logger.warning(
@@ -3126,13 +4679,11 @@ async def generate_single_chunk(
                     expected_duration,
                     trace_id,
                     chunk_id,
-                    is_clause_aware=True,
             ):
                 return False
 
-            # Write audio file
-            with open(audio_path, 'wb') as f:
-                f.write(final_audio)
+            # Write audio file atomically so restart/retry never sees a half-written chunk.
+            write_bytes_atomic(audio_path, final_audio)
 
             # Verify write succeeded (defense against partial writes)
             if not audio_path.exists() or audio_path.stat().st_size == 0:
@@ -3155,6 +4706,18 @@ async def generate_single_chunk(
                         manifest = json.load(f)
                     if not any(c.get('chunk_id') == chunk_id for c in
                                manifest.get('ready_chunks', [])):
+                        audio_ref = _register_file_artifact(
+                            path=audio_path,
+                            role="audio_chunk",
+                            trace_id=trace_id,
+                            book_id=book_id,
+                            document_id=ids.get("document_id"),
+                            job_id=ids.get("job_id"),
+                            audiobook_id=ids.get("audiobook_id"),
+                            mime_type="audio/wav",
+                            schema_version="tts.audio_chunk.v1",
+                            metadata={"chunk_id": chunk_id, "page": page},
+                        )
                         manifest['ready_chunks'].append({
                             "chunk_id": chunk_id,
                             "filename": audio_filename,
@@ -3165,9 +4728,11 @@ async def generate_single_chunk(
                             "start_time": chunk['start_time'],
                             "duration_seconds": chunk['duration_seconds'],
                             "end_time": chunk['end_time'],
-                            "sentences": chunk.get('sentences', [])
+                            "sentences": chunk.get('sentences', []),
+                            "artifact_ref": audio_ref,
                         })
                         manifest['ready_chunks'].sort(key=lambda c: c['chunk_id'])
+                        _merge_manifest_artifact_refs(manifest, [audio_ref])
                         validate_and_write_manifest(manifest_path, manifest, trace_id, logger)
                 except Exception as e:
                     logger.error(
@@ -3214,7 +4779,7 @@ async def generate_audio_streaming(
     if not citation_json_path.exists():
         return False
 
-    with open(citation_json_path, 'r') as f:
+    with open(citation_json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     (OUTPUT_DIR / book_id).mkdir(parents=True, exist_ok=True)
@@ -3233,48 +4798,75 @@ async def generate_audio_streaming(
     if not chunks:
         logger.warning(f"[{trace_id}] Stage 3 invoked with zero chunks")
         return False
-    tasks = [
-        generate_single_chunk(c, book_id, trace_id, manifest_path, logger)
-        for c in chunks
-    ]
+
+    _record_job_stage(
+        manifest_path, trace_id,
+        status="running",
+        stage="stage_3_audio",
+        message=(
+            f"Stage 3 queued {len(chunks)} audio chunks with "
+            f"{min(TTS_STAGE3_WORKER_COUNT, len(chunks))} bounded workers."
+        ),
+        event_type="stage_3_chunks_queued",
+        progress_total=len(chunks),
+        metadata={
+            "worker_count": min(TTS_STAGE3_WORKER_COUNT, len(chunks)),
+            "execution_policy": "bounded_worker_queue",
+        },
+    )
 
     try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        successes = 0
-        failures = 0
-        for i, r in enumerate(results):
-            if r is True:
-                successes += 1
-            else:
-                failures += 1
-                chunk_id = chunks[i].get('chunk_id', '?')
-                if isinstance(r, Exception):
-                    logger.error(
-                        f"[{trace_id}] Chunk {chunk_id} raised exception during Stage 3",
-                        exc_info=r
-                    )
-                else:
-                    logger.error(
-                        f"[{trace_id}] Chunk {chunk_id} returned False (generation failed)"
-                    )
-
-        logger.info(
-            f"[{trace_id}] Stage 3 Summary: {successes}/{len(chunks)} chunks generated"
+        result = await _generate_audio_chunks_bounded(
+            chunks=chunks,
+            book_id=book_id,
+            trace_id=trace_id,
+            manifest_path=manifest_path,
         )
 
-        if failures > 0:
-            logger.warning(f"[{trace_id}] {failures} chunks failed to generate")
-            try:
-                with open(manifest_path, 'r', encoding='utf-8') as f:
-                    m = json.load(f)
+        successes = int(result.get("successes") or 0)
+        failures = int(result.get("failures") or 0)
+        failed_chunks = result.get("failed_chunks") or []
+
+        for failure in failed_chunks:
+            logger.error(
+                f"[{trace_id}] Chunk {failure.get('chunk_id', '?')} failed during Stage 3: "
+                f"{failure.get('reason', 'generation_failed')}"
+            )
+
+        logger.info(
+            f"[{trace_id}] Stage 3 Summary: {successes}/{len(chunks)} chunks generated "
+            f"using {result.get('worker_count')} bounded workers"
+        )
+
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                m = json.load(f)
+            m["stage3_worker_count"] = result.get("worker_count")
+            m["chunk_state_dir"] = str(_stage3_chunk_checkpoint_dir(book_id))
+            if failures > 0:
+                logger.warning(f"[{trace_id}] {failures} chunks failed to generate")
                 m["processing_status"] = "stage_3_partial"
                 m["error_message"] = f"{failures} chunks failed during Stage 3"
-                validate_and_write_manifest(manifest_path, m, trace_id, logger)
-            except Exception as e:
-                logger.error(
-                    f"[{trace_id}] Failed to update manifest after partial Stage 3 failure: {e}"
-                )
+                m["failed_chunks"] = failed_chunks
+                m["stage3_failed_chunks"] = failed_chunks
+            else:
+                m["failed_chunks"] = []
+                m["stage3_failed_chunks"] = []
+            validate_and_write_manifest(manifest_path, m, trace_id, logger)
+        except Exception as e:
+            logger.error(
+                f"[{trace_id}] Failed to update manifest after Stage 3 summary: {e}"
+            )
+
+        try:
+            _write_audio_timing_artifact(
+                book_id=book_id,
+                trace_id=trace_id,
+                manifest_path=manifest_path,
+                citation_json_path=citation_json_path,
+            )
+        except Exception as exc:
+            logger.warning("[%s] Failed to generate audio timing artifact: %s", trace_id, exc)
 
         return successes == len(chunks)
     except Exception as e:
@@ -3318,7 +4910,8 @@ def reconcile_manifest_with_disk(book_id: str, manifest_path: Path, trace_id: st
             ]
             logger.warning(f"[{trace_id}] Removed {len(orphaned)} orphaned manifest entries")
 
-        # Log any files missing from manifest
+        # Log any files missing from manifest. Do not invent ready_chunks without
+        # semantic/timing data; register them as orphaned artifacts for inspection.
         missing = actual_files - manifest_files
         if (
                 missing
@@ -3326,47 +4919,42 @@ def reconcile_manifest_with_disk(book_id: str, manifest_path: Path, trace_id: st
                 and manifest.get("total_chunks", 0) > 0
         ):
             logger.warning(
-                f"[{trace_id}] {len(missing)} audio files not in manifest, attempting safe recovery..."
+                f"[{trace_id}] {len(missing)} audio files not in manifest; "
+                "registering as orphaned audio artifacts without ready_chunk recovery"
             )
 
-            for filename in missing:
+            orphaned_audio = manifest.get("orphaned_audio_artifacts", [])
+            orphan_refs = []
+            ids = _identity_from_manifest(book_id, trace_id)
+            for filename in sorted(missing):
+                audio_path = audio_dir / filename
+                if not audio_path.exists():
+                    continue
                 match = re.match(r'chunk_(\d+)_p(\d+)\.wav', filename)
-                if not match:
-                    logger.warning(f"[{trace_id}] Could not parse chunk info from: {filename}")
-                    continue
-
-                chunk_id = int(match.group(1))
-                page = int(match.group(2))
-
-                # HARD GUARD: do not invent chunks
-                if chunk_id >= manifest["total_chunks"]:
-                    logger.warning(
-                        f"[{trace_id}] Skipping recovery of chunk {chunk_id} "
-                        f"(exceeds total_chunks={manifest['total_chunks']})"
-                    )
-                    continue
-
-                # DUPLICATE GUARD: idempotent reconciliation
-                if any(c.get("chunk_id") == chunk_id for c in manifest.get("ready_chunks", [])):
-                    continue
-
-                manifest["ready_chunks"].append({
-                    "chunk_id": chunk_id,
-                    "filename": filename,
-                    "page": page,
-                    "pages": [page],
-                    "text_snippet": "[recovered_from_disk_nonsemantic]",
-                    "start_time": 0.0,
-                    "duration_seconds": 0.0,
-                    "end_time": 0.0,
-                    "sentences": []
-                })
-
-                logger.info(
-                    f"[{trace_id}] Recovered chunk {chunk_id} from disk (non-semantic)"
+                metadata = {"filename": filename, "orphaned": True}
+                if match:
+                    metadata["chunk_id"] = int(match.group(1))
+                    metadata["page"] = int(match.group(2))
+                audio_ref = _register_file_artifact(
+                    path=audio_path,
+                    role="orphaned_audio_chunk",
+                    trace_id=trace_id,
+                    book_id=book_id,
+                    document_id=ids.get("document_id"),
+                    job_id=ids.get("job_id"),
+                    audiobook_id=ids.get("audiobook_id"),
+                    mime_type="audio/wav",
+                    schema_version="tts.audio_chunk.v1",
+                    metadata=metadata,
                 )
+                orphan_refs.append(audio_ref)
+                if not any(item.get("artifact_id") == audio_ref.get("artifact_id") for item in
+                           orphaned_audio):
+                    orphaned_audio.append(audio_ref)
 
-            manifest["ready_chunks"].sort(key=lambda c: c["chunk_id"])
+            if orphan_refs:
+                manifest["orphaned_audio_artifacts"] = orphaned_audio
+                _merge_manifest_artifact_refs(manifest, orphan_refs)
 
         elif missing:
             logger.warning(f"[{trace_id}] {len(missing)} audio files not in manifest: {missing}")
@@ -3389,7 +4977,7 @@ def reconcile_manifest_with_disk(book_id: str, manifest_path: Path, trace_id: st
             chunk_id = chunk.get('chunk_id')
             for sent in chunk.get('sentences', []):
                 sid = sent.get('global_index')
-                if sid:
+                if sid is not None:
                     sentence_index[sid] = {
                         'chunk_id': chunk_id,
                         **sent
@@ -3430,8 +5018,16 @@ def atomic_write_manifest(path, data, _logger):
 
 def validate_and_write_manifest(path, data, trace_id, _logger):
     try:
-        validated = ManifestSchema(**data)
-        atomic_write_manifest(path, validated.dict(), logger)
+        manifest_path = Path(path)
+        payload = _with_job_progress_fields(dict(data or {}))
+        payload.setdefault("created_at", utc_now_iso())
+        payload["updated_at"] = utc_now_iso()
+        validated = ManifestSchema(**payload)
+        output = _manifest_dump(validated)
+        atomic_write_manifest(manifest_path, output, _logger)
+        if manifest_path.name == "manifest.json":
+            _register_manifest_artifact(manifest_path, output, trace_id)
+            _sync_manifest_job_state(manifest_path, output)
     except Exception as e:
         logger.error(f"Manifest Error: {e}")
         raise e
@@ -3441,10 +5037,9 @@ def get_citation_at_timestamp(path, timestamp):
     """
     API implementation for citation lookup.
 
-    V1.9 Phase 1 Fix #4: Uses per-sentence timing instead of interpolation.
-    Falls back to interpolation for legacy manifests without sentence timing.
-
-    V2.0: Filters _tts_excluded spans from source_cids for UI highlighting.
+    Uses authoritative per-sentence timing and filters excluded spans from
+    source_cids for UI highlighting. Chunks without sentence timing are not
+    treated as highlightable.
     """
     try:
         with open(path, 'r', encoding='utf-8') as f:
@@ -3480,72 +5075,36 @@ def get_citation_at_timestamp(path, timestamp):
                     )
                 )
 
-                # V1.9: Try per-sentence timing first
                 for sent in sentences:
                     sent_start = sent.get('start_time')
                     sent_end = sent.get('end_time')
-                    # Use per-sentence timing if available
-                    if sent_start is not None and sent_end is not None:
-                        if sent_start <= timestamp < sent_end + 0.0001:
-                            # Resolve authoritative join key for highlighting
-                            source_cids = (
-                                    sent.get('source_cids')
-                                    or sent.get('_source_span_ids')
-                                    or sent.get('_source_cids')
-                                    or sent.get('source_span_ids')
-                            )
-                            if source_cids:
-                                source_cids = [cid for cid in source_cids if cid is not None]
-                            else:
-                                source_cids = []
+                    if sent_start is None or sent_end is None:
+                        continue
+                    if sent_start <= timestamp < sent_end + 0.0001:
+                        source_cids = (
+                                sent.get('source_cids')
+                                or sent.get('_source_span_ids')
+                                or sent.get('_source_cids')
+                                or sent.get('source_span_ids')
+                        )
+                        if source_cids:
+                            source_cids = [cid for cid in source_cids if cid is not None]
+                        else:
+                            source_cids = []
 
-                            # Filter excluded spans for UI highlighting
-                            source_cids = _filter_excluded_cids(source_cids, span_lookup)
+                        source_cids = _filter_excluded_cids(source_cids, span_lookup)
 
-                            return {
-                                'page': sent.get('page_number', chunk['page']),
-                                'span_start_index': sent.get('span_start_index'),  # advisory
-                                'span_end_index': sent.get('span_end_index'),  # advisory
-                                'source_cids': source_cids,  # authoritative (filtered)
-                                'role': sent.get('role', 'body'),
-                                'highlighting_enabled': data.get('highlighting_enabled', True),
-                                'sentence_text': sent.get('text', '')[:50],
-                            }
+                        return {
+                            'page': sent.get('page_number', chunk['page']),
+                            'span_start_index': sent.get('span_start_index'),
+                            'span_end_index': sent.get('span_end_index'),
+                            'source_cids': source_cids,
+                            'role': sent.get('role', 'body'),
+                            'highlighting_enabled': data.get('highlighting_enabled', True),
+                            'sentence_text': sent.get('text', '')[:50],
+                        }
 
-                # Fallback: Legacy interpolation for old manifests
-                duration = chunk.get('duration_seconds', 0.0)
-                if duration <= 0:
-                    # Cannot interpolate safely; fall back to first sentence
-                    selected_sentence = sentences[0]
-                else:
-                    prog = (timestamp - chunk['start_time']) / duration
-                    idx = int(min(max(prog, 0.0), 0.999) * len(sentences))
-                    selected_sentence = sentences[idx]
-
-                # Resolve authoritative join key for highlighting (legacy-safe)
-                source_cids = (
-                        selected_sentence.get('source_cids')
-                        or selected_sentence.get('_source_span_ids')
-                        or selected_sentence.get('_source_cids')
-                        or selected_sentence.get('source_span_ids')
-                )
-                if source_cids:
-                    source_cids = [cid for cid in source_cids if cid is not None]
-                else:
-                    source_cids = []
-
-                # Filter excluded spans for UI highlighting
-                source_cids = _filter_excluded_cids(source_cids, span_lookup)
-
-                return {
-                    'page': selected_sentence.get('page_number', chunk['page']),
-                    'span_start_index': selected_sentence.get('span_start_index'),  # advisory
-                    'span_end_index': selected_sentence.get('span_end_index'),  # advisory
-                    'source_cids': source_cids,  # authoritative (filtered)
-                    'role': selected_sentence.get('role', 'body'),
-                    'highlighting_enabled': data.get('highlighting_enabled', True),
-                    'sentence_text': selected_sentence.get('text', '')[:50],
-                }
+                return None
 
 
     except Exception as e:

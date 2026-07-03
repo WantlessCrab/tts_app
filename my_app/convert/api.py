@@ -17,12 +17,14 @@ from pydantic import BaseModel
 
 from .convert_logic import route_conversion
 from .office_handling import set_soffice_path
+from ..service_health import build_health_response
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("ConvertService")
+
 
 class ConvertResponse(BaseModel):
     status: str
@@ -31,11 +33,13 @@ class ConvertResponse(BaseModel):
     page_count: int
     has_text_layer: bool
 
+
 class ConvertErrorResponse(BaseModel):
     status: str
     trace_id: str
     reason: str
     filename: str
+
 
 app = FastAPI(title="Convert Service")
 
@@ -107,11 +111,7 @@ async def shutdown_event():
 
 @app.get("/health")
 async def health():
-    """
-    Health check — verifies LibreOffice and Calibre are available.
-    Returns degraded status if either tool is unavailable.
-    Subprocess calls run in thread pool via asyncio.to_thread.
-    """
+    """Health check for converter executables and runtime configuration."""
     checks = {}
 
     try:
@@ -134,8 +134,16 @@ async def health():
     except Exception as e:
         checks["calibre"] = f"error: {e}"
 
-    all_ok = all("error" not in str(v) for v in checks.values())
-    return {"status": "ok" if all_ok else "degraded", "checks": checks}
+    return build_health_response(
+        service="tts_convert_service",
+        role="convert_api",
+        checks=checks,
+        details={
+            "soffice_path": SOFFICE_PATH,
+            "pdf_service_url": PDF_SERVICE_URL,
+            "doctr_service_url": DOCTR_SERVICE_URL,
+        },
+    )
 
 
 # ─────────────────────────────────────────────
@@ -157,7 +165,8 @@ async def convert(raw_request: Request, file: UploadFile = File(...)):
       1. Native LibreOffice / Calibre canonical PDF
       2. Mammoth → WeasyPrint PDF       (DOCX fallback)
       3. EPUB HTML → WeasyPrint PDF     (EPUB fallback)
-      4. Docling span JSON              (last resort stub — pending layout container)
+
+    Unsupported fallback states return explicit errors at the conversion boundary.
     """
     trace_id = (
             raw_request.headers.get("X-Trace-ID")
@@ -176,5 +185,10 @@ async def convert(raw_request: Request, file: UploadFile = File(...)):
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"X-Source-File": filename}
+        headers={
+            "X-Trace-ID": trace_id,
+            "X-Source-File": filename,
+            "X-Convert-Source": filename,
+            "X-Convert-Method": "route_conversion",
+        }
     )

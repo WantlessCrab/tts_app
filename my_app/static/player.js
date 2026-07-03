@@ -122,6 +122,7 @@
 const SKIP_PRESETS = [1, 2, 5, 10, 15, 30, 45, 60, 120, 300, 600];
 const SKIP_STORAGE_KEY = 'tts-player-skip-amount';
 const VOLUME_STORAGE_KEY = 'tts_volume';
+const FULL_UI_JSON_PAGE_LIMIT = 150;
 
 
 class TTSAudioPlayer {
@@ -165,9 +166,19 @@ class TTSAudioPlayer {
             isTransitioningChunk: false,
 
             // === UI JSON Contract ===
-            // Raw UI sentences data from /api/audiobook/{id}/ui_sentences
+            // Raw UI sentences data from /api/v1/audiobooks/{id}/ui-sentences
             uiSentences: null,
+            audioTiming: null,
             uiPageTurns: [],
+            shards: {
+                uiSentencesIndex: null,
+                semanticIndex: null,
+                uiPageCache: new Map(),
+                semanticPageCache: new Map(),
+                usePageShards: false,
+            },
+            lastLoadedAudioUrl: null,
+            lastLoadedAudioFilename: null,
             // UI readiness flag
             uiReady: false,
         },
@@ -200,6 +211,11 @@ class TTSAudioPlayer {
             errorMessage: '',
             lastAutoTurnedPage: null,
             activeHighlightSentenceKey: null,
+            dependencies: {
+                pdfjs: false,
+                wavesurfer: false,
+                errors: [],
+            },
         },
     };
 
@@ -272,6 +288,8 @@ class TTSAudioPlayer {
         // Derived lookup structures built from uiSentences
         // Not stored in state (rebuilt on each load)
         this.uiIndex = null;
+        this._highlightRafId = null;
+        this._highlightLastFrameAt = 0;
     }
 
     /******************************************************************************
@@ -287,21 +305,25 @@ class TTSAudioPlayer {
         console.log('TTSAudioPlayer initializing...');
 
         try {
-            // STEP 1: Query all DOM elements
-            console.log('Step 1: Querying DOM elements...');
+            // STEP 1: Resolve local browser-side dependencies
+            console.log('Step 1: Resolving local browser dependencies...');
+            await this._resolveRuntimeDependencies();
+
+            // STEP 2: Query all DOM elements
+            console.log('Step 2: Querying DOM elements...');
             this._queryDOMElements();
 
-            // STEP 2: Initialize audio backend
-            console.log('Step 2: Initializing audio backend...');
+            // STEP 3: Initialize audio backend
+            console.log('Step 3: Initializing audio backend...');
             const backendType = options.backend || 'native';
             await this._initBackend(backendType);
 
-            // STEP 3: Bind backend event listeners
-            console.log('Step 3: Binding backend event listeners...');
+            // STEP 4: Bind backend event listeners
+            console.log('Step 4: Binding backend event listeners...');
             await this._bindBackendEvents();
 
-            // STEP 4: Bind DOM event listeners
-            console.log('Step 4: Binding DOM event listeners...');
+            // STEP 5: Bind DOM event listeners
+            console.log('Step 5: Binding DOM event listeners...');
             await this._bindDOMEvents();
             // Hide PDF viewer initially
             if (this.elements.pdfViewerContainer) {
@@ -311,8 +333,8 @@ class TTSAudioPlayer {
                 this.elements.pdfCanvas.style.display = 'none';
             }
 
-            // STEP 5: Load initial data
-            console.log('Step 5: Loading initial data...');
+            // STEP 6: Load initial data
+            console.log('Step 6: Loading initial data...');
             try {
                 await this.loadAudioSources();
             } catch (error) {
@@ -320,8 +342,8 @@ class TTSAudioPlayer {
                 // Non-fatal, continue initialization
             }
 
-            // STEP 6: Sync UI to initial state
-            console.log('Step 6: Setting initial UI state...');
+            // STEP 7: Sync UI to initial state
+            console.log('Step 7: Setting initial UI state...');
             this._syncUIToState();
 
             console.log('TTSAudioPlayer initialization complete.');
@@ -354,7 +376,39 @@ class TTSAudioPlayer {
         console.log('TTSAudioPlayer destroyed.');
     }
 
+    async _resolveRuntimeDependencies() {
+        const loader = window.TTSLocalDependencies;
+        if (loader && loader.ready && typeof loader.ready.then === 'function') {
+            try {
+                await loader.ready;
+            } catch (error) {
+                console.warn('[dependencies] Local dependency loader failed:', error);
+            }
+        }
+
+        this.state.ui.dependencies = {
+            pdfjs: typeof window.pdfjsLib !== 'undefined',
+            wavesurfer: typeof window.WaveSurfer !== 'undefined',
+            errors: Array.isArray(loader?.errors) ? loader.errors : [],
+        };
+
+        if (!this.state.ui.dependencies.pdfjs) {
+            console.warn(
+                '[dependencies] PDF.js local assets unavailable. ' +
+                'Audio playback will continue; PDF rendering/highlighting is disabled until ' +
+                '/static/vendor/pdfjs/pdf.min.js and pdf.worker.min.js are installed.'
+            );
+        }
+        if (!this.state.ui.dependencies.wavesurfer) {
+            console.info('[dependencies] WaveSurfer local asset unavailable. Native audio backend will be used.');
+        }
+    }
+
     async _initBackend(backendType) {
+        if (backendType === 'wavesurfer' && typeof window.WaveSurfer === 'undefined') {
+            console.warn('[audio] WaveSurfer requested but local asset is unavailable; falling back to native backend.');
+            backendType = 'native';
+        }
         if (backendType === 'native') {
             this.state.audio.backend = new NativeAudioBackend();
             await this.state.audio.backend.init(document.body, {
@@ -495,6 +549,11 @@ class TTSAudioPlayer {
         this.elements.refreshButton.addEventListener('click', async () => {
             await this.loadFileList();
         });
+        if (this.elements.downloadButton) {
+            this.elements.downloadButton.addEventListener('click', () => {
+                this.downloadCurrentAudio();
+            });
+        }
         this.elements.nextPageButton.addEventListener('click', () => {
             this.nextPage();
         });
@@ -622,8 +681,16 @@ class TTSAudioPlayer {
 
             // === Clear UI JSON state ===
             this.state.audiobook.uiSentences = null;
+            this.state.audiobook.audioTiming = null;
             this.state.audiobook.uiPageTurns = [];
             this.state.audiobook.uiReady = false;
+            this.state.audiobook.shards = {
+                uiSentencesIndex: null,
+                semanticIndex: null,
+                uiPageCache: new Map(),
+                semanticPageCache: new Map(),
+                usePageShards: false,
+            };
             this.uiIndex = null;
 
             console.log(`[loadAudiobook] Loading: ${bookId}`);
@@ -631,7 +698,7 @@ class TTSAudioPlayer {
             // =====================================================================
             // Fetch /status first (audio lifecycle + ui_ready gate)
             // =====================================================================
-            const statusResponse = await fetch(`/api/audiobook/${bookId}/status`);
+            const statusResponse = await fetch(`/api/v1/audiobooks/${bookId}/status`);
 
             if (!statusResponse.ok) {
                 const msg = `Failed to load audiobook status: ${statusResponse.status}`;
@@ -654,7 +721,12 @@ class TTSAudioPlayer {
             this.state.audiobook.isStale = statusData.is_stale || false;
             this.state.audiobook.totalChunks = statusData.total_chunks || 0;
             this.state.audiobook.readyChunks = statusData.ready_chunks || [];
+            this.state.audiobook.progress_percentage = statusData.progress_percentage || 0;
+            this.state.audiobook.processingProgress = statusData.progress_percentage || 0;
             this.state.audiobook.currentChunkIndex = 0;
+
+            await this.loadArtifactShardIndexes(bookId);
+            this.state.audiobook.shards.usePageShards = this.shouldPreferPageShards(statusData);
 
             if (!isPlayable) {
                 this.updateStatusBanner();
@@ -689,10 +761,12 @@ class TTSAudioPlayer {
                 end_time: readyChunk.start_time + readyChunk.duration_seconds
             }));
 
-            // Conditionally fetch UI JSON based on ui_ready gate
-            if (statusData.ui_ready) {
+            await this.loadAudioTiming(bookId, statusData);
+
+            // Conditionally fetch UI data based on full-artifact and page-shard availability.
+            if (statusData.ui_ready && !this.state.audiobook.shards.usePageShards) {
                 try {
-                    const uiResponse = await fetch(`/api/audiobook/${bookId}/ui_sentences`);
+                    const uiResponse = await fetch(`/api/v1/audiobooks/${bookId}/ui-sentences`);
 
                     if (uiResponse.ok) {
                         this.state.audiobook.uiSentences = await uiResponse.json();
@@ -708,6 +782,9 @@ class TTSAudioPlayer {
                             // Persist canonical sentence list handle for later logic (no behavior change)
                             this.state.audiobook._uiSentenceCount = sentenceList.length;
                             this.state.audiobook._uiSchemaVersion = ui.schema_version || null;
+                            if (this.state.audiobook.audioTiming) {
+                                this.applyAudioTimingToSentenceList(sentenceList, this.state.audiobook.audioTiming);
+                            }
                         }
 
                         // Build indexes (returns readiness boolean)
@@ -738,7 +815,7 @@ class TTSAudioPlayer {
                         }
                         // === Load semantic.json and build spanIndex for progressive highlighting ===
                         try {
-                            const semanticResponse = await fetch(`/api/audiobook/${bookId}/semantic`);
+                            const semanticResponse = await fetch(`/api/v1/audiobooks/${bookId}/semantic`);
                             if (semanticResponse.ok) {
                                 const semanticData = await semanticResponse.json();
                                 this.uiIndex.spanIndex = this.buildSpanIndex(semanticData);
@@ -789,6 +866,13 @@ class TTSAudioPlayer {
                     this.state.audiobook.uiSentences = null;
                     this.state.audiobook.uiReady = false;
                 }
+            } else if (this.state.audiobook.shards.usePageShards) {
+                const firstChunk = this.state.audiobook.chunks[0];
+                await this.ensureUiDataForChunk(firstChunk);
+                console.log(
+                    `[loadAudiobook] Using page-sharded UI data for ${bookId}. ` +
+                    `Loaded initial chunk pages; additional pages load on chunk transitions.`
+                );
             } else {
                 // UI JSON not ready yet — audio-only mode (expected during processing)
                 console.log(
@@ -804,7 +888,9 @@ class TTSAudioPlayer {
             // === Update title display ===
             const titleText = statusData.metadata?.title || bookId;
             const partialIndicator = (status === 'stage_3_partial') ? ' ⚠️ (Partial)' : '';
-            const uiIndicator = this.state.audiobook.uiReady ? '' : ' [Audio Only]';
+            const uiIndicator = this.state.audiobook.uiReady
+                ? (this.state.audiobook.shards.usePageShards ? ' [Page Shards]' : '')
+                : ' [Audio Only]';
             this.elements.currentFileDisplay.textContent = titleText + partialIndicator + uiIndicator;
 
             // === Load PDF ===
@@ -818,6 +904,10 @@ class TTSAudioPlayer {
                 const ready = this.state.audiobook.readyChunks.length;
                 const total = this.state.audiobook.totalChunks;
                 console.log(`[loadAudiobook] Partial: ${ready}/${total} chunks (${Math.round((ready / total) * 100)}%)`);
+            }
+
+            if (status === 'stage_3_partial' || statusData.is_stale || statusData.job_status === 'failed') {
+                this.updateStatusBanner({allowPlayer: true});
             }
 
             // === Guard play() against superseded loads ===
@@ -867,12 +957,13 @@ class TTSAudioPlayer {
             }
         });
 
-        // PLAY/PAUSE/TIMEUPDATE/ERROR events (Unchanged)
+        // PLAY/PAUSE/TIMEUPDATE/ERROR events
         backend.on(AudioBackend.EVENTS.PLAY, () => {
             this.state.audio.isPlaying = true;
             if (this.elements.playPauseButton) {
                 this.elements.playPauseButton.textContent = 'Pause';
             }
+            this.startHighlightAnimationLoop();
         });
 
         backend.on(AudioBackend.EVENTS.PAUSE, () => {
@@ -880,6 +971,7 @@ class TTSAudioPlayer {
             if (this.elements.playPauseButton) {
                 this.elements.playPauseButton.textContent = 'Play';
             }
+            this.stopHighlightAnimationLoop();
         });
 
         backend.on(AudioBackend.EVENTS.TIMEUPDATE, (data) => {
@@ -896,7 +988,7 @@ class TTSAudioPlayer {
 
         // Bind AUDIOPROCESS (60Hz) with SEPARATED concerns
         backend.on(AudioBackend.EVENTS.AUDIOPROCESS, (data) => {
-            // === GATES (unchanged) ===
+            // === Runtime gates ===
             if (this.state.audiobook.isLoading) return;
             if (this._activeEpoch !== this.state.audiobook.playbackEpoch) return;
             if (this.state.audiobook.mode !== 'audiobook') return;
@@ -922,6 +1014,7 @@ class TTSAudioPlayer {
                 if (this.elements.playPauseButton) {
                     this.elements.playPauseButton.textContent = 'Play';
                 }
+                this.stopHighlightAnimationLoop();
             }
         });
 
@@ -949,6 +1042,32 @@ class TTSAudioPlayer {
         });
     }
 
+    startHighlightAnimationLoop() {
+        if (this._highlightRafId != null) return;
+        const tick = (now) => {
+            this._highlightRafId = null;
+            if (!this.state.audio.isPlaying) return;
+            if (!this.state.audiobook || this.state.audiobook.isLoading) return;
+            if (this.state.audiobook.mode === 'audiobook' && this.state.audio.backend) {
+                const localTime = this.state.audio.backend.getCurrentTime();
+                if (typeof localTime === 'number') {
+                    this.state.audio.currentTime = localTime;
+                    const resolution = this._resolveTimelineState(localTime);
+                    this._applyTimelineEvents(resolution);
+                }
+            }
+            this._highlightRafId = requestAnimationFrame(tick);
+        };
+        this._highlightRafId = requestAnimationFrame(tick);
+    }
+
+    stopHighlightAnimationLoop() {
+        if (this._highlightRafId != null) {
+            cancelAnimationFrame(this._highlightRafId);
+            this._highlightRafId = null;
+        }
+    }
+
     /**
      * Start playback
      * @returns {Promise<void>}
@@ -958,7 +1077,7 @@ class TTSAudioPlayer {
             await this.state.audio.backend.play();
             // State updated by backend PLAY event handler
         } catch (error) {
-            this.logError('Playback failed: ' + error.message);  // ← Use '+'
+            this.logError('Playback failed: ' + error.message);
         }
     }
 
@@ -1000,9 +1119,7 @@ class TTSAudioPlayer {
         // Backend handles actual seek
         this.state.audio.backend.setTime(clampedTime);
 
-        // Reset marker cursor for seek safety (backward/forward)
-        // FIX: Convert chunk-local time to global timeline time
-        // _resetPageTurnIndexForTime expects GLOBAL time (page turn markers are global)
+        // Reset marker cursor using global audiobook time.
         const tGlobal = this._getAudiobookTimelineTime(clampedTime);
         this._resetPageTurnIndexForTime(tGlobal ?? 0);
 
@@ -1100,12 +1217,15 @@ class TTSAudioPlayer {
             this.state.audiobook.currentChunkIndex = chunkIndex;
 
             const chunk = chunks[chunkIndex];
+            await this.ensureUiDataForChunk(chunk);
 
             // Construct URL
             const bookId = this.state.audiobook.bookId;
             // chunk.filename is now reliably available from the full chunk object
             const chunkFilename = chunk.filename;
-            const url = `/api/audiobook/${bookId}/play/${chunkFilename}`;
+            const url = `/api/v1/audiobooks/${bookId}/chunks/${chunkFilename}/audio`;
+            this.state.audiobook.lastLoadedAudioUrl = url;
+            this.state.audiobook.lastLoadedAudioFilename = chunkFilename;
 
             console.log(`Loading chunk ${chunkIndex + 1}/${this.state.audiobook.totalChunks}: ${chunkFilename}`);
 
@@ -1349,9 +1469,10 @@ class TTSAudioPlayer {
         // Downstream logic MUST NOT assume CID == sentence.
         sentence._uiContract = 'ui_sentence';
 
-        // Explicitly mark unsupported semantic fields as absent
-        // (prevents silent fallback assumptions downstream)
-        sentence._hasSemanticProjection = false;
+        // V2 UI contract can carry backend-owned sentence coverage.
+        sentence._hasSemanticProjection = Boolean(
+            Array.isArray(sentence.source_cids) || Array.isArray(sentence.geometry_cids)
+        );
 
         return sentence;
     }
@@ -1861,6 +1982,314 @@ class TTSAudioPlayer {
      * SECTION D — UI JSON - Data Normalization & Indexing
      ******************************************************************************/
 
+
+    async loadAudioTiming(bookId, statusData = {}) {
+        this.state.audiobook.audioTiming = null;
+        if (!bookId || statusData.audio_timing_ready === false) return null;
+        try {
+            const encoded = encodeURIComponent(bookId);
+            const response = await fetch(`/api/v1/audiobooks/${encoded}/audio-timing`);
+            if (!response.ok) {
+                if (response.status !== 404) {
+                    console.warn(`[loadAudioTiming] audio timing unavailable: ${response.status}`);
+                }
+                return null;
+            }
+            const timing = await response.json();
+            this.state.audiobook.audioTiming = timing;
+            this.applyAudioTimingToChunksAndSentences(timing);
+            console.log(`[loadAudioTiming] Loaded ${timing?.summary?.timing_chunk_count || 0} timing chunks`);
+            return timing;
+        } catch (error) {
+            console.warn('[loadAudioTiming] failed:', error);
+            return null;
+        }
+    }
+
+    applyAudioTimingToChunksAndSentences(timing) {
+        if (!timing || !Array.isArray(timing.chunks)) return;
+        const chunkMap = new Map();
+        for (const chunk of timing.chunks) {
+            if (chunk && chunk.chunk_id != null) chunkMap.set(chunk.chunk_id, chunk);
+        }
+        for (const chunk of (this.state.audiobook.chunks || [])) {
+            const timingChunk = chunkMap.get(chunk.chunk_id);
+            if (!timingChunk) continue;
+            if (typeof timingChunk.actual_start === 'number') chunk.start_time = timingChunk.actual_start;
+            if (typeof timingChunk.actual_duration_seconds === 'number') chunk.duration_seconds = timingChunk.actual_duration_seconds;
+            if (typeof timingChunk.actual_end === 'number') chunk.end_time = timingChunk.actual_end;
+            chunk.timing_basis = timingChunk.timing_basis || chunk.timing_basis;
+            chunk.timing_confidence = timingChunk.confidence || chunk.timing_confidence;
+        }
+        if (this.state.audiobook.uiSentences && Array.isArray(this.state.audiobook.uiSentences.sentences)) {
+            this.applyAudioTimingToSentenceList(this.state.audiobook.uiSentences.sentences, timing);
+        }
+        if (this.uiIndex && this.uiIndex.byGlobalIndex) {
+            for (const chunk of timing.chunks) {
+                for (const sentTiming of (chunk.sentences || [])) {
+                    const idx = sentTiming.global_index;
+                    if (idx == null) continue;
+                    const sentence = this.uiIndex.byGlobalIndex.get(idx);
+                    if (sentence) this.applySentenceTiming(sentence, sentTiming);
+                }
+            }
+        }
+    }
+
+    applyAudioTimingToSentenceList(sentences, timing) {
+        const byGlobal = new Map();
+        for (const chunk of (timing?.chunks || [])) {
+            for (const sentTiming of (chunk.sentences || [])) {
+                if (sentTiming.global_index != null) byGlobal.set(sentTiming.global_index, sentTiming);
+            }
+        }
+        for (const sentence of (sentences || [])) {
+            const sentTiming = byGlobal.get(sentence.global_index);
+            if (sentTiming) this.applySentenceTiming(sentence, sentTiming);
+        }
+    }
+
+    applySentenceTiming(sentence, sentTiming) {
+        if (!sentence || !sentTiming) return;
+        sentence.timing = sentence.timing || {};
+        if (typeof sentTiming.actual_start === 'number') {
+            sentence.timing.start = sentTiming.actual_start;
+            sentence.timing.actual_start = sentTiming.actual_start;
+        }
+        if (typeof sentTiming.actual_end === 'number') {
+            sentence.timing.end = sentTiming.actual_end;
+            sentence.timing.actual_end = sentTiming.actual_end;
+        }
+        if (typeof sentTiming.actual_duration_seconds === 'number') {
+            sentence.timing.actual_duration_seconds = sentTiming.actual_duration_seconds;
+        }
+        sentence.timing.basis = sentTiming.timing_basis || sentence.timing.basis || 'estimated_text';
+        sentence.timing.confidence = sentTiming.confidence || sentence.timing.confidence || 'low';
+    }
+
+    async loadArtifactShardIndexes(bookId) {
+        const shards = this.state.audiobook.shards;
+        if (!shards) return;
+
+        async function fetchIndex(url) {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) return null;
+                const data = await response.json();
+                return (data && Array.isArray(data.pages)) ? data : null;
+            } catch (error) {
+                console.warn(`[shards] Failed to load index ${url}:`, error);
+                return null;
+            }
+        }
+
+        const encoded = encodeURIComponent(bookId);
+        shards.uiSentencesIndex = await fetchIndex(`/api/v1/audiobooks/${encoded}/ui-sentences/pages/index`);
+        shards.semanticIndex = await fetchIndex(`/api/v1/audiobooks/${encoded}/semantic/pages/index`);
+
+        const uiPages = shards.uiSentencesIndex?.pages?.length || 0;
+        const semanticPages = shards.semanticIndex?.pages?.length || 0;
+        if (uiPages || semanticPages) {
+            console.log(`[shards] Available indexes: ui=${uiPages} pages, semantic=${semanticPages} pages`);
+        }
+    }
+
+    shouldPreferPageShards(statusData) {
+        const uiIndex = this.state.audiobook.shards?.uiSentencesIndex;
+        if (!uiIndex || !Array.isArray(uiIndex.pages) || uiIndex.pages.length === 0) {
+            return false;
+        }
+
+        if (!statusData.ui_ready) {
+            return true;
+        }
+
+        const pageCount = uiIndex.summary?.total_pages || uiIndex.pages.length;
+        return pageCount > FULL_UI_JSON_PAGE_LIMIT;
+    }
+
+    _ensureIncrementalUiIndex() {
+        if (this.uiIndex) {
+            if (!this.uiIndex._loadedShardPages) this.uiIndex._loadedShardPages = new Set();
+            if (!this.uiIndex._loadedSemanticPages) this.uiIndex._loadedSemanticPages = new Set();
+            if (!this.uiIndex._indexedSentenceIds) {
+                this.uiIndex._indexedSentenceIds = new Set(this.uiIndex.byGlobalIndex?.keys?.() || []);
+            }
+            return;
+        }
+
+        this.uiIndex = {
+            byGlobalIndex: new Map(),
+            byChunkId: new Map(),
+            byPage: {},
+            byTimeByChunk: new Map(),
+            pageTurnsByTime: [],
+            geometryByPage: {},
+            spanIndex: null,
+            geometryAuthority: 'ui_sentences_page_shards',
+            spanIndexAuthority: null,
+            _loadedShardPages: new Set(),
+            _loadedSemanticPages: new Set(),
+            _indexedSentenceIds: new Set(),
+            _shardMode: true,
+        };
+    }
+
+    _indexUiSentence(sentence) {
+        if (!sentence || typeof sentence !== 'object') return;
+        const gIdx = sentence.global_index;
+        const chunkId = sentence.chunk_id;
+        if (gIdx == null || chunkId == null) return;
+        if (this.uiIndex._indexedSentenceIds.has(gIdx)) return;
+
+        this.uiIndex._indexedSentenceIds.add(gIdx);
+        this.uiIndex.byGlobalIndex.set(gIdx, sentence);
+
+        if (!this.uiIndex.byChunkId.has(chunkId)) {
+            this.uiIndex.byChunkId.set(chunkId, []);
+        }
+        this.uiIndex.byChunkId.get(chunkId).push(sentence);
+
+        const pages = Array.isArray(sentence.pages) ? sentence.pages : [];
+        for (const page of pages) {
+            const pageNum = Number(page);
+            if (!Number.isFinite(pageNum) || pageNum < 1) continue;
+            const key = String(pageNum);
+            if (!Array.isArray(this.uiIndex.byPage[key])) this.uiIndex.byPage[key] = [];
+            this.uiIndex.byPage[key].push(gIdx);
+        }
+
+        if (sentence.page_turn && typeof sentence.page_turn.turn_time === 'number') {
+            this.uiIndex.pageTurnsByTime.push({
+                turn_time: sentence.page_turn.turn_time,
+                to_page: sentence.page_turn.to_page,
+                from_page: sentence.page_turn.from_page,
+                globalIndex: gIdx
+            });
+        }
+
+        if (sentence.geometry && typeof sentence.geometry === 'object') {
+            for (const [pageStr, geoList] of Object.entries(sentence.geometry)) {
+                const pageNum = parseInt(pageStr, 10);
+                if (Number.isNaN(pageNum) || !Array.isArray(geoList)) continue;
+                if (!this.uiIndex.geometryByPage[pageNum]) {
+                    this.uiIndex.geometryByPage[pageNum] = [];
+                }
+                for (const geo of geoList) {
+                    if (!geo?.bbox || !geo?.cid) continue;
+                    this.uiIndex.geometryByPage[pageNum].push({
+                        bbox: geo.bbox,
+                        cid: geo.cid,
+                        globalIndex: gIdx,
+                        chunkId: chunkId,
+                        timingStart: sentence.timing?.start ?? null,
+                        timingEnd: sentence.timing?.end ?? null
+                    });
+                }
+            }
+        }
+    }
+
+    _finalizeIncrementalUiIndex() {
+        if (!this.uiIndex) return false;
+
+        this.uiIndex.pageTurnsByTime.sort((a, b) => a.turn_time - b.turn_time);
+        this.uiIndex.byTimeByChunk = new Map();
+        for (const [chunkId, chunkSentences] of this.uiIndex.byChunkId.entries()) {
+            const sorted = [...chunkSentences].sort((a, b) => {
+                const aStart = a.timing?.start ?? 0;
+                const bStart = b.timing?.start ?? 0;
+                return aStart - bStart;
+            });
+            this.uiIndex.byTimeByChunk.set(chunkId, sorted);
+        }
+
+        const ready = (
+            this.uiIndex.byGlobalIndex.size > 0 &&
+            Object.keys(this.uiIndex.byPage).length > 0 &&
+            Object.keys(this.uiIndex.geometryByPage).length > 0
+        );
+        this.state.audiobook.uiPageTurns = this.uiIndex.pageTurnsByTime || [];
+        this.state.audiobook.uiReady = ready;
+        this._resetPageTurnIndexForTime(this.timeline?.t ?? 0);
+        return ready;
+    }
+
+    async ensureUiDataForChunk(chunk) {
+        if (!chunk || !this.state.audiobook.shards?.usePageShards) return;
+        const pages = new Set();
+        for (const value of (chunk.pages || [chunk.page])) {
+            const page = Number(value);
+            if (Number.isFinite(page) && page > 0) pages.add(page);
+        }
+        for (const page of pages) {
+            await this.ensureUiPageShard(page);
+            await this.ensureSemanticPageShard(page);
+        }
+    }
+
+    async ensureUiPageShard(pageNumber) {
+        const shards = this.state.audiobook.shards;
+        const bookId = this.state.audiobook.bookId;
+        if (!bookId || !shards?.uiSentencesIndex) return false;
+        if (shards.uiPageCache.has(pageNumber)) return true;
+
+        try {
+            const encoded = encodeURIComponent(bookId);
+            const response = await fetch(`/api/v1/audiobooks/${encoded}/ui-sentences/pages/${pageNumber}`);
+            if (!response.ok) return false;
+            const pageData = await response.json();
+            const sentences = Array.isArray(pageData?.sentences) ? pageData.sentences : [];
+            if (this.state.audiobook.audioTiming) {
+                this.applyAudioTimingToSentenceList(sentences, this.state.audiobook.audioTiming);
+            }
+            shards.uiPageCache.set(pageNumber, pageData);
+
+            this._ensureIncrementalUiIndex();
+            for (const sentence of sentences) {
+                this._indexUiSentence(sentence);
+            }
+            this.uiIndex._loadedShardPages.add(pageNumber);
+            this._finalizeIncrementalUiIndex();
+            return true;
+        } catch (error) {
+            console.warn(`[shards] Failed to load UI sentence page ${pageNumber}:`, error);
+            return false;
+        }
+    }
+
+    async ensureSemanticPageShard(pageNumber) {
+        const shards = this.state.audiobook.shards;
+        const bookId = this.state.audiobook.bookId;
+        if (!bookId || !shards?.semanticIndex) return false;
+        if (shards.semanticPageCache.has(pageNumber)) return true;
+
+        try {
+            const encoded = encodeURIComponent(bookId);
+            const response = await fetch(`/api/v1/audiobooks/${encoded}/semantic/pages/${pageNumber}`);
+            if (!response.ok) return false;
+            const pageData = await response.json();
+            shards.semanticPageCache.set(pageNumber, pageData);
+
+            this._ensureIncrementalUiIndex();
+            const pageSpanIndex = this.buildSpanIndex({spans: pageData.spans || {}});
+            if (!this.uiIndex.spanIndex) {
+                this.uiIndex.spanIndex = new Map();
+                this.uiIndex.spanIndex._authority = 'semantic_page_shard';
+                this.uiIndex.spanIndex._sentenceSafe = false;
+            }
+            for (const [cid, entry] of pageSpanIndex.entries()) {
+                this.uiIndex.spanIndex.set(cid, entry);
+            }
+            this.uiIndex.spanIndexAuthority = 'semantic_page_shards';
+            this.uiIndex._loadedSemanticPages.add(pageNumber);
+            return true;
+        } catch (error) {
+            console.warn(`[shards] Failed to load semantic page ${pageNumber}:`, error);
+            return false;
+        }
+    }
+
     /**
      * === UI JSON Index Builder
      *
@@ -1997,6 +2426,11 @@ class TTSAudioPlayer {
             geometryPageCount > 0
         );
 
+        this.uiIndex._loadedShardPages = new Set();
+        this.uiIndex._loadedSemanticPages = new Set();
+        this.uiIndex._indexedSentenceIds = new Set(this.uiIndex.byGlobalIndex.keys());
+        this.uiIndex._shardMode = false;
+
         console.log(
             `[buildUiIndex] Complete: ${sentenceCount} sentences, ` +
             `${pageCount} pages, ${geometryPageCount} geometry pages, ` +
@@ -2019,6 +2453,22 @@ class TTSAudioPlayer {
      */
     async loadPdf(pdfSourceFilename) {
         try {
+            if (typeof window.pdfjsLib === 'undefined') {
+                this.state.pdf.documentUrl = null;
+                if (this.elements.pdfViewerContainer) {
+                    this.elements.pdfViewerContainer.style.display = 'none';
+                }
+                if (this.elements.pdfPageControls) {
+                    this.elements.pdfPageControls.style.display = 'none';
+                }
+                if (this.elements.clickSeekToggle) {
+                    this.elements.clickSeekToggle.disabled = true;
+                    this.elements.clickSeekToggle.textContent = 'Seek: PDF unavailable';
+                }
+                console.warn('[loadPdf] Local PDF.js assets unavailable; PDF viewer disabled for this session.');
+                return;
+            }
+
             // Use the existing sanitize utility
             const safeFilename = this.sanitizeFilename(pdfSourceFilename);
             const pdfUrl = `/api/pdf/${safeFilename}`;
@@ -2057,13 +2507,18 @@ class TTSAudioPlayer {
             // Update zoom display
             this.updateZoomDisplay();
 
-            // Enable click-to-seek if in audiobook mode
-            if (this.state.audiobook.mode === 'audiobook') {
+            // Enable click-to-seek only when backend-authoritative UI geometry is loaded.
+            if (this.state.audiobook.mode === 'audiobook' && this.state.audiobook.uiReady) {
                 if (this.elements.clickSeekToggle) {
                     this.elements.clickSeekToggle.disabled = false;
                     this.elements.clickSeekToggle.style.opacity = '1';
                     this.elements.clickSeekToggle.style.cursor = 'pointer';
+                    this.elements.clickSeekToggle.textContent = 'Seek: OFF';
                 }
+            } else if (this.elements.clickSeekToggle) {
+                this.elements.clickSeekToggle.disabled = true;
+                this.elements.clickSeekToggle.style.opacity = '0.6';
+                this.elements.clickSeekToggle.textContent = 'Seek: UI unavailable';
             }
 
         } catch (error) {
@@ -2716,13 +3171,51 @@ class TTSAudioPlayer {
             return [];
         }
 
-        const spanIndex = this.uiIndex?.spanIndex;
-        if (!spanIndex) {
-            console.warn('[allocateProgressAcrossSpans] spanIndex missing');
-            return [];
+        const spanIndex = this.uiIndex?.spanIndex || null;
+
+        const allCids = sentence.geometry_cids || sentence.source_cids || sentence.cids || [];
+
+        const pageGeom = sentence.geometry || {};
+        const currentPageGeometry = Array.isArray(pageGeom[String(pageNum)])
+            ? pageGeom[String(pageNum)]
+            : [];
+        const backendCoverageUsable = currentPageGeometry.some(g =>
+            g && typeof g.coverage_start_ratio === 'number' && typeof g.coverage_end_ratio === 'number'
+        );
+        if (backendCoverageUsable) {
+            const pageEntries = currentPageGeometry
+                .filter(g => g && g.bbox && g.cid != null)
+                .sort((a, b) => allCids.indexOf(a.cid) - allCids.indexOf(b.cid));
+            const weights = pageEntries.map((g) => {
+                const start = Math.max(0, Math.min(1, Number(g.coverage_start_ratio ?? 0)));
+                const end = Math.max(start, Math.min(1, Number(g.coverage_end_ratio ?? 1)));
+                const charLen = (typeof g.char_start === 'number' && typeof g.char_end === 'number')
+                    ? Math.max(0, g.char_end - g.char_start)
+                    : Math.max(1, Math.round((end - start) * 100));
+                return Math.max(0, charLen);
+            });
+            const total = weights.reduce((a, b) => a + b, 0);
+            if (total > 0) {
+                const spokenBudget = total * Math.max(0, Math.min(1, progress));
+                let cursor = 0;
+                const allocations = [];
+                for (let i = 0; i < pageEntries.length; i++) {
+                    const entry = pageEntries[i];
+                    const len = weights[i];
+                    if (len <= 0) continue;
+                    if (spokenBudget <= cursor) break;
+                    const inEntry = Math.min(len, spokenBudget - cursor);
+                    const frac = Math.max(0, Math.min(1, inEntry / len));
+                    const bbox = this.normalizeBbox(entry.bbox);
+                    if (bbox) allocations.push({cid: entry.cid, bbox, fraction: frac});
+                    cursor += len;
+                    if (inEntry < len) break;
+                }
+                return allocations;
+            }
         }
 
-        const allCids = sentence.cids || [];
+        if (!spanIndex) return [];
 
         // ─────────────────────────────────────────────────────────────────
         // SENTENCE-LOCAL MEDIAN HEIGHT (for multi-line detection)
@@ -3209,16 +3702,20 @@ class TTSAudioPlayer {
         const sentenceKey = sentence.global_index;
         const geometryInvalidated = this.state.ui._highlightGeometryInvalidated === true;
 
-        if (this.state.ui.activeHighlightSentenceKey === sentenceKey && !geometryInvalidated) {
-            // Already highlighting this sentence and geometry is still valid
+        const duration = (sentence.timing && typeof sentence.timing.end === 'number' && typeof sentence.timing.start === 'number')
+            ? Math.max(0.001, sentence.timing.end - sentence.timing.start)
+            : 0.001;
+        const progress = Math.max(0, Math.min(1, (timelineTime - sentence.timing.start) / duration));
+        const progressBucket = Math.floor(progress * 80); // ~1.25% buckets prevent over-rendering while preserving motion
+        const highlightKey = `${sentenceKey}:${progressBucket}`;
+
+        if (this.state.ui.activeHighlightSentenceKey === highlightKey && !geometryInvalidated) {
             return;
         }
 
-        // New sentence: clear old highlights and update tracking
+        // New sentence or material progress movement: clear old highlights and update tracking
         this.clearHighlights();
-        this.state.ui.activeHighlightSentenceKey = sentenceKey;
-
-        const progress = 1;
+        this.state.ui.activeHighlightSentenceKey = highlightKey;
 
         const allocations = this.allocateProgressAcrossSpans(
             sentence,
@@ -3491,7 +3988,7 @@ class TTSAudioPlayer {
                 height: height
             };
         }
-        // Object form: {x,y,width,height} (fallback compatibility)
+        // Object form: {x,y,width,height}
         if (typeof bbox === 'object' && bbox.x != null && bbox.y != null) {
             // Also validate object form
             if (bbox.width <= 0 || bbox.height <= 0) {
@@ -3734,13 +4231,15 @@ class TTSAudioPlayer {
                 // Update cursor for PDF canvas
                 if (this.elements.pdfCanvas) {
                     this.elements.pdfCanvas.style.cursor = 'pointer';
+                    this.elements.pdfCanvas.classList.add('seek-enabled');
                 }
             } else {
                 this.elements.clickSeekToggle.classList.remove('active');
-                this.elements.clickSeekToggle.textContent = 'Seek Mode';
+                this.elements.clickSeekToggle.textContent = 'Seek: OFF';
                 // Reset cursor
                 if (this.elements.pdfCanvas) {
                     this.elements.pdfCanvas.style.cursor = 'default';
+                    this.elements.pdfCanvas.classList.remove('seek-enabled');
                 }
             }
         }
@@ -3765,7 +4264,6 @@ class TTSAudioPlayer {
             throw error;
         }
 
-        // Throw happens OUTSIDE try/catch → warning resolved
         if (!response.ok) {
             throw new Error(`API error: ${response.status}`);
         }
@@ -3836,7 +4334,6 @@ class TTSAudioPlayer {
             throw error; // propagate to container
         }
 
-        // ❗ Throw OUTSIDE try → warning resolved
         if (!response.ok) {
             throw new Error(`API error: ${response.status}`);
         }
@@ -3916,13 +4413,15 @@ class TTSAudioPlayer {
         try {
             this.clearError();
 
-            // point to the file-server on port 8003
-            let url = `http://localhost:8003/${this.sanitizeFilename(filename)}?source=${source}`;
+            const safeFilename = this.sanitizeFilename(filename);
+            let url = `/api/audio/${safeFilename}?source=${encodeURIComponent(source)}`;
 
             if (source === 'audiobooks') {
-                console.warn('loadFile running for an audiobook. This is temporary.');
-                url = `/api/audio/${this.sanitizeFilename(filename)}?source=standalone`;
-                console.warn(`Temporary URL override: ${url}`);
+                const bookId = this.state.audiobook.bookId;
+                if (!bookId) {
+                    throw new Error('Audiobook chunk loads require an active book_id.');
+                }
+                url = `/api/audio/${safeFilename}?source=audiobooks&book_id=${encodeURIComponent(bookId)}`;
             }
 
             this.state.audio.currentSource = source;
@@ -3931,6 +4430,8 @@ class TTSAudioPlayer {
 
             this.elements.currentFileDisplay.textContent = filename;
             this.elements.playPauseButton.disabled = true;
+            this.state.audiobook.lastLoadedAudioUrl = url;
+            this.state.audiobook.lastLoadedAudioFilename = safeFilename;
 
             await this.state.audio.backend.load(url);
         } catch (error) {
@@ -3968,7 +4469,7 @@ class TTSAudioPlayer {
         }
     }
 
-    updateStatusBanner() {
+    updateStatusBanner({allowPlayer = false} = {}) {
         const banner = this.elements.statusContainer;
         const player = this.elements.playerContainer;
 
@@ -3990,9 +4491,9 @@ class TTSAudioPlayer {
             error_message: errorMessage
         });
 
-        // Show banner, hide player
+        // Show banner; hide player only for non-playable states.
         banner.style.display = 'block';
-        player.style.display = 'none';
+        player.style.display = allowPlayer ? 'block' : 'none';
 
         // Clear existing banner content
         banner.innerHTML = '';
@@ -4001,6 +4502,14 @@ class TTSAudioPlayer {
         msg.className = `status-message ${ui.severity}`;
         msg.textContent = ui.message;
         banner.appendChild(msg);
+
+        const details = this.buildStatusDetails();
+        if (details) {
+            const detailNode = document.createElement('div');
+            detailNode.className = 'status-detail';
+            detailNode.textContent = details;
+            banner.appendChild(detailNode);
+        }
 
         if (ui.showRetry) {
             const retryBtn = document.createElement('button');
@@ -4030,9 +4539,15 @@ class TTSAudioPlayer {
         }
 
         switch (status) {
+            case 'queued':
+            case 'running':
             case 'processing_started':
+            case 'stage_1_extracting':
             case 'stage_1_complete':
+            case 'stage_2_semantic':
             case 'stage_2_complete':
+            case 'stage_25_ui':
+            case 'stage_3_audio':
             case 'stage_3_started':
                 return {
                     mode: 'waiting',
@@ -4044,6 +4559,7 @@ class TTSAudioPlayer {
                 };
 
             case 'stage_3_partial':
+            case 'degraded':
                 return {
                     mode: 'partial',
                     severity: is_stale ? 'warning' : 'info',
@@ -4053,12 +4569,29 @@ class TTSAudioPlayer {
                     showRetry: true
                 };
 
+            case 'completed':
             case 'stage_3_complete':
                 return {
                     mode: 'ready',
                     severity: 'info',
                     message: 'Audiobook ready',
                     showRetry: false
+                };
+
+            case 'failed':
+                return {
+                    mode: 'error',
+                    severity: 'error',
+                    message: 'Processing failed',
+                    showRetry: true
+                };
+
+            case 'cancelled':
+                return {
+                    mode: 'cancelled',
+                    severity: 'warning',
+                    message: 'Processing cancelled',
+                    showRetry: true
                 };
 
             default:
@@ -4069,6 +4602,41 @@ class TTSAudioPlayer {
                     showRetry: true
                 };
         }
+    }
+
+    buildStatusDetails() {
+        const manifest = this.state.audiobook.manifest || {};
+        const ready = Array.isArray(manifest.ready_chunks) ? manifest.ready_chunks.length : this.state.audiobook.readyChunks.length;
+        const total = manifest.total_chunks || this.state.audiobook.totalChunks || 0;
+        const parts = [];
+
+        if (total) parts.push(`${ready}/${total} chunks`);
+        const progress = this.state.audiobook.progress_percentage ?? manifest.progress_percentage;
+        if (typeof progress === 'number') parts.push(`${Math.round(progress)}%`);
+        if (manifest.job_status) parts.push(`job: ${manifest.job_status}`);
+        if (manifest.job_stage) parts.push(`stage: ${manifest.job_stage}`);
+        if (manifest.ui_shards_ready || manifest.semantic_shards_ready) {
+            parts.push(`shards: ui=${manifest.ui_shards_ready ? 'ready' : 'missing'}, semantic=${manifest.semantic_shards_ready ? 'ready' : 'missing'}`);
+        }
+        if (this.state.audiobook.traceId) parts.push(`trace: ${this.state.audiobook.traceId}`);
+        return parts.join(' · ');
+    }
+
+    downloadCurrentAudio() {
+        const url = this.state.audiobook.lastLoadedAudioUrl;
+        const filename = this.state.audiobook.lastLoadedAudioFilename || this.state.ui.selectedFile;
+        if (!url || !filename) {
+            this.logError('No loaded audio is available to download.');
+            return;
+        }
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
     }
 
     async retryProcessing(bookId, fullRebuild = false) {
@@ -4091,7 +4659,7 @@ class TTSAudioPlayer {
         this.elements.statusContainer.style.display = 'block';
 
         try {
-            const response = await fetch(`/api/retry/${bookId}?force_rebuild=${fullRebuild}`, {
+            const response = await fetch(`/api/v1/audiobooks/${bookId}/retry?force_rebuild=${fullRebuild}`, {
                 method: 'POST'
             });
 
@@ -4197,7 +4765,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     try {
         // Initialize player with wavesurfer backend
-        await window.player.init(null, {backend: 'wavesurfer'});
+        await window.player.init(null, {backend: 'native'});
         console.log('=== TTSAudioPlayer Ready ===');
     } catch (error) {
         console.error('=== TTSAudioPlayer Initialization Failed ===');

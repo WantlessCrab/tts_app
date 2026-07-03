@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import os
 from pathlib import Path
+
 os.environ.setdefault(
     "TESSDATA_PREFIX",
     str(Path(__file__).parent)
@@ -1096,7 +1097,6 @@ _HEADING_FONT_WEIGHT_CONDITIONAL_HINTS: frozenset[str] = frozenset({
     "medium",
 })
 
-
 # 2. Keyword prefixes (e.g., "Section 1", "Chapter 2")
 _HEADING_KEYWORD_PREFIX_PATTERN: re.Pattern[str] = re.compile(
     r'^(?:Section|Chapter|Article|Part|Appendix)\s+\d+',
@@ -1759,7 +1759,7 @@ _STRUCTURAL_EXCLUSION_OUTLIER_REASONS: frozenset[str] = frozenset({
 _RONC_V2_PROTECTION_VETO_REASONS = _STRUCTURAL_EXCLUSION_REASONS
 
 # Protection reasons (for audit trail)
-_RONC_V2_PROTECTION_ANCHOR: str = "anchor" # Has outgoing link
+_RONC_V2_PROTECTION_ANCHOR: str = "anchor"  # Has outgoing link
 _RONC_V2_PROTECTION_CONTINUATION: str = "continuation"  # Has incoming link
 _RONC_V2_PROTECTION_MUTUAL: str = "mutual_link"  # Bidirectional link
 
@@ -1810,7 +1810,7 @@ _TTS_HARD_GATE_SHORT_WORD_ALLOWED_ROLES: tuple[str, ...] = (
 _RONC_V2_EXPANDED_CANDIDATE_DISTANCE: int = 30  # 2x base
 
 # Boundary score thresholds to trigger expansion
-_RONC_V2_EXPANSION_THRESHOLD_START: float = 0.30 # needs_predecessor trigger
+_RONC_V2_EXPANSION_THRESHOLD_START: float = 0.30  # needs_predecessor trigger
 _RONC_V2_EXPANSION_THRESHOLD_END: float = 0.25  # needs_successor trigger
 
 # Pool size thresholds
@@ -1820,7 +1820,7 @@ _RONC_V2_EXPANSION_QUALITY_DISTANCE: int = 3  # Stop early if we find candidate 
 
 # Effective distance shaping factors
 _RONC_V2_BLOCK_ADJACENT_EFFECTIVE_DISTANCE: int = 1  # Same block, adjacent line → near-adjacent
-_RONC_V2_CROSS_COLUMN_DISTANCE_REDUCTION: int = 2 # Cross-column wrap softening
+_RONC_V2_CROSS_COLUMN_DISTANCE_REDUCTION: int = 2  # Cross-column wrap softening
 _RONC_V2_BLOCK_EDGE_DISTANCE_REDUCTION: int = 3  # Block-edge pair bonus
 
 # Phase 3 scoring adjustments (refinement layer)
@@ -1923,7 +1923,6 @@ _RONC_V2_WINDOW_POS_NEXT_HEAD: str = "next_head"
 _RONC_V2_MODE_STRICT: str = "strict"
 _RONC_V2_MODE_EXPANDED: str = "expanded"
 
-
 # After _RONC_V2_SCORE_A2_PARTIAL_BONUS (or _RONC_V2_MAX_CONFIDENCE):
 _RONC_V2_HIGH_CONFIDENCE_THRESHOLD: float = 0.70
 
@@ -1990,7 +1989,7 @@ _TTS_PROSODIC_CLAUSE_PATTERNS: Tuple[re.Pattern, ...] = (
     re.compile(
         r",\s+(because|since|although|unless|whereas|while|if)\s+",
         re.IGNORECASE
-    ),    # Priority 2: Discourse markers
+    ),  # Priority 2: Discourse markers
     re.compile(r",\s+(however|therefore|moreover|nevertheless|in contrast|by contrast)\s+",
                re.IGNORECASE),
     # Priority 3: Participial/state verb phrases (common in academic text)
@@ -1999,6 +1998,7 @@ _TTS_PROSODIC_CLAUSE_PATTERNS: Tuple[re.Pattern, ...] = (
     # Priority 4: Conjunctions (weakest - use only as fallback)
     re.compile(r",\s+(and|or|but)\s+", re.IGNORECASE),
 )
+
 
 # ✦────────────────────✦────────────────────✦
 #                ✿   METHODS  ✿
@@ -2012,6 +2012,7 @@ def _contains_greek(text: str) -> bool:
     if not text:
         return False
     return any('\u0370' <= ch <= '\u03FF' for ch in text)
+
 
 # ✦                  ✦                  ✦                  ✦
 # ✦──────── 1 RONC v2.0 — Contract-Maker Architecture ───────✦
@@ -2371,7 +2372,6 @@ def _ronc_v2_extract_column_from_stream(layout_stream: str) -> Optional[int]:
     return None
 
 
-
 def _ronc_v2_is_candidate_eligible(
         span: Dict,
         exclude_excluded: bool = False,  # CHANGED: Safe default for MVP
@@ -2424,7 +2424,6 @@ def _ronc_v2_is_candidate_eligible(
         return False
 
     return True
-
 
 
 def _ronc_v2_is_block_edge_pair(
@@ -2521,7 +2520,8 @@ def _ronc_v2_compute_effective_distance(
 
         if curr_col is not None and cand_col is not None and curr_col != cand_col:
             # Cross-column: soften distance
-            eff = max(_RONC_V2_MIN_CROSS_COLUMN_DISTANCE, eff - _RONC_V2_CROSS_COLUMN_DISTANCE_REDUCTION)
+            eff = max(_RONC_V2_MIN_CROSS_COLUMN_DISTANCE,
+                      eff - _RONC_V2_CROSS_COLUMN_DISTANCE_REDUCTION)
             hints.append(_RONC_V2_HINT_CROSS_COLUMN)
 
     # ─────────────────────────────────────────────────────────────────
@@ -2545,7 +2545,8 @@ def _ronc_v2_compute_effective_distance(
         else:
             # Candidate is later → check current.end → candidate.start
             if _ronc_v2_is_block_edge_pair(current_span, candidate_span):
-                eff = max(_RONC_V2_MIN_EFFECTIVE_DISTANCE, eff - _RONC_V2_BLOCK_EDGE_DISTANCE_REDUCTION)
+                eff = max(_RONC_V2_MIN_EFFECTIVE_DISTANCE,
+                          eff - _RONC_V2_BLOCK_EDGE_DISTANCE_REDUCTION)
                 hints.append(_RONC_V2_HINT_BLOCK_EDGE)
     # ─────────────────────────────────────────────────────────────────
     # Compute distance_bias: fine-grained additive score adjustment
@@ -2803,7 +2804,7 @@ def _ronc_v2_build_candidate_pools(
             # OR we've accumulated enough to ensure scoring has options
             if any(e.get("distance", 999) <= _RONC_V2_EXPANSION_QUALITY_DISTANCE for e in
                    next_pool):
-                break # Quality threshold met
+                break  # Quality threshold met
             if len(next_pool) >= _RONC_V2_MIN_POOL_EXPANDED:
                 break  # Fallback: pool size limit
 
@@ -4536,7 +4537,6 @@ def _ronc_v2_score_and_rank_candidates(
                 trace_id=trace_id,
             )
 
-
             # Combine with weights
             final_score = (
                     (semantic_score * _RONC_V2_WEIGHT_SEMANTIC_FLOW) +
@@ -5396,11 +5396,11 @@ def _translate_exclusion_flags(
 
                     if trace_id:
                         span_text = (
-                                            sp.get("cleaned_text")
-                                            or sp.get("text")
-                                            or sp.get("raw_text")
-                                            or ""
-                                    )[:40]
+                                sp.get("cleaned_text")
+                                or sp.get("text")
+                                or sp.get("raw_text")
+                                or ""
+                        )[:40]
                         logger.debug(
                             "[%s] RONC v2.0: Contract protection applied: '%s...' reason=%s",
                             trace_id, span_text, protection.get('reason')
@@ -6482,7 +6482,7 @@ def _detect_columns(
                     elif cx > midpoint:
                         right_blocks.add(bid)
 
-                # FUZZY VETO (P0 FIX):
+                # FUZZY VETO:
                 # Allow a boundary even if a small number of blocks cross it (e.g., Titles),
                 # provided the vast majority of body spans respect the split.
                 overlapping_blocks = left_blocks & right_blocks
@@ -7412,13 +7412,13 @@ def _flatten_to_raw_spans(
                             max_indent = max(12.0, fs * 3.5)
 
                             geom_within_tolerance = (v_gap <= max_v_gap) and (
-                                        indent_dx <= max_indent)
+                                    indent_dx <= max_indent)
 
                             if sentence_is_unfinished:
                                 lenient_v_gap = max_v_gap * 2.0
                                 lenient_indent = max_indent * 2.0
                                 geom_lenient = (v_gap <= lenient_v_gap) and (
-                                            indent_dx <= lenient_indent)
+                                        indent_dx <= lenient_indent)
                                 allow_geom = geom_within_tolerance or geom_lenient
                             else:
                                 allow_geom = geom_within_tolerance
@@ -11193,7 +11193,7 @@ def _build_sliding_window_spans(
     Build a sliding window of spans for cross-page aware segmentation.
         - Uses PRE-PASS cached spans to ensure all spans have identical viability
     processing
-        - Window is LOSSLESS. Sidebar/margin spans are  tagged with _stage1_nonviable_hint=True and 
+        - Window is LOSSLESS. Sidebar/margin spans are  tagged with _stage1_nonviable_hint=True and
     included.
     Window structure:
     - Last N spans from previous page (deep copied, tagged)
@@ -12081,6 +12081,7 @@ def _associate_captions_to_figures(
                     best_dist if best_dist != float("inf") else -1,
                     max_caption_distance
                 )
+
 
 # ✦                  ✦                  ✦                  ✦
 # ✦───────────── 3 Table & Structure Logic ─────────────✦
@@ -13141,8 +13142,6 @@ def _stitch_helper_merge(curr: Dict, next_sent: Dict) -> Dict:
         if roles:
             merged["_contaminated_roles"] = sorted(roles)
 
-
-
     # ─────────────────────────────────────────────────────────────────────────
     # RONC v2.0: Preserve lineage for stitched sentences
     # ─────────────────────────────────────────────────────────────────────────
@@ -13517,7 +13516,8 @@ def _stitch_helper_should_merge(
         geom_adjacent = False
         if prev_bbox and next_bbox and len(prev_bbox) >= 4 and len(next_bbox) >= 4:
             v_gap = next_bbox[1] - prev_bbox[3]  # next_y0 - prev_y1
-            fs = float(prev.get("font_size") or 10.0)  # sentence may not carry font_size; default ok
+            fs = float(
+                prev.get("font_size") or 10.0)  # sentence may not carry font_size; default ok
             # Allow gap up to ~3–4 lines (generous to account for header/footer removal)
             geom_adjacent = v_gap <= (fs * 4.0)
 
@@ -13982,10 +13982,10 @@ def _resolve_semantic_continuity(
             ):
                 _set(span, _SEM_DISP_EXCLUDED, ["global_band_match"], 0.95)
             elif {
-                     "noise_punctuation",
-                     "noise_digit_only",
-                     "noise_single_char",
-                 } & candidate_reasons:
+                "noise_punctuation",
+                "noise_digit_only",
+                "noise_single_char",
+            } & candidate_reasons:
                 # ─────────────────────────────────────────────────────────
                 # PHASE C: Structural section number rescue
                 # Digit-only spans that chain (a2) to a heading-role span
@@ -14246,23 +14246,23 @@ def _resolve_semantic_continuity(
                                              & _STRUCTURAL_EXCLUSION_REASONS)):
                                 has_a2_body_anchor = True
             rescue_as_body = (
-                is_body_stream and
-                not is_boilerplate and
-                (
-                    (has_a2_body_anchor and not is_true_label_like) or
+                    is_body_stream and
+                    not is_boilerplate and
                     (
-                        not is_true_label_like and
-                        not (is_diagram_heavy_block and word_count <= 3
-                             and not is_glue_word_rescue) and
-                        (
-                            body_like or
-                            is_short_continuation or
-                            is_glue_word_rescue or
-                            (prev_incomplete and this_lower) or
-                            (this_lower and next_lower)
-                        )
+                            (has_a2_body_anchor and not is_true_label_like) or
+                            (
+                                    not is_true_label_like and
+                                    not (is_diagram_heavy_block and word_count <= 3
+                                         and not is_glue_word_rescue) and
+                                    (
+                                            body_like or
+                                            is_short_continuation or
+                                            is_glue_word_rescue or
+                                            (prev_incomplete and this_lower) or
+                                            (this_lower and next_lower)
+                                    )
+                            )
                     )
-                )
             )
 
             if rescue_as_body:
@@ -14294,7 +14294,7 @@ def _resolve_semantic_continuity(
                 # must be preserved for document navigation.
                 # ─────────────────────────────────────────────────────────────────
             elif cur_span.get("role") in ("heading",
-                                              "subheading"):
+                                          "subheading"):
                 _set(cur_span, _SEM_DISP_INCLUDED, ["heading_protection:structural_content"], 0.95)
 
             # HARD EXCLUSION: keep figure_label absolute, but allow diagram_label only if not rescued
@@ -14459,7 +14459,6 @@ def _reconstruct_text_for_segmentation(
     chain_protection_overrides = 0  # RONC v2.1: spans rescued from _tts_excluded
     boundary_contract_welds = 0  # RONC v2.1: truncated→continuation joins
 
-    
     for orig_idx, span in sorted_spans:
         # X-RAY DEBUGGER
         cid = span.get("_canonical_span_id")
@@ -14669,7 +14668,6 @@ def _reconstruct_text_for_segmentation(
             ):
                 prefix = ""
                 boundary_contract_welds += 1
-
 
         # PRIORITY 1: Column break
         if prefix is None and prev_column is not None and curr_column != prev_column and curr_page == prev_page:
@@ -15225,7 +15223,7 @@ def _heal_truncated_sentences(
                     if next_complete and not (curr_ronc_units & next_ronc_units):
                         break
 
-                # Existing RONC intersection logic (unchanged)
+                # Existing RONC intersection logic
                 if curr_ronc_units & next_ronc_units:
                     # ─────────────────────────────────────────────────────────
                     # CRITICAL FIX v3.1: Sacred Period Guard
@@ -16272,7 +16270,7 @@ def _prepare_sentence_for_serialization(sentence: Dict) -> Dict:
     output = dict(sentence)
 
     # Strip runtime-only fields (underscore prefix = internal)
-    
+
     # [FIX v8.0] DECOUPLE DISPLAY vs SPOKEN TEXT
     # 1. Capture Human-Readable Text (Visual)
     #    Preserve original punctuation (;) and restore scientific notation (mm²)
@@ -16541,10 +16539,8 @@ def _find_actual_end_position(full_text: str, start: int, normalized_target: str
             # Non-match, non-ignorable: advance full_text (do NOT consume target)
             text_idx += 1
 
-        # Guard: if we failed to match within bounded scan, stop to prevent drift
-        # TODO (Batch B): Return bounded_resync flag to caller for alignment_risk tagging
-        # Currently returns text_idx without indicating resync occurred.
-        # Phase 6 requirement: sentence should receive alignment_risk="bounded_resync"
+        # Guard: if bounded resynchronization cannot match the target character,
+        # stop at the current text position to prevent alignment drift.
         if scan_count >= max_scan:
             break
 
@@ -17386,6 +17382,7 @@ def _apply_global_band_signals(
             "[%s] Global band signals applied: flagged=%d kept_by_shield=%d total=%d",
             trace_id, flagged_band_matches, kept_band_matches, len(classified_spans)
         )
+
 
 # Wrapper for process.py
 def refine_roles_across_document(
@@ -18596,6 +18593,7 @@ def _passes_narration_gate(sp: Dict) -> bool:
             return False
 
     return True
+
 
 def _finalize_chunk(
         all_chunks: List[Dict],
@@ -19935,8 +19933,8 @@ def compile_tts_ready_content(
             end_idx = sent.get("span_end_index", start_idx)
 
             source_spans = window_spans_for_text[
-                           start_idx: min(end_idx + 1, len(window_spans_for_text))
-                           ]
+                start_idx: min(end_idx + 1, len(window_spans_for_text))
+            ]
 
             _inject_sentence_semantic_projection(sent, source_spans)
 

@@ -8,495 +8,512 @@
     <script src="/static/event-emitter.js"></script>
     <script src="/static/audio-backend.js"></script>
     <script src="/static/native-audio-backend.js"></script>
-
-    <script src="https://unpkg.com/wavesurfer.js@7"></script>
+    <script src="/static/local-dependencies.js"></script>
     <script src="/static/wavesurfer-backend.js"></script>
-
-    <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
-    <script>
-        // Configure PDF.js worker (CRITICAL)
-        if (typeof pdfjsLib !== 'undefined') {
-            pdfjsLib.GlobalWorkerOptions.workerSrc =
-                'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
-        } else {
-            console.error('PDF.js library failed to load from unpkg');
-        }
-    </script>
-
     <script src="/static/player.js"></script>
-<style>
-    /* --- Base Styles --- */
-    body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: linear-gradient(135deg, #ffeaa7 0%, #dfe6e9 100%);
-    padding: 20px;
-    margin: 0;
-    min-height: 100vh;
-    }
+    <style>
+		/* --- Base Styles --- */
+		body {
+			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+			background: linear-gradient(135deg, #ffeaa7 0%, #dfe6e9 100%);
+			padding: 20px;
+			margin: 0;
+			min-height: 100vh;
+		}
 
-    .container {
-    max-width: 1200px;
-    margin: 0 auto;
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 20px;
-    padding: 30px;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-    }
+		.container {
+			max-width: 1200px;
+			margin: 0 auto;
+			background: rgba(255, 255, 255, 0.95);
+			border-radius: 20px;
+			padding: 30px;
+			box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+		}
 
-    h1 {
-    color: #74b9ff;
-    text-align: center;
-    margin-bottom: 30px;
-    font-weight: 300;
-    }
+		h1 {
+			color: #74b9ff;
+			text-align: center;
+			margin-bottom: 30px;
+			font-weight: 300;
+		}
 
-    .player-section {
-    background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
-    padding: 20px;
-    border-radius: 15px;
-    margin-bottom: 20px;
-    }
+		.player-section {
+			background: linear-gradient(135deg, #a8e6cf 0%, #dcedc1 100%);
+			padding: 20px;
+			border-radius: 15px;
+			margin-bottom: 20px;
+		}
 
-    .control-group {
-    background: rgba(255, 255, 255, 0.7);
-    padding: 15px;
-    border-radius: 10px;
-    }
+		.control-group {
+			background: rgba(255, 255, 255, 0.7);
+			padding: 15px;
+			border-radius: 10px;
+		}
 
-    label {
-    display: block;
-    color: #6c5ce7;
-    margin-bottom: 5px;
-    font-size: 14px;
-    }
+		label {
+			display: block;
+			color: #6c5ce7;
+			margin-bottom: 5px;
+			font-size: 14px;
+		}
 
-    input[type="range"] {
-    width: 100%;
-    height: 6px;
-    border-radius: 3px;
-    background: #ffd3e1;
-    outline: none;
-    -webkit-appearance: none;
-    }
+		input[type="range"] {
+			width: 100%;
+			height: 6px;
+			border-radius: 3px;
+			background: #ffd3e1;
+			outline: none;
+			-webkit-appearance: none;
+		}
 
-    input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #74b9ff;
-    cursor: pointer;
-    }
+		input[type="range"]::-webkit-slider-thumb {
+			-webkit-appearance: none;
+			appearance: none;
+			width: 18px;
+			height: 18px;
+			border-radius: 50%;
+			background: #74b9ff;
+			cursor: pointer;
+		}
 
-    button {
-    background: linear-gradient(135deg, #ffd3e1 0%, #ffb6c1 100%);
-    border: none;
-    padding: 10px 20px;
-    border-radius: 25px;
-    color: #6c5ce7;
-    cursor: pointer;
-    font-size: 14px;
-    transition: transform 0.2s;
-    }
+		button {
+			background: linear-gradient(135deg, #ffd3e1 0%, #ffb6c1 100%);
+			border: none;
+			padding: 10px 20px;
+			border-radius: 25px;
+			color: #6c5ce7;
+			cursor: pointer;
+			font-size: 14px;
+			transition: transform 0.2s;
+		}
 
-    button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
-    }
+		button:hover {
+			transform: translateY(-2px);
+			box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+		}
 
-    .file-list {
-    background: #f0f3ff;
-    padding: 20px;
-    border-radius: 15px;
-    max-height: 300px;
-    overflow-y: auto;
-    }
+		.file-list {
+			background: #f0f3ff;
+			padding: 20px;
+			border-radius: 15px;
+			max-height: 300px;
+			overflow-y: auto;
+		}
 
-    .file-item {
-    background: white;
-    padding: 12px;
-    margin: 8px 0;
-    border-radius: 8px;
-    cursor: pointer;
-    display: flex;
-    justify-content: space-between;
-    transition: background 0.2s;
-    }
+		.file-item {
+			background: white;
+			padding: 12px;
+			margin: 8px 0;
+			border-radius: 8px;
+			cursor: pointer;
+			display: flex;
+			justify-content: space-between;
+			transition: background 0.2s;
+		}
 
-    .file-item:hover {
-    background: #dfe6e9;
-    }
+		.file-item:hover {
+			background: #dfe6e9;
+		}
 
-    .file-item.active {
-    background: #a8e6cf;
-    color: #2d3436;
-    }
+		.file-item.active {
+			background: #a8e6cf;
+			color: #2d3436;
+		}
 
-    .value-display {
-    color: #00b894;
-    font-weight: bold;
-    }
+		.value-display {
+			color: #00b894;
+			font-weight: bold;
+		}
 
-    #now-playing {
-    text-align: center;
-    color: #74b9ff;
-    margin-bottom: 10px;
-    }
+		#now-playing {
+			text-align: center;
+			color: #74b9ff;
+			margin-bottom: 10px;
+		}
 
-    /* ========================================
-    AUDIO PLAYER COMPONENT (Integrated Layout)
-    ======================================== */
-    #audio-player-component {
-    background: #2a2a2a;
-    border-radius: 8px;
-    padding: 20px;
-    margin: 20px 0;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    color: #e0e0e0;
-    display: flex;
-    flex-direction: column;
-    gap: 15px;
-    }
+		/* ========================================
+        AUDIO PLAYER COMPONENT (Integrated Layout)
+        ======================================== */
+		#audio-player-component {
+			background: #2a2a2a;
+			border-radius: 8px;
+			padding: 20px;
+			margin: 20px 0;
+			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+			color: #e0e0e0;
+			display: flex;
+			flex-direction: column;
+			gap: 15px;
+		}
 
-    /* ══════════════════════════════════════════════════════════
-   PLAYER BAR - 2-Row Grid Layout
-   Row 1: Play | Seek Slider (with time label below)
-   Row 2: Volume | Speed | Skip Buttons | Loop
-   ══════════════════════════════════════════════════════════ */
-
-    #player-bar {
-	    display: grid;
-	    grid-template-columns: auto 1fr; /* Row 1 */
-	    grid-template-rows: auto auto;
-	    gap: 12px 15px;
-	    padding: 15px;
-	    align-items: center;
-    }
-
-    /* ─────────────────────────────────────────────────────────
-       ROW 1: Play Button + Seek
-       ───────────────────────────────────────────────────────── */
-
-    #play-pause-button {
-	    grid-column: 1;
-	    grid-row: 1;
-	    width: 50px;
-	    height: 50px;
-	    border-radius: 50%;
-	    font-size: 16px;
-	    padding: 0;
-	    background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
-	    color: white;
-	    border: none;
-	    cursor: pointer;
-    }
-
-    #seek-control {
-	    grid-column: 2;
-	    grid-row: 1;
-    }
-
-    /* ─────────────────────────────────────────────────────────
-       ROW 2: Volume | Speed | Skip Buttons | Loop
-       ───────────────────────────────────────────────────────── */
-
-    #volume-control {
-	    grid-column: 1;
-	    grid-row: 2;
-	    justify-self: start;
-    }
-
-    #speed-control {
-	    grid-column: 2;
-	    grid-row: 2;
-	    justify-self: start;
-	    max-width: 150px;
-    }
-
-    #skip-control {
-	    grid-column: 2;
-	    grid-row: 2;
-	    justify-self: center;
-	    display: flex;
-	    flex-direction: column;
-	    align-items: center;
-	    gap: 4px;
-    }
-
-    #loop-button {
-	    grid-column: 2;
-	    grid-row: 2;
-	    justify-self: end;
-    }
-
-    /* ─────────────────────────────────────────────────────────
-       SLIDER CONTROL - Consistent Format
-       Slider on top, label/value underneath
-       ───────────────────────────────────────────────────────── */
-
-    .slider-control {
-	    display: flex;
-	    flex-direction: column;
-	    gap: 4px;
-    }
-
-    .slider-control input[type="range"] {
-	    width: 100%;
-	    height: 6px;
-	    border-radius: 3px;
-	    background: #4a4a4a;
-	    outline: none;
-	    -webkit-appearance: none;
-    }
-
-    .slider-control input[type="range"]::-webkit-slider-thumb {
-	    -webkit-appearance: none;
-	    width: 14px;
-	    height: 14px;
-	    border-radius: 50%;
-	    background: #74b9ff;
-	    cursor: pointer;
-    }
-
-    .control-value {
-	    font-size: 12px;
-	    color: #a0a0a0;
-	    text-align: center;
-    }
-
-    .control-value span {
-	    color: #00b894;
-	    font-weight: bold;
-    }
-
-    /* ─────────────────────────────────────────────────────────
-   SKIP CONTROL - Customizable Jump Duration
-   ───────────────────────────────────────────────────────── */
-    #skip-control {
-	    display: flex;
-	    flex-direction: column;
-	    align-items: center;
-	    gap: 6px;
-    }
-
-    #skip-buttons {
-	    display: flex;
-	    gap: 12px;
-    }
-
-    #skip-buttons button {
-	    width: 40px;
-	    height: 40px;
-	    border-radius: 50%;
-	    background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
-	    color: #ff69b4;
-	    border: none;
-	    font-size: 16px;
-	    cursor: pointer;
-	    transition: all 0.2s;
-    }
-
-    #skip-buttons button:hover {
-	    background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
-	    transform: scale(1.1);
-    }
-
-    #skip-buttons button:active {
-	    transform: scale(0.95);
-    }
-
-    #skip-amount {
-	    width: 120px;
-    }
-
-    #skip-value {
-	    color: #00b894;
-	    font-weight: bold;
-    }
-
-    /* ─────────────────────────────────────────────────────────
-   SECONDARY CONTROLS - Bottom Row
-   ───────────────────────────────────────────────────────── */
-    #secondary-controls {
-	    display: flex;
-	    gap: 15px;
-	    justify-content: center;
-	    align-items: center;
-	    padding-top: 10px;
-	    flex-wrap: wrap;
-    }
-
-    #secondary-controls > button {
-	    background: #4a4a4a;
-	    color: #ff69b4;
-	    padding: 8px 15px;
-    }
-
-
-    /* PDF VIEWER - Replaces Waveform Position */
-    #pdf-viewer-container {
-	    position: relative;
-	    background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
-	    border: 2px solid #3a3a3a;
-	    border-radius: 8px;
-	    padding: 20px; /* ✅ FIX 1: Changed from 0 to 20px (moves spacing to parent) */
-	    display: none;
-	    justify-content: center;
-	    align-items: center;
-	    min-height: 450px;
-	    max-height: 70vh;
-	    overflow: auto;
-    }
-
-    /* 1.2 FIX: Add margin to the canvas for visual spacing */
-    #pdf-canvas {
-	    max-width: 100%;
-	    height: auto;
-	    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-	    background: white;
-	    border-radius: 4px;
-	    display: none;
-	    margin: 0 auto; /* ✅ FIX 1: Changed from 20px auto to 0 auto (removes offset) */
-    }
-
-    #pdf-page-controls {
-    display: none;
-    justify-content: space-between;
-    align-items: center;
-    gap: 15px;
-    padding: 10px 15px;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
-    }
-
-    #pdf-page-controls button {
-    color: #ff69b4;
-    }
-
-    .pdf-control-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    }
-
-    #page-jump-input {
-    width: 60px;
-    padding: 6px;
-    border: 1px solid #5a5a5a;
-    border-radius: 4px;
-    background: #3a3a3a;
-    color: #e0e0e0;
-    text-align: center;
-    font-size: 13px;
-    }
-
-    #page-jump-input:focus {
-    outline: none;
-    border-color: #74b9ff;
-    }
-
-    #zoom-level {
-    color: #a0a0a0;
-    font-size: 13px;
-    font-weight: 600;
-    min-width: 50px;
-    text-align: center;
-    }
-
-    #zoom-in-button,
-    #zoom-out-button,
-    #zoom-reset-button {
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    font-size: 18px;
-    line-height: 1;
-    color: #ff69b4;
-    background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
-    }
-
-    #click-seek-toggle {
-    font-size: 12px;
-    padding: 6px 12px;
-    color: #ff69b4;
-    }
-
-    #click-seek-toggle:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-    }
-
-    #page-indicator {
-    color: #a0a0a0;
-    font-size: 14px;
-    font-weight: 600;
-    min-width: 120px;
-    text-align: center;
-    }
-
-
-    #prev-page-button,
-    #next-page-button {
-    background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
-    color: #ff69b4;
-    border: none;
-    padding: 8px 16px;
-    border-radius: 20px;
-    cursor: pointer;
-    font-size: 13px;
-    transition: all 0.2s;
-    }
-
-    #prev-page-button:hover,
-    #next-page-button:hover {
-    background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
-    transform: translateY(-1px);
-    }
-
-    #prev-page-button:disabled,
-    #next-page-button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-    transform: none;
-    }
-
-    /* Waveform - Hidden but present for wavesurfer backend */
-    #waveform {
-    visibility: hidden;
-    position: absolute;
-    width: 1px; /* Must have dimensions */
-    height: 1px; /* Must have dimensions */
-    overflow: hidden;
-    top: -9999px; /* Move off-screen */
-    left: -9999px;
-    }
-
-    /* ══════════════════════════════════════════════════════════
-       HIGHLIGHT CONTAINER & RECTANGLES
-       JS controls all visual properties via inline styles.
-       CSS provides only structural/positioning defaults.
+		/* ══════════════════════════════════════════════════════════
+       PLAYER BAR - 2-Row Grid Layout
+       Row 1: Play | Seek Slider (with time label below)
+       Row 2: Volume | Speed | Skip Buttons | Loop
        ══════════════════════════════════════════════════════════ */
 
-    #highlight-container {
-	    position: absolute;
-	    top: 0;
-	    left: 0;
-	    width: 100%;
-	    height: 100%;
-	    pointer-events: none;
-	    z-index: 10;
-    }
+		#player-bar {
+			display: grid;
+			grid-template-columns: auto 1fr; /* Row 1 */
+			grid-template-rows: auto auto;
+			gap: 12px 15px;
+			padding: 15px;
+			align-items: center;
+		}
 
-    #pdf-canvas.seek-enabled {
-    cursor: pointer !important;
-    }
+		/* ─────────────────────────────────────────────────────────
+           ROW 1: Play Button + Seek
+           ───────────────────────────────────────────────────────── */
 
-    #click-seek-toggle.active {
-    background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
-    color: white;
-    font-weight: bold;
-    }
+		#play-pause-button {
+			grid-column: 1;
+			grid-row: 1;
+			width: 50px;
+			height: 50px;
+			border-radius: 50%;
+			font-size: 16px;
+			padding: 0;
+			background: linear-gradient(135deg, #74b9ff 0%, #6c5ce7 100%);
+			color: white;
+			border: none;
+			cursor: pointer;
+		}
+
+		#seek-control {
+			grid-column: 2;
+			grid-row: 1;
+		}
+
+		/* ─────────────────────────────────────────────────────────
+           ROW 2: Volume | Speed | Skip Buttons | Loop
+           ───────────────────────────────────────────────────────── */
+
+		#volume-control {
+			grid-column: 1;
+			grid-row: 2;
+			justify-self: start;
+		}
+
+		#speed-control {
+			grid-column: 2;
+			grid-row: 2;
+			justify-self: start;
+			max-width: 150px;
+		}
+
+		#skip-control {
+			grid-column: 2;
+			grid-row: 2;
+			justify-self: center;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: 4px;
+		}
+
+		#loop-button {
+			grid-column: 2;
+			grid-row: 2;
+			justify-self: end;
+		}
+
+		/* ─────────────────────────────────────────────────────────
+           SLIDER CONTROL - Consistent Format
+           Slider on top, label/value underneath
+           ───────────────────────────────────────────────────────── */
+
+		.slider-control {
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+		}
+
+		.slider-control input[type="range"] {
+			width: 100%;
+			height: 6px;
+			border-radius: 3px;
+			background: #4a4a4a;
+			outline: none;
+			-webkit-appearance: none;
+		}
+
+		.slider-control input[type="range"]::-webkit-slider-thumb {
+			-webkit-appearance: none;
+			width: 14px;
+			height: 14px;
+			border-radius: 50%;
+			background: #74b9ff;
+			cursor: pointer;
+		}
+
+		.control-value {
+			font-size: 12px;
+			color: #a0a0a0;
+			text-align: center;
+		}
+
+		.control-value span {
+			color: #00b894;
+			font-weight: bold;
+		}
+
+		/* ─────────────────────────────────────────────────────────
+       SKIP CONTROL - Customizable Jump Duration
+       ───────────────────────────────────────────────────────── */
+		#skip-control {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: 6px;
+		}
+
+		#skip-buttons {
+			display: flex;
+			gap: 12px;
+		}
+
+		#skip-buttons button {
+			width: 40px;
+			height: 40px;
+			border-radius: 50%;
+			background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
+			color: #ff69b4;
+			border: none;
+			font-size: 16px;
+			cursor: pointer;
+			transition: all 0.2s;
+		}
+
+		#skip-buttons button:hover {
+			background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
+			transform: scale(1.1);
+		}
+
+		#skip-buttons button:active {
+			transform: scale(0.95);
+		}
+
+		#skip-amount {
+			width: 120px;
+		}
+
+		#skip-value {
+			color: #00b894;
+			font-weight: bold;
+		}
+
+		/* ─────────────────────────────────────────────────────────
+       SECONDARY CONTROLS - Bottom Row
+       ───────────────────────────────────────────────────────── */
+		#secondary-controls {
+			display: flex;
+			gap: 15px;
+			justify-content: center;
+			align-items: center;
+			padding-top: 10px;
+			flex-wrap: wrap;
+		}
+
+		#secondary-controls > button {
+			background: #4a4a4a;
+			color: #ff69b4;
+			padding: 8px 15px;
+		}
+
+
+		/* PDF VIEWER - Replaces Waveform Position */
+		#pdf-viewer-container {
+			position: relative;
+			background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
+			border: 2px solid #3a3a3a;
+			border-radius: 8px;
+			padding: 20px; /* ✅ FIX 1: Changed from 0 to 20px (moves spacing to parent) */
+			display: none;
+			justify-content: center;
+			align-items: center;
+			min-height: 450px;
+			max-height: 70vh;
+			overflow: auto;
+		}
+
+		/* 1.2 FIX: Add margin to the canvas for visual spacing */
+		#pdf-canvas {
+			max-width: 100%;
+			height: auto;
+			box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+			background: white;
+			border-radius: 4px;
+			display: none;
+			margin: 0 auto; /* ✅ FIX 1: Changed from 20px auto to 0 auto (removes offset) */
+		}
+
+		#pdf-page-controls {
+			display: none;
+			justify-content: space-between;
+			align-items: center;
+			gap: 15px;
+			padding: 10px 15px;
+			background: rgba(0, 0, 0, 0.2);
+			border-radius: 8px;
+		}
+
+		#pdf-page-controls button {
+			color: #ff69b4;
+		}
+
+		.pdf-control-group {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+
+		#page-jump-input {
+			width: 60px;
+			padding: 6px;
+			border: 1px solid #5a5a5a;
+			border-radius: 4px;
+			background: #3a3a3a;
+			color: #e0e0e0;
+			text-align: center;
+			font-size: 13px;
+		}
+
+		#page-jump-input:focus {
+			outline: none;
+			border-color: #74b9ff;
+		}
+
+		#zoom-level {
+			color: #a0a0a0;
+			font-size: 13px;
+			font-weight: 600;
+			min-width: 50px;
+			text-align: center;
+		}
+
+		#zoom-in-button,
+		#zoom-out-button,
+		#zoom-reset-button {
+			width: 32px;
+			height: 32px;
+			padding: 0;
+			font-size: 18px;
+			line-height: 1;
+			color: #ff69b4;
+			background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
+		}
+
+		#click-seek-toggle {
+			font-size: 12px;
+			padding: 6px 12px;
+			color: #ff69b4;
+		}
+
+		#click-seek-toggle:disabled {
+			opacity: 0.3;
+			cursor: not-allowed;
+		}
+
+		#page-indicator {
+			color: #a0a0a0;
+			font-size: 14px;
+			font-weight: 600;
+			min-width: 120px;
+			text-align: center;
+		}
+
+
+		#prev-page-button,
+		#next-page-button {
+			background: linear-gradient(135deg, #4a4a4a 0%, #5a5a5a 100%);
+			color: #ff69b4;
+			border: none;
+			padding: 8px 16px;
+			border-radius: 20px;
+			cursor: pointer;
+			font-size: 13px;
+			transition: all 0.2s;
+		}
+
+		#prev-page-button:hover,
+		#next-page-button:hover {
+			background: linear-gradient(135deg, #5a5a5a 0%, #6a6a6a 100%);
+			transform: translateY(-1px);
+		}
+
+		#prev-page-button:disabled,
+		#next-page-button:disabled {
+			opacity: 0.4;
+			cursor: not-allowed;
+			transform: none;
+		}
+
+		/* Waveform - Hidden but present for wavesurfer backend */
+		#waveform {
+			visibility: hidden;
+			position: absolute;
+			width: 1px; /* Must have dimensions */
+			height: 1px; /* Must have dimensions */
+			overflow: hidden;
+			top: -9999px; /* Move off-screen */
+			left: -9999px;
+		}
+
+		/* ══════════════════════════════════════════════════════════
+           HIGHLIGHT CONTAINER & RECTANGLES
+           JS controls all visual properties via inline styles.
+           CSS provides only structural/positioning defaults.
+           ══════════════════════════════════════════════════════════ */
+
+		#highlight-container {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			pointer-events: none;
+			z-index: 10;
+		}
+
+		#pdf-canvas.seek-enabled {
+			cursor: pointer !important;
+		}
+
+		#click-seek-toggle.active {
+			background: linear-gradient(135deg, #00c853 0%, #00e676 100%);
+			color: white;
+			font-weight: bold;
+		}
+
+		#status-container {
+			background: #fff8db;
+			border: 1px solid #ffe08a;
+			border-radius: 12px;
+			padding: 12px 16px;
+			margin-bottom: 16px;
+			color: #5f4600;
+		}
+
+		.status-message.error {
+			color: #b00020;
+			font-weight: 700;
+		}
+
+		.status-message.warning {
+			color: #8a5a00;
+			font-weight: 700;
+		}
+
+		.status-message.info {
+			color: #205375;
+			font-weight: 700;
+		}
+
+		.status-detail {
+			margin-top: 6px;
+			font-size: 13px;
+			color: #5f6368;
+		}
 
     </style>
 </head>
@@ -571,7 +588,7 @@
 
             <div id="secondary-controls">
                 <button id="reset-settings-button">Reset Settings</button>
-                <button id="download-button">Download File</button>
+                <button id="download-button">Download Current Audio</button>
             </div>
         </div>
 

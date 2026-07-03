@@ -1,35 +1,30 @@
 # my_app/convert/mime_utils.py
-"""
-Convert Service — MIME detection and format routing constants.
-"""
+"""Convert service MIME detection and format routing constants."""
+
+from __future__ import annotations
 
 import logging
-import magic
 
 logger = logging.getLogger("ConvertService")
 
-# ─────────────────────────────────────────────
-# Format Routing Maps
-# ─────────────────────────────────────────────
-
 OFFICE_MIMES = {
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # DOCX
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # PPTX
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # XLSX
-    "application/msword",  # DOC
-    "application/vnd.ms-powerpoint",  # PPT
-    "application/vnd.ms-excel",  # XLS
-    "application/vnd.oasis.opendocument.text",  # ODT
-    "application/vnd.oasis.opendocument.presentation",  # ODP
-    "application/vnd.oasis.opendocument.spreadsheet",  # ODS
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/msword",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.ms-excel",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.presentation",
+    "application/vnd.oasis.opendocument.spreadsheet",
     "application/rtf",
     "text/rtf",
 }
 
 EBOOK_MIMES = {
-    "application/epub+zip",  # EPUB
-    "application/x-mobipocket-ebook",  # MOBI
-    "application/vnd.amazon.ebook",  # AZW
+    "application/epub+zip",
+    "application/x-mobipocket-ebook",
+    "application/vnd.amazon.ebook",
 }
 
 OFFICE_EXTENSIONS = {
@@ -45,18 +40,17 @@ DOCX_MIMES = {
 }
 
 
-# ─────────────────────────────────────────────
-# MIME Detection
-# ─────────────────────────────────────────────
-
 def _detect_mime(raw: bytes) -> str:
-    """
-    Detect MIME type from raw file bytes using libmagic.
-    Authoritative over file extension — catches misnamed files.
-    Falls back to 'application/octet-stream' on failure.
-    """
+    """Detect MIME type from bytes, degrading safely when libmagic is unavailable."""
+    try:
+        import magic
+    except Exception as exc:
+        logger.warning("python-magic unavailable; MIME falls back to application/octet-stream: %s",
+                       exc)
+        return "application/octet-stream"
+
     try:
         return magic.from_buffer(raw, mime=True)
-    except Exception as e:
-        logger.warning(f"MIME detection failed: {e}")
+    except Exception as exc:
+        logger.warning("MIME detection failed: %s", exc)
         return "application/octet-stream"

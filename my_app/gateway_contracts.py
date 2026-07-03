@@ -6,8 +6,13 @@
 # No business logic. No imports from other gateway modules.
 # ════════════════════════════════════════════════════════════════════════════════
 
-from pydantic import BaseModel, AnyHttpUrl
-from typing import Optional
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from pydantic import AnyHttpUrl, BaseModel
+
+from .toolset_contracts import ArtifactRef, DocumentAsset, AudiobookJob
 
 
 # ─── INBOUND: client → gateway ───────────────────────────────────────────────
@@ -44,8 +49,19 @@ class ConvertRequest(BaseModel):
 class GatewayResult(BaseModel):
     """
     Response returned to client after ingestion routing begins.
+
+    book_id is the audiobook directory identifier used by player and audio routes.
+    document_id, job_id, audiobook_id, and artifact refs are the durable
+    lineage identities used by the canonical API surface.
     """
     book_id: str
     trace_id: str
     status: str
     source_filename: Optional[str] = None
+    document_id: Optional[str] = None
+    job_id: Optional[str] = None
+    audiobook_id: Optional[str] = None
+    canonical_pdf_artifact: Optional[ArtifactRef] = None
+    document_asset: Optional[DocumentAsset] = None
+    job: Optional[AudiobookJob] = None
+    source_provenance: Optional[dict[str, Any]] = None

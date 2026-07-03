@@ -53,7 +53,13 @@
     "/home/wantless/PycharmProjects/tts_app/.github",
     "/home/wantless/PycharmProjects/tts_app/scripts/C:",
     "/home/wantless/PycharmProjects/tts_app/.venv",
-    "/home/wantless/PycharmProjects/tts_app/.venv/bin"
+    "/home/wantless/PycharmProjects/tts_app/.venv/bin",
+    "/home/wantless/PycharmProjects/automation/recovery/archive",
+    "/home/wantless/PycharmProjects/automation/recovery/downloads",
+    "/home/wantless/PycharmProjects/automation/recovery/scratch",
+    "/home/wantless/PycharmProjects/automation/recovery/state",
+    "/home/wantless/PycharmProjects/automation/geacron/geacron_panel/runtime"
+
   ],
   "ignore_files": [
     "/home/wantless/PycharmProjects/tts_app/eng.traineddata",

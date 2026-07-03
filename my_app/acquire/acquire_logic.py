@@ -1,14 +1,14 @@
 # my_app/acquire/acquire_logic.py
-"""
-Acquire Service — Top-level orchestration, HTTP probe, and category routing.
-Phase 3 will implement _acquire_cat_a, _acquire_cat_b, _acquire_cat_e.
+"""Acquire service orchestration for direct-PDF URL retrieval.
+
+The active production capability is HTTP probing and validated direct PDF download.
+Non-direct-PDF URLs return a deterministic unsupported acquisition result.
 """
 
 import logging
 from typing import Optional
 
 from .utils import (
-    client,
     HTTP_PROBE_TIMEOUT,
     PDF_DOWNLOAD_TIMEOUT,
     PDF_RANGE_BYTES,
@@ -20,13 +20,13 @@ logger = logging.getLogger("AcquireService")
 
 
 # ─────────────────────────────────────────────
-# HTTP Probe — Step 0 (all categories)
+# HTTP direct-PDF probe
 # ─────────────────────────────────────────────
 
 async def _http_probe(url: str) -> tuple[Optional[bytes], str]:
     """
-    Attempt to retrieve a direct PDF via HTTP before spinning up any browser.
-    Used as Step 0 for all URL-based categories.
+    Attempt to retrieve a direct PDF via HTTP before classifying unsupported URL categories.
+    This service does not perform browser-mediated acquisition.
 
     Strategy:
       1. Initial GET request — inspect Content-Type header
@@ -61,9 +61,9 @@ async def _http_probe(url: str) -> tuple[Optional[bytes], str]:
                     return full.content, "probe_range"
 
     except httpx.TimeoutException:
-        logger.info(f"Probe: timeout for {url} — falling through to browser")
+        logger.info(f"Probe: timeout for {url} — direct PDF probe failed")
     except Exception as e:
-        logger.info(f"Probe: {url} — {e} — falling through to browser")
+        logger.info(f"Probe: {url} — {e} — direct PDF probe failed")
 
     return None, "probe_miss"
 
@@ -78,7 +78,7 @@ def _detect_category(url: str) -> str:
     Cat C is absorbed into Cat B (architecture rule).
 
     Returns: "A" | "B" | "E"
-    Default: "A" (safest — falls back gracefully)
+    Default: "A". Non-direct-PDF category handling returns unsupported.
     """
     url_lower = url.lower()
 
@@ -105,54 +105,48 @@ def _detect_category(url: str) -> str:
 
     return "A"
 
+
 # ─────────────────────────────────────────────
-# Browser Seam — frozen contract
+# Unsupported URL category handling
 # ─────────────────────────────────────────────
 
-async def _acquire_via_browser(
+async def _unsupported_non_direct_pdf(
         url: str,
-        context_type: str,
+        category: str,
         trace_id: Optional[str] = None,
 ) -> tuple[Optional[bytes], str]:
-    """
-    Single seam between acquisition logic and browser implementation.
-
-    Phase 3:
-        acquire_with_browser() uses Playwright.
-
-    local_browser era:
-        acquire_with_browser() calls browser_control HTTP API.
-
-    This function signature is frozen.
-    """
-    from .browser_handling import acquire_with_browser
-    return await acquire_with_browser(url, context_type, trace_id)
+    logger.info(
+        "Unsupported URL acquisition category=%s url=%s trace_id=%s",
+        category,
+        url,
+        trace_id,
+    )
+    return None, f"unsupported_non_direct_pdf_{category.lower()}"
 
 
 # ─────────────────────────────────────────────
-# Category Handlers — routed via browser seam
-# acquisition contexts always run isolated
+# Category Handlers
 # ─────────────────────────────────────────────
 
 async def _acquire_cat_a(
         url: str,
         trace_id: Optional[str] = None,
 ) -> tuple[Optional[bytes], str]:
-    """Cat A — Unlocked web content."""
-    return await _acquire_via_browser(url, "isolated", trace_id)
+    """Cat A — direct PDF probe miss; browser acquisition unsupported."""
+    return await _unsupported_non_direct_pdf(url, "A", trace_id)
 
 
 async def _acquire_cat_b(
         url: str,
         trace_id: Optional[str] = None,
 ) -> tuple[Optional[bytes], str]:
-    """Cat B — Paywalled / access-controlled content."""
-    return await _acquire_via_browser(url, "isolated", trace_id)
+    """Cat B — access-controlled URL; unsupported by production acquisition."""
+    return await _unsupported_non_direct_pdf(url, "B", trace_id)
 
 
 async def _acquire_cat_e(
         url: str,
         trace_id: Optional[str] = None,
 ) -> tuple[Optional[bytes], str]:
-    """Cat E — Social / login-walled content."""
-    return await _acquire_via_browser(url, "isolated", trace_id)
+    """Cat E — social/login-walled URL; unsupported by production acquisition."""
+    return await _unsupported_non_direct_pdf(url, "E", trace_id)

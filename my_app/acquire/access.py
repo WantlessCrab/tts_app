@@ -1,12 +1,8 @@
 # my_app/acquire/access.py
 """
-Acquire Service — CAPTCHA unlock ladder, camoufox, session manager.
-Phase 3 implementation.
+Acquire service access policy.
 
-Will contain:
-  _captcha_unlock_sequence()  — stealth retry → camoufox → session → archive → Googlebot
-  _browser_with_session()     — Playwright persistent context with stored domain session
-  _try_unpaywall()            — Unpaywall API open-access PDF lookup
-  _try_internet_archive()     — Wayback Machine snapshot lookup
-  _try_mirror_bypass()        — 12ft.io URL transform
+Production acquisition is limited to validated direct PDF retrieval from the
+supplied URL. Any source that requires interactive browser state or additional
+user-mediated access must be supplied as a user-uploaded file.
 """
